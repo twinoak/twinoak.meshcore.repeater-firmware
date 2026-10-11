@@ -1,0 +1,27 @@
+# The system specification, copied - never edited here.
+# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit b798aab043281fa4c9b17802a164fa94be12e206 plus uncommitted changes
+# written by spec/tools/specsync.py; README.md in this directory says how
+#
+# sha256                                                           bytes  name
+b2dc2deb3c9406a2486985f87e69cae08c3a22b0d3bd2df8ab0104a17e5b01e9     9065  FIRMWARE-MANIFEST.md
+816719365e2335cb950278cde03032cdb701c0cf580fdc65269e2243df42d467    27417  LINK-PROTOCOL.md
+01793604bae11cf299bc79c4146297a3d344c60d54423caff46b064b1b205c6e    16853  SYSTEM.md
+ad03e70fe6e6081641eab336397f16e37d6b41b2ff4dd6c2db29cd911d058776    35303  fixtures/link/link-v1.json
+46292a69beece337ec8fa3ca4716a9999cbba624474feeb3eff4e27bf2e1f2e6      322  fixtures/manifest/TEST-KEY.txt
+b4914b736b21cd93eb41459ffa0a67ea3f25712d42c46ddbec2316531bc5dccc     4096  fixtures/manifest/image-broken-descriptor.bin
+662a969ee40557c75cdb9dec10d91477a848282914cdae9a740f08d1a4372b0a     4096  fixtures/manifest/image-repeater.bin
+9cb7fdc8854e9621aac97a8687e2eb261f6d4354bce3f05fb2cae4409e751c32     4096  fixtures/manifest/image-two-descriptors.bin
+1cef268679395fac137e80df9b60a070b4bed6a11ebfa92593a43a9cf6203dee     4096  fixtures/manifest/image-walter-ota.bin
+1a60cfe84fd89a439bcef7db411e1942ceaaa64ac26335cebec22dd72a241f79     2840  fixtures/manifest/index.json
+366137448739acf96479eb42a659afbc467a678512a80e6b6bc2609a24f4cecf     1558  fixtures/manifest/manifest-repeater-tampered.json
+074964d4d21348f5486089c6e569c6837ddea3aeba05c12440fee76677bef39a      114  fixtures/manifest/manifest-repeater-unknown-key.json.sig
+206dc2e5f767c61a0667cc5d8098f6bbc25c3ca9f3bf61f3b47bdd63f00203d8     1558  fixtures/manifest/manifest-repeater.json
+003212a66c20e9d013045f4456a5a4400b8418340f8c5cf06f5bc33a76ae18b0      114  fixtures/manifest/manifest-repeater.json.sig
+37b7cde29ace738b59bb6992cb3f14c8c3d5302063df59958c541161a84ffd67     1042  fixtures/manifest/manifest-walter.json
+24e40bec8b87d772b6529ab87e6456ae22bbea84888ccb9fa38f89155643bc5c      114  fixtures/manifest/manifest-walter.json.sig
+7be87d8ddf323e5df53d6be70dfc017b9f6170ffa3002eab82c628e55d9b4fc7     5138  proposals/01-the-unit-in-meshmaster.md
+55c2afa005b8c3130f9fbb238fe9140bce2af94ee6ed5b31d8e833b970145821     5017  proposals/02-firmware-catalogue-and-updates.md
+cf39f2abd4344350df38615a935157d989b96cfd8a753bd83894f147ab6e5ee0     4680  proposals/03-agent-core-as-a-library.md
+0a5af80c6542fb5e8b24862a45d9be54de41e5f4f764eb876ae35ce374c79200    32344  tools/linkref.py
+674ab4207cc5ac4356b49cdbb23c34a38d7a2ae294d2e5daeabaff3b4b3bdf40    18814  tools/manifestref.py
+650b352a0fa6fae3b66bd5c168a3ad8c622d66fe04b053511a4590802ef5fb6f     4895  tools/specsync.py

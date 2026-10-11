@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "product": "twinoak-repeater-firmware",
+  "version": "0.3.0+abc1234",
+  "tag": "v0.3.0",
+  "commit": "abc1234000000000000000000000000000000000",
+  "built_at": "2026-10-12T08:00:00Z",
+  "link": {
+    "major": 1,
+    "minor": 0
+  },
+  "upstream": {
+    "name": "MeshCore",
+    "tag": "repeater-v1.17.1",
+    "commit": "d92964352441e53b93e8667b802e04f6e072b39e"
+  },
+  "images": [
+    {
+      "id": "repeater.rak4630-single.868",
+      "role": "repeater",
+      "board": "rak4630-single",
+      "band": "868",
+      "mcu": "nrf52840",
+      "app_region": {
+        "start": "0x00026000",
+        "end": "0x000D4000"
+      },
+      "requires": {
+        "walter": "0.3.0",
+        "link_major": 1
+      },
+      "files": [
+        {
+          "use": "swd",
+          "name": "twinoak-repeater-rak4630-single-868-v0.3.0.bin",
+          "format": "bin",
+          "size": 4096,
+          "sha256": "662a969ee40557c75cdb9dec10d91477a848282914cdae9a740f08d1a4372b0a",
+          "load_address": "0x00026000"
+        },
+        {
+          "use": "usb-dfu",
+          "name": "twinoak-repeater-rak4630-single-868-v0.3.0.zip",
+          "format": "zip",
+          "size": 2048,
+          "sha256": "4a5d072c18f2311b10e03776d97a77ef12da1fc922617aaaa1166d9de5acb501"
+        },
+        {
+          "use": "usb-uf2",
+          "name": "twinoak-repeater-rak4630-single-868-v0.3.0.uf2",
+          "format": "uf2",
+          "size": 8192,
+          "sha256": "7eafa43413daf1447d9e3d044c44528e194d72505195bfa83bdec795481b6155"
+        }
+      ]
+    }
+  ]
+}

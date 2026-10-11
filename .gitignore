@@ -1,0 +1,29 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+platformio.local.ini
+
+# What a session leaves behind for a reviewer to read (tasks/README.md: leave the evidence)
+out/
+tasks/*/logs/
+tasks/*/reports/*.draft.md
+
+# Python
+__pycache__/
+*.pyc
+
+# Editors and tooling
+.vscode/
+.idea/
+.clangd/
+compile_commands.json
+cmake-build-*/
+*.user
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,6 @@
+A key pair for tests and for nothing else. It is public on purpose.
+A firmware build that trusts this key is a test build and must never be released.
+
+private 7465737420746573742074657374207465737420746573742074657374207465
+public  6a38124d9c1744ccff9cbd285f001922460ce8e5603495f81a7582223079625b
+key id  c17969deb0026955

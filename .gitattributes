@@ -1,0 +1,15 @@
+# LF everywhere, in the repository and in the working tree. The machine these tasks run on has
+# core.autocrlf=true and a Windows checkout would otherwise differ from a Linux one - which
+# matters more here than usual, because CI compares hashes of files on disk.
+* text=auto eol=lf
+
+# The specification is a copy, compared byte for byte against spec/MANIFEST.txt
+# (spec/tools/specsync.py verify spec). Git must not touch a single one of its files.
+spec/** -text
+
+# Images and other binaries, for the avoidance of doubt.
+*.bin binary
+*.elf binary
+*.uf2 binary
+*.zip binary
+*.hex -text

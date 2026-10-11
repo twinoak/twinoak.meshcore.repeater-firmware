@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "product": "twinoak-walter-firmware",
+  "version": "0.3.0+def5678",
+  "tag": "v0.3.0",
+  "commit": "def5678000000000000000000000000000000000",
+  "built_at": "2026-10-12T08:05:00Z",
+  "link": {
+    "major": 1,
+    "minor": 0
+  },
+  "images": [
+    {
+      "id": "manager.walter.lte-m",
+      "role": "manager",
+      "board": "walter",
+      "band": "lte-m",
+      "mcu": "esp32s3",
+      "requires": {
+        "link_major": 1
+      },
+      "files": [
+        {
+          "use": "ota",
+          "name": "twinoak-walter-v0.3.0.bin",
+          "format": "bin",
+          "size": 4096,
+          "sha256": "1cef268679395fac137e80df9b60a070b4bed6a11ebfa92593a43a9cf6203dee",
+          "load_address": "0x00020000"
+        },
+        {
+          "use": "factory",
+          "name": "twinoak-walter-v0.3.0-factory.bin",
+          "format": "bin",
+          "size": 8192,
+          "sha256": "22734ba479dcc2452efee68cf8987b95bd792ae4ef8e75340981eefa8d3c4bcc",
+          "load_address": "0x00000000"
+        }
+      ]
+    }
+  ]
+}
