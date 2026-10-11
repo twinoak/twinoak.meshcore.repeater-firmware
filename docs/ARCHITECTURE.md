@@ -156,8 +156,15 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
 
 `spec/LINK-PROTOCOL.md` is the protocol. In the firmware it is three layers:
 
-1. **Codec** (portable): CRC, COBS, packets, and one encode/decode pair per message, tested against
-   every case of `spec/fixtures/link/link-v1.json`.
+1. **Codec** (portable, `src/link/codec/`, proved by p1-02): `Crc16`, `Cobs`, `Packet`,
+   `FrameReceiver` (which counts what it drops) and `FrameWriter` are the framing; `Numbers.h` is
+   every type, status, mode and limit of the protocol in one header; `Bytes.h`'s `Reader` and
+   `Writer` are the little-endian scalars; `Messages.{h,cpp}` is a plain struct per payload with
+   the one direction this side of the link needs — **a decoder for every request, an encoder for
+   every response and every event**, because in 1.0 only the Walter sends requests and only the
+   RAK sends events, and the other half of each pair is the Walter's firmware's. Tested against
+   every case of `spec/fixtures/link/link-v1.json` (`test/test_link_codec`), with a test that
+   fails when the fixture gains a case nothing exercises.
 2. **Session** (portable): a receiver that turns bytes into packets and counts what it drops; a
    dispatcher from request type to handler; the one-entry memory of the last request and its
    response, which is what makes a retried request harmless; the event counter. It talks to the
