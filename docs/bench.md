@@ -35,6 +35,20 @@ fails goes back to the task's follow-ups.
   and the bootloader are untouched afterwards. No session can do it: nothing
   was flashed and no radio was heard.
 
+- [ ] **p0-03** **The first Monday, and the first real bump.** The upstream
+  watch was rehearsed, not fired: what no session can check is that
+  `cron: "29 6 * * 1"` is a minute GitHub actually runs
+  `.github/workflows/upstream.yml` at, and that a *real* newer `repeater-v*`
+  tag takes the same path a rehearsal did. On the Monday after a MeshCore
+  repeater release: the run is in the Actions tab, a pull request **MeshCore
+  \<tag\>** is open with upstream's commit list in it, and its CI run needs
+  **Approve and run** (`docs/upstream.md` says why, and gives the `gh api`
+  line). Green means merge; red means
+  `tools/new-sync-task.ps1 -Tag <tag> -Pr <n>` and a session. The first bump is
+  also the first test of `tasks/sync/TEMPLATE.md` — and it will be red for one
+  reason before any other, which `docs/upstream.md`'s *What a bump costs today*
+  names.
+
 ## 1. The repeater on the rig
 
 (phase 1, task 01)
