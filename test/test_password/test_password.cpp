@@ -1,4 +1,4 @@
-// src/app/AdminPassword.cpp: the first-boot password's length, alphabet and randomness, and the
+// src/roles/repeater/app/AdminPassword.cpp: the first-boot password's length, alphabet and randomness, and the
 // rule that decides when one is drawn (tasks/phase-1/01, spec/SYSTEM.md S-13).
 
 #include <gtest/gtest.h>
@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "app/AdminPassword.h"
+#include "roles/repeater/app/AdminPassword.h"
 
 namespace {
 

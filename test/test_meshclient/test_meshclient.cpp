@@ -1,4 +1,4 @@
-// src/meshclient/: the mesh client's portable state (spec/LINK-PROTOCOL.md sections 6.1 to 6.3,
+// src/roles/repeater/meshclient/: the mesh client's portable state (spec/LINK-PROTOCOL.md sections 6.1 to 6.3,
 // docs/ARCHITECTURE.md sections 2 and 7) - PeerSlot's index arithmetic, exhaustively, the Job's
 // path, its awaited reply, its silence rule and the wipe of its shared secret (task 01), and the
 // Reply record with its matching rules against scripted arrivals (task 02).
@@ -39,15 +39,15 @@
 #include <cstring>
 #include <vector>
 
-#include "link/codec/Messages.h"
-#include "link/codec/Numbers.h"
-#include "meshclient/Job.h"
-#include "meshclient/LinkObservations.h"
-#include "meshclient/ObservationRing.h"
-#include "meshclient/PeerSlot.h"
-#include "meshclient/Reply.h"
-#include "meshclient/RssiNotes.h"
-#include "meshclient/SendCeiling.h"
+#include "common/link/codec/Messages.h"
+#include "common/link/codec/Numbers.h"
+#include "roles/repeater/meshclient/Job.h"
+#include "roles/repeater/meshclient/LinkObservations.h"
+#include "roles/repeater/meshclient/ObservationRing.h"
+#include "roles/repeater/meshclient/PeerSlot.h"
+#include "roles/repeater/meshclient/Reply.h"
+#include "roles/repeater/meshclient/RssiNotes.h"
+#include "roles/repeater/meshclient/SendCeiling.h"
 
 namespace {
 
@@ -801,7 +801,7 @@ TEST(ThePull, OneRecordWithTheLongestPathAndTheLongestAppDataFitsAndOnlyOne) {
 TEST(TheRssiNotes, APooledPacketReusedAndANoteTakenBackOnce) {
   RssiNotes notes;
   // The addresses stand for Packets; nothing here dereferences them, which is what makes the
-  // table portable (src/meshclient/RssiNotes.h).
+  // table portable (src/roles/repeater/meshclient/RssiNotes.h).
   uint8_t pool[kRssiNotes + 1] = {0};
   EXPECT_EQ(0u, notes.held());
 
@@ -906,7 +906,7 @@ TEST(TheWakeThreshold, ItIsTheCrossingAndOnlyWhileTheWalterIsBelievedAsleep) {
 // ----------------------------------------------------------------------------- the send ceiling
 
 // The ceiling is a clock and a ring of six timestamps, so every test of it is "sends at these
-// millisecond values" (src/meshclient/SendCeiling.h). The constants are the firmware's own, read
+// millisecond values" (src/roles/repeater/meshclient/SendCeiling.h). The constants are the firmware's own, read
 // from the header rather than written out, so that a build which moves one moves these with it.
 
 TEST(TheCeiling, SixInAMinuteAndTheSeventhIsRefused) {

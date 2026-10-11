@@ -1,4 +1,4 @@
-// src/link/attention/: section 8 of the box link - asking for the Walter's attention, and
+// src/common/link/attention/: section 8 of the box link - asking for the Walter's attention, and
 // keeping quiet while it sleeps - against a fake clock, and then through a **real** Session so
 // that what goes on the wire is the bytes and not an intention.
 //
@@ -21,13 +21,13 @@
 #include <string>
 #include <vector>
 
-#include "link/attention/Attention.h"
-#include "link/codec/FrameReceiver.h"
-#include "link/codec/FrameWriter.h"
-#include "link/codec/Messages.h"
-#include "link/codec/Numbers.h"
-#include "link/session/Interfaces.h"
-#include "link/session/Session.h"
+#include "common/link/attention/Attention.h"
+#include "common/link/codec/FrameReceiver.h"
+#include "common/link/codec/FrameWriter.h"
+#include "common/link/codec/Messages.h"
+#include "common/link/codec/Numbers.h"
+#include "common/link/session/Interfaces.h"
+#include "common/link/session/Session.h"
 
 namespace {
 
@@ -332,7 +332,7 @@ class StubIdentity : public IdentityAccess {
   const char* nodeName() const override { return ""; }
 };
 
-// A real Session with the real machine behind it, driven exactly as src/link/SerialTransport.cpp
+// A real Session with the real machine behind it, driven exactly as src/common/link/SerialTransport.cpp
 // drives it. Nothing here fakes a frame.
 struct Rig {
   Rig() {

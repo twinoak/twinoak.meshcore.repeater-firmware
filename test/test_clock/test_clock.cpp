@@ -1,4 +1,4 @@
-// src/clock/: the clock keeper's rules as a pure function of (what the RTC answered, what
+// src/roles/repeater/clock/: the clock keeper's rules as a pure function of (what the RTC answered, what
 // survived in RAM, what the file holds, what the clock says now), against fakes - and the
 // TIME_SET and TIME_GET cases of spec/fixtures/link/link-v1.json driven through the real session
 // with the real keeper behind it, byte for byte.
@@ -29,15 +29,15 @@
 #include <string>
 #include <vector>
 
-#include "clock/ClockKeeper.h"
-#include "clock/LinkClock.h"
-#include "link/codec/Bytes.h"
-#include "link/codec/FrameReceiver.h"
-#include "link/codec/FrameWriter.h"
-#include "link/codec/Messages.h"
-#include "link/codec/Numbers.h"
-#include "link/session/Interfaces.h"
-#include "link/session/Session.h"
+#include "common/link/codec/Bytes.h"
+#include "common/link/codec/FrameReceiver.h"
+#include "common/link/codec/FrameWriter.h"
+#include "common/link/codec/Messages.h"
+#include "common/link/codec/Numbers.h"
+#include "common/link/session/Interfaces.h"
+#include "common/link/session/Session.h"
+#include "roles/repeater/clock/ClockKeeper.h"
+#include "roles/repeater/clock/LinkClock.h"
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -157,7 +157,7 @@ struct Rig {
 
   // A hardware RTC that answers with that time. On this board the RTC *is* upstream's clock -
   // AutoDiscoverRTCClock::getCurrentTime() returns the part's time and falls back to the
-  // volatile clock only when it found no part (src/clock/BoardClock.cpp) - so the two fakes move
+  // volatile clock only when it found no part (src/roles/repeater/clock/BoardClock.cpp) - so the two fakes move
   // together, and a test that fits an RTC says so once here.
   void fitRtc(uint32_t epoch) {
     rtc.answers = true;
@@ -754,7 +754,7 @@ class StubIdentity : public twinoak::link::IdentityAccess {
   const char* nodeName() const override { return ""; }
 };
 
-// A session with the real keeper behind it, driven the way src/link/SerialTransport.cpp drives
+// A session with the real keeper behind it, driven the way src/common/link/SerialTransport.cpp drives
 // it. The clock is the only interface present, so HELLO would advertise TIME_PERSIST and nothing
 // else - which is what the board does today.
 struct LinkRig {

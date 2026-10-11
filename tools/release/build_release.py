@@ -359,9 +359,10 @@ def check_descriptor(image, application, version, link, required, log):
     """The 96 bytes an image says about itself (spec/FIRMWARE-MANIFEST.md section 4), held against
     the manifest entry.
 
-    No image carries one until phase 3's task 01 places it, so the check is written and switched
-    off: --require-descriptor turns it on, and the workflow passes it from the first release whose
-    images have one.
+    --require-descriptor turns the check on. Every image this repository builds has carried one
+    since phase 3's task 01 (src/common/fwdesc/), and both the release workflow and the local dry
+    run of tools/verify.ps1 pass the flag; the switch stays because a build directory assembled
+    by hand, or an older artifact, is still a thing this tool can be pointed at.
     """
     if not required:
         log("%s: no descriptor yet (--require-descriptor turns the check on)" % image["id"])
@@ -413,6 +414,12 @@ def build_image(build_dir, info, version, out_dir, require_descriptor, link, log
         "band": info["band"],
         "mcu": info["mcu"],
         "app_region": region.as_manifest(),
+        # What must already be there for this image to be usable (spec/FIRMWARE-MANIFEST.md
+        # section 2). The box link is the one thing it needs of the Walter: a Walter that speaks
+        # another major speaks to this image not at all, and the descriptor inside the image
+        # carries the same number, so a unit can be refused before anything is flashed. No
+        # minimum Walter version is asked for - nothing of this firmware needs one yet.
+        "requires": {"link_major": link["major"]},
         "files": files,
     }
     check_descriptor(image, application, version, link, require_descriptor, log)

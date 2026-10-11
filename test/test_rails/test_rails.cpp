@@ -11,9 +11,9 @@
 //      our sources. Does not catch: a define passed on a command line by hand.
 //   2. **no source under src/ prints or logs a packet payload, a CLI line or its reply, an
 //      advert's application data, or a password**. Three tests: any line of src/ that names
-//      `payload` or `app_data` beside a print-like call; every print-like call under src/link/,
+//      `payload` or `app_data` beside a print-like call; every print-like call under src/common/link/,
 //      where a CLI line and its reply live (a `password <new>` and the echo that repeats it); and
-//      the same for src/meshclient/, which holds the one plaintext copy of a password a send
+//      the same for src/roles/repeater/meshclient/, which holds the one plaintext copy of a password a send
 //      carries. Does not catch: a payload copied into a variable of another name and printed
 //      from a directory that is allowed to print - which is why the two directories are held to
 //      "no printing at all" rather than to a list of names.
@@ -27,7 +27,7 @@
 //      link deliberately allows (`kPathHashSizeMin` is 1) because that path was chosen by
 //      somebody else - S-12 is about the hashes **this firmware chooses**.
 //   5. **onPeerPathRecv returns false for the client's peer**: no reciprocal path, one packet per
-//      send. The branch that handles our peer is read out of src/app/TwinOakMesh.cpp and must
+//      send. The branch that handles our peer is read out of src/roles/repeater/app/TwinOakMesh.cpp and must
 //      return false and nothing else. Does not catch: upstream's own path return for upstream's
 //      own peers, which is upstream's business and is left alone.
 //   6. **nothing under src/ writes a file whose content came from SEND_LOGIN or a sensitive
@@ -45,7 +45,7 @@
 //      tools/ or .github/ that names the checkout carries no write-like call, and only the three
 //      scripts that compile out of it name it at all. Does not catch: a path under the checkout
 //      put in a variable on one line and written on another.
-//   9. **no heap allocation in src/link/ or src/meshclient/** (nor in src/clock/): `new`,
+//   9. **no heap allocation in src/common/link/ or src/roles/repeater/meshclient/** (nor in src/roles/repeater/clock/): `new`,
 //      `malloc`, `calloc`, `realloc`, Arduino's `String` or `std::string` in code - a comment may
 //      name them. A node that must repeat for months is given its buffers and fills buffers.
 //      Does not catch: a container of a library called through a header, or a recursion deep
@@ -74,7 +74,7 @@
 #include <vector>
 
 // Rule 4 reads the firmware's own constant rather than a copy of it.
-#include "meshclient/MeshPort.h"
+#include "roles/repeater/meshclient/MeshPort.h"
 
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
@@ -87,7 +87,7 @@ namespace fs = std::filesystem;
 const std::string kPacketLogging = std::string("MESH_PACKET") + "_LOGGING";
 const std::string kMeshDebug = std::string("MESH_") + "DEBUG";
 const std::string kAdminPassword = std::string("ADMIN_") + "PASSWORD";
-// The two of upstream's sensor drivers src/power/ replaces. Split like the names above so that a
+// The two of upstream's sensor drivers src/common/power/ replaces. Split like the names above so that a
 // grep of the repository for them finds platformio.ini's comment and not this test.
 const std::string kUpstreamIna3221 = std::string("ENV_INCLUDE_") + "INA3221";
 const std::string kUpstreamBme280 = std::string("ENV_INCLUDE_") + "BME280";
@@ -414,7 +414,7 @@ TEST(Rails, Rule7_NoBoardEnvironmentTurnsOnUpstreamsOwnIna3221OrBme280) {
         ADD_FAILURE() << "platformio.ini:" << entry.first << ": [" << section << "] defines "
                       << kUpstreamBme280
                       << " - upstream samples the part inside querySensors, which is on the path"
-                         " of the box link's LPP_GET (src/power/Environment.h)";
+                         " of the box link's LPP_GET (src/common/power/Environment.h)";
       }
     }
   }
@@ -474,16 +474,17 @@ TEST(Rails, Rule2_NothingInSrcPrintsAPacketsPayloadOrAnAdvertsApplicationData) {
 
 TEST(Rails, Rule9_NoHeapAllocationUnderTheLinkTheClockOrTheMeshClient) {
   const fs::path root = projectRoot();
-  // Rule 9 of the task: **no heap allocation in src/link/ or src/meshclient/** - and src/clock/
-  // beside them, which has been held to it since phase 1's task 04. The whole of src/link/ now,
+  // Rule 9 of the task: **no heap allocation in src/common/link/ or src/roles/repeater/meshclient/** - and src/roles/repeater/clock/
+  // beside them, which has been held to it since phase 1's task 04. The whole of src/common/link/ now,
   // its board half and its transport included (phase 1 held only the two portable layers): a node
   // that must repeat for months is given its buffers and fills buffers, and the files that touch
-  // Arduino have no more reason to allocate than the portable ones. src/clock/'s BoardClock.cpp
+  // Arduino have no more reason to allocate than the portable ones. src/roles/repeater/clock/'s BoardClock.cpp
   // is here too - the file system's own allocation is the core's, inside File::open, and nothing
-  // of ours has a reason to add to it. src/meshclient/ is the mesh client's state (section 7):
+  // of ours has a reason to add to it. src/roles/repeater/meshclient/ is the mesh client's state (section 7):
   // the job, its path, the shared secret's buffer and the observation ring, each given its memory
   // once; the ring wipes rather than frees.
-  const char* const kDirs[] = {"link", "clock", "meshclient"};
+  const char* const kDirs[] = {"common/link", "roles/repeater/clock",
+                               "roles/repeater/meshclient"};
   // The names, and whether a whole-identifier match is what to look for: `new` must not match
   // `renew`, where `std::string` is not an identifier at all.
   const std::pair<std::string, bool> kForbidden[] = {
@@ -519,22 +520,22 @@ TEST(Rails, Rule9_NoHeapAllocationUnderTheLinkTheClockOrTheMeshClient) {
 
 TEST(Rails, AlsoKept_NoRequestHandlerCanReachAnI2cBus) {
   // The acceptance criterion of phase 1's task 06: **a request on the box link never performs
-  // I2C**, shown from the code's structure. That structure is one file deep: src/power/
-  // BoardPower.cpp owns the only `Wire` of this firmware's own sources (src/board/target.cpp's
+  // I2C**, shown from the code's structure. That structure is one file deep: src/common/power/
+  // BoardPower.cpp owns the only `Wire` of this firmware's own sources (src/common/board/target.cpp's
   // setClock is upstream's bus being configured, not a transaction) and the only sensor driver,
   // and it hands them to the two readers behind an interface; the readers are driven from
   // TwinOakSensors::loop() once a pass; and POWER_GET, ENV_GET and LPP_GET answer out of the
-  // snapshot those readers leave (src/power/LinkPower.h). So nothing under src/link/, and
-  // nothing under src/power/ but that one file, may name a bus or a driver at all.
+  // snapshot those readers leave (src/common/power/LinkPower.h). So nothing under src/common/link/, and
+  // nothing under src/common/power/ but that one file, may name a bus or a driver at all.
   const fs::path root = projectRoot();
   const char* const kBusNames[] = {"Wire.", "Wire1.", "TwoWire", "Adafruit_BME280",
                                    "Adafruit_INA3221"};
-  const char* const kDirs[] = {"link", "power"};
+  const char* const kDirs[] = {"common/link", "common/power"};
 
   int walked = 0;
   for (const char* name : kDirs) {
     for (const fs::path& file : filesUnder(root / "src" / name)) {
-      // The board's half of src/power/ is where the bus is allowed to be, and it is the only
+      // The board's half of src/common/power/ is where the bus is allowed to be, and it is the only
       // file of either directory that is.
       if (file.filename() == "BoardPower.cpp" || file.filename() == "BoardPower.h") continue;
       walked++;
@@ -556,14 +557,14 @@ TEST(Rails, AlsoKept_NoRequestHandlerCanReachAnI2cBus) {
       }
     }
   }
-  EXPECT_GT(walked, 10) << "almost nothing under src/link or src/power - is PROJECT_DIR right?";
+  EXPECT_GT(walked, 10) << "almost nothing under src/common/link or src/common/power - is PROJECT_DIR right?";
 }
 
 TEST(Rails, Rule2_NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
   // A CLI line over the link is a console command, so it can be `password <new>` - and the reply
   // to that one is `password now: <it>`, because upstream echoes it back to be sure
   // (src/helpers/CommonCLI.cpp at the pin d9296435, the `password ` branch). `get prv.key` is
-  // another. So the whole of src/link/ is held to one rule: **it does not print**. The only
+  // another. So the whole of src/common/link/ is held to one rule: **it does not print**. The only
   // thing that directory writes is a frame, to Serial1, and the only other thing it does with a
   // UART is flush it before a restart - so the allowlist below is the whole of its business with
   // a console, and a print-like call anywhere under it is a failure whatever it prints.
@@ -574,15 +575,15 @@ TEST(Rails, Rule2_NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
       "Serial1.write(", "Serial1.flush(",     "Serial.flush(",
   };
 
-  const std::vector<fs::path> files = filesUnder(root / "src" / "link");
-  EXPECT_GT(files.size(), 5u) << "almost nothing under src/link - is PROJECT_DIR right?";
+  const std::vector<fs::path> files = filesUnder(root / "src" / "common" / "link");
+  EXPECT_GT(files.size(), 5u) << "almost nothing under src/common/link - is PROJECT_DIR right?";
   for (const fs::path& file : files) {
     std::ifstream in(file, std::ios::binary);
     std::string line;
     int n = 0;
     while (std::getline(in, line)) {
       n++;
-      // A comment may name any of these; code may not. Nothing under src/link has a block
+      // A comment may name any of these; code may not. Nothing under src/common/link has a block
       // comment, and the one string literal it has holds no such word.
       const size_t comment = line.find("//");
       const std::string code = comment == std::string::npos ? line : line.substr(0, comment);
@@ -620,16 +621,18 @@ TEST(Rails, Rule2_NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
 }
 
 TEST(Rails, Rule2_NothingUnderTheMeshClientPrintsOrLogs) {
-  // The mesh client's portable half (src/meshclient/) holds, for the length of a send, the one
+  // The mesh client's portable half (src/roles/repeater/meshclient/) holds, for the length of a send, the one
   // plaintext copy of a password a Walter asked it to log in with, and afterwards the bytes a
-  // repeater answered - a CLI reply that can echo a password back. So, as for src/link/, the
+  // repeater answered - a CLI reply that can echo a password back. So, as for src/common/link/, the
   // whole directory is held to one rule: **it does not print**, and it names no packet bytes
   // beside a print-like call (tasks/phase-2/02-the-five-sends.md, the rails-test line; S-12).
   const fs::path root = projectRoot();
   const char* const kPrintLike[] = {"print", "Print", "cout", "puts(", "fputs", "LOG_",
                                     "Serial"};
-  const std::vector<fs::path> files = filesUnder(root / "src" / "meshclient");
-  EXPECT_GT(files.size(), 5u) << "almost nothing under src/meshclient - is PROJECT_DIR right?";
+  const std::vector<fs::path> files =
+      filesUnder(root / "src" / "roles" / "repeater" / "meshclient");
+  EXPECT_GT(files.size(), 5u)
+      << "almost nothing under src/roles/repeater/meshclient - is PROJECT_DIR right?";
   for (const fs::path& file : files) {
     std::ifstream in(file, std::ios::binary);
     std::string line;
@@ -654,27 +657,29 @@ TEST(Rails, Rule2_NothingUnderTheMeshClientPrintsOrLogs) {
 
 TEST(Rails, Rule3_TheFirstBootPathThatReplacesThatPasswordExists) {
   // The define above is a placeholder and nothing else: on a boot that finds no saved
-  // preferences, src/app/FirstBoot.cpp draws a random password into upstream's own prefs and
+  // preferences, src/roles/repeater/app/FirstBoot.cpp draws a random password into upstream's own prefs and
   // saves them before loop() ever runs (spec/SYSTEM.md S-13). The rail is that this path is
   // **there and called**, because the define alone would be a default password on the air.
   const fs::path root = projectRoot();
-  for (const char* name : {"app/AdminPassword.h", "app/AdminPassword.cpp", "app/FirstBoot.h",
-                           "app/FirstBoot.cpp"}) {
+  for (const char* name : {"roles/repeater/app/AdminPassword.h",
+                           "roles/repeater/app/AdminPassword.cpp",
+                           "roles/repeater/app/FirstBoot.h",
+                           "roles/repeater/app/FirstBoot.cpp"}) {
     EXPECT_TRUE(fs::is_regular_file(root / "src" / name))
         << "src/" << name << " is gone: no default password is ever on the air (S-13), and this"
            " is the path that replaces the build's placeholder";
   }
   // And setup() calls it: the test, then the draw, by name.
-  const std::string main_cpp = fileText(root / "src" / "main.cpp");
+  const std::string main_cpp = fileText(root / "src" / "roles" / "repeater" / "main.cpp");
   for (const char* call : {"hasSavedPrefs(", "ensureAdminPassword("}) {
     EXPECT_NE(std::string::npos, main_cpp.find(call))
-        << "src/main.cpp no longer calls " << call
+        << "src/roles/repeater/main.cpp no longer calls " << call
         << "): a node with no settings would then keep the build's placeholder password (S-13)";
   }
   // The password's own rules are tested natively, which needs the file in the native build.
   const std::string ini = fileText(root / "platformio.ini");
-  EXPECT_NE(std::string::npos, ini.find("+<app/AdminPassword.cpp>"))
-      << "platformio.ini's [env:native] no longer compiles src/app/AdminPassword.cpp, so"
+  EXPECT_NE(std::string::npos, ini.find("+<roles/repeater/app/AdminPassword.cpp>"))
+      << "platformio.ini's [env:native] no longer compiles src/roles/repeater/app/AdminPassword.cpp, so"
          " test/test_password no longer holds what a first-boot password looks like (S-13)";
 }
 
@@ -721,16 +726,16 @@ TEST(Rails, Rule5_OnPeerPathRecvReturnsFalseForTheClientsPeer) {
   // when this override returns true (src/Mesh.cpp:173-178 at the pin), so the rail is the branch
   // that handles our peer: it returns false, and it contains no other return.
   const fs::path root = projectRoot();
-  const fs::path file = root / "src" / "app" / "TwinOakMesh.cpp";
+  const fs::path file = root / "src" / "roles" / "repeater" / "app" / "TwinOakMesh.cpp";
   const std::vector<std::string> lines = linesOf(file);
-  ASSERT_FALSE(lines.empty()) << "src/app/TwinOakMesh.cpp is gone";
+  ASSERT_FALSE(lines.empty()) << "src/roles/repeater/app/TwinOakMesh.cpp is gone";
 
   int start = -1;
   for (size_t i = 0; i < lines.size(); i++) {
     if (lines[i].find("bool TwinOakMesh::onPeerPathRecv(") != std::string::npos) start = int(i);
   }
   ASSERT_GE(start, 0) << "no definition of TwinOakMesh::onPeerPathRecv in"
-                         " src/app/TwinOakMesh.cpp: the override that must not send a reciprocal"
+                         " src/roles/repeater/app/TwinOakMesh.cpp: the override that must not send a reciprocal"
                          " path (S-12) is not there to read";
 
   // The branch is the one guarded by peerSlotIsOurs; read it to its closing brace by counting.
@@ -785,7 +790,7 @@ TEST(Rails, Rule6_NothingThatCarriesAPasswordNamesTheFileSystem) {
   // one board file that turns that plaintext into a packet. **None of them names a file-system
   // API at all** - no open, no File, no InternalFS - so no line of them can write those bytes to
   // flash, deliberately or by a copy somebody adds later. The firmware's own two writers are
-  // src/clock/BoardClock.cpp (the clock file) and src/power/BoardPower.cpp (the preferences),
+  // src/roles/repeater/clock/BoardClock.cpp (the clock file) and src/common/power/BoardPower.cpp (the preferences),
   // and neither is on this path.
   //
   // What this does not catch: bytes handed to a directory that is allowed to write. Nothing does
@@ -795,11 +800,12 @@ TEST(Rails, Rule6_NothingThatCarriesAPasswordNamesTheFileSystem) {
   const char* const kFsNames[] = {"InternalFS", "LittleFS", "FILE_O_", "FILESYSTEM", "fopen",
                                   "ofstream",   "fwrite",   "SdFat",   ".open(",     "->open("};
   std::vector<fs::path> files;
-  for (const char* dir : {"link/codec", "link/session", "meshclient"}) {
+  for (const char* dir : {"common/link/codec", "common/link/session",
+                          "roles/repeater/meshclient"}) {
     for (const fs::path& f : filesUnder(root / "src" / dir)) files.push_back(f);
   }
-  files.push_back(root / "src" / "app" / "TwinOakMesh.h");
-  files.push_back(root / "src" / "app" / "TwinOakMesh.cpp");
+  files.push_back(root / "src" / "roles" / "repeater" / "app" / "TwinOakMesh.h");
+  files.push_back(root / "src" / "roles" / "repeater" / "app" / "TwinOakMesh.cpp");
   EXPECT_GT(files.size(), 15u) << "almost nothing on the password's path - is PROJECT_DIR right?";
 
   for (const fs::path& file : files) {

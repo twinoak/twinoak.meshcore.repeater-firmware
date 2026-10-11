@@ -129,14 +129,14 @@ test says what it does and does not catch.
 | | The rule | The test that holds it |
 |---|---|---|
 | 1 | **Nothing the mesh says is logged as text.** `MESH_PACKET_LOGGING` and `MESH_DEBUG` stay off in every environment. | `Rails.Rule1_*` — the resolved flags of every board environment, and a walk of `src/` |
-| 2 | **No source prints a packet payload, a CLI line or its reply, an advert's application data, or a password.** | `Rails.Rule2_*` — three tests: a payload beside a print, and no print-like call at all under `src/link/` or `src/meshclient/` |
-| 3 | **No default password is ever on the air.** A node that boots with no saved settings draws itself a random admin password that nobody knows (`src/app/FirstBoot.cpp`); the one a person sets at the USB port with `password <new>` is the first anyone can use. | `Rails.Rule3_*` — no environment defines `ADMIN_PASSWORD` as upstream's word or leaves it out, and the first-boot path exists and is called; `test/test_password` holds what the random one looks like |
+| 2 | **No source prints a packet payload, a CLI line or its reply, an advert's application data, or a password.** | `Rails.Rule2_*` — three tests: a payload beside a print, and no print-like call at all under `src/common/link/` or `src/roles/repeater/meshclient/` |
+| 3 | **No default password is ever on the air.** A node that boots with no saved settings draws itself a random admin password that nobody knows (`src/roles/repeater/app/FirstBoot.cpp`); the one a person sets at the USB port with `password <new>` is the first anyone can use. | `Rails.Rule3_*` — no environment defines `ADMIN_PASSWORD` as upstream's word or leaves it out, and the first-boot path exists and is called; `test/test_password` holds what the random one looks like |
 | 4 | **Path hashes this firmware chooses are two bytes or more.** | `Rails.Rule4_*` — the constant is 2, every `sendFlood` passes it, no literal 1 |
 | 5 | **One packet per send.** No reciprocal path is returned for the client's peer. | `Rails.Rule5_*` — the branch of `onPeerPathRecv` that takes the job peer's path returns false and nothing else |
 | 6 | **A password is in RAM for the length of a send** and nowhere else. | `Rails.Rule6_*` — no file on the path of a `SEND_LOGIN` or a sensitive `SEND_CLI` names a file-system API; `test_link_session` searches the session, the client and the job for the bytes afterwards |
 | 7 | **Upstream's INA3221 and BME280 support stay out of the build** — one shunt value for three channels, and an I2C conversion on the path of a link request. | `Rails.Rule7_*` |
 | 8 | **`spec/` is a copy and MeshCore is not edited.** | `Rails.Rule8_*` — the SHA-256 and byte count of every file against `spec/MANIFEST.txt`, and no script that names the pinned checkout writes in it |
-| 9 | **No heap allocation** under `src/link/`, `src/meshclient/` or `src/clock/`: a node that repeats for months is given its buffers. | `Rails.Rule9_*` |
+| 9 | **No heap allocation** under `src/common/link/`, `src/roles/repeater/meshclient/` or `src/roles/repeater/clock/`: a node that repeats for months is given its buffers. | `Rails.Rule9_*` |
 
 Three more, which are a shape rather than a grep:
 
@@ -146,7 +146,7 @@ Three more, which are a shape rather than a grep:
   (`docs/ARCHITECTURE.md` §4); a request never performs I2C and answers out of
   a cache (`Rails.AlsoKept_NoRequestHandlerCanReachAnI2cBus`); and a client
   send can delay a packet being forwarded by its own airtime and no more, at
-  most six times a minute (§7, and `src/meshclient/SendCeiling.h`).
+  most six times a minute (§7, and `src/roles/repeater/meshclient/SendCeiling.h`).
 - **Upstream is not edited.** Our code subclasses and composes
   (`docs/ARCHITECTURE.md` §2); every override carries `override`, so a pin bump
   that changes one is a compile error and not a method that silently stops

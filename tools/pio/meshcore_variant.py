@@ -5,7 +5,7 @@
 # Arduino pin map (variant.cpp) *and* target.cpp - the file that constructs `board`, the radio,
 # the clock and the sensors for a WisBlock base with a GPS on Serial1. On our adapter Serial1 is
 # the link to the Walter and the battery is read by an INA3221, so target.cpp is ours
-# (src/board/target.cpp, docs/ARCHITECTURE.md section 3) and MC_VARIANT is deliberately not set.
+# (src/common/board/target.cpp, docs/ARCHITECTURE.md section 3) and MC_VARIANT is deliberately not set.
 #
 # The two files of the variant that are still upstream's are compiled here, out of the pinned
 # checkout, never copied - the way meshcore_private_libs.py compiles lib/ed25519. variant.cpp is
@@ -42,7 +42,7 @@ for item in env.get("CPPDEFINES", []):
     if name == "MC_VARIANT":
         raise Exception(
             "MC_VARIANT is set, so build_as_lib.py would compile upstream's variants/%s/target.cpp "
-            "beside our src/board/target.cpp; remove the define (docs/ARCHITECTURE.md section 3)"
+            "beside our src/common/board/target.cpp; remove the define (docs/ARCHITECTURE.md section 3)"
             % VARIANT
         )
 

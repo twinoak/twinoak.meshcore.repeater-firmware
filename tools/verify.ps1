@@ -13,10 +13,11 @@
                 images are copied to out/build/<env>/
     4. native   pio test -e native - with this machine's own g++ or clang++ when there is one,
                 otherwise in the container tasks/RUNBOOK.md section 2 names (Docker)
-    5. release  python tools/release/selfcheck.py - the release tooling's own tests, then a dry
-                run of the real release over out/build/<env>, what step 3 left: the images, a validated
-                manifest, its signature by the specification's public test key, and that
-                signature verified. So the release path is exercised on every commit without
+    5. release  python tools/release/selfcheck.py --require-descriptor - the release tooling's
+                own tests, then a dry run of the real release over out/build/<env>, what step 3
+                left: the images, each one's descriptor held against its manifest entry, a
+                validated manifest, its signature by the specification's public test key, and
+                that signature verified. So the release path is exercised on every commit without
                 GitHub and without the release key. It needs the `cryptography` of
                 tools/release/requirements.txt: this machine's Python when it has it, otherwise
                 the same container as step 4, where pip installs it into the container and not
@@ -183,8 +184,8 @@ if (Step-Wanted 'build') {
             # whatever comes after it. out/build/<env> is the build output that survives the run.
             $dest = Join-Path (Join-Path $outDir 'build') $e
             New-Item -ItemType Directory -Force -Path $dest | Out-Null
-            foreach ($name in @('firmware.hex', 'firmware.zip', 'firmware.uf2', 'firmware.elf',
-                                'firmware.map', 'buildinfo.json', 'ldscript.ld')) {
+            foreach ($name in @('firmware.hex', 'firmware.bin', 'firmware.zip', 'firmware.uf2',
+                                'firmware.elf', 'firmware.map', 'buildinfo.json', 'ldscript.ld')) {
                 $src = Join-Path $root ".pio/build/$e/$name"
                 if (Test-Path $src) { Copy-Item $src (Join-Path $dest $name) -Force }
                 else { $ok = $false; $note = "$name missing" }
@@ -231,7 +232,10 @@ if (Step-Wanted 'release') {
     $commit = (& git -C $root rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not ($commit -match '^[0-9a-f]{40}$')) { $commit = '0' * 40 }
     # out/build/<env>, what step 3 copied there: see the note in that step for why not .pio/.
-    $selfcheck = @('tools/release/selfcheck.py', '--commit', "$commit")
+    # --require-descriptor: every image this repository builds carries one (phase 3's task 01),
+    # the release workflow passes the same flag, and a dry run that did not would be rehearsing
+    # a weaker release than the real one.
+    $selfcheck = @('tools/release/selfcheck.py', '--commit', "$commit", '--require-descriptor')
     foreach ($e in (Get-BoardEnvironments)) { $selfcheck += @('--build-dir', "out/build/$e") }
 
     $hasCrypto = $false

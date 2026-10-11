@@ -420,3 +420,32 @@ nothing else: no second radio, no companion — the mesh advertises by itself.
   records waiting as its `detail`, at most once an hour, and `sensor get
   obs.wake` reads 1. With the setting back at 0 — the default, and what a fresh
   boot gives — a ring that fills right up raises nothing.
+
+## 8. What an image says it is
+
+`spec/FIRMWARE-MANIFEST.md` §4 is the page. Nothing here needs a radio: a
+release's files, a flash, and one `hello` over the link.
+
+- [ ] **p3-01** **The file you are about to flash says what it is, before you
+  flash it.** On a release's `.bin` (or on
+  `out/build/repeater_rak4630_single/firmware.bin`, which `tools/verify.ps1`
+  leaves): `python spec/tools/manifestref.py descriptor <file>` prints one
+  descriptor and its offset (role → ______, board → ______, band → ______,
+  version → ______, offset → ______). Two descriptors or none is a refusal, and
+  the build would have failed first — what is being checked on the bench is
+  that the file which left the release is still that file.
+- [ ] **p3-01** **The unit then says the same thing.** After flashing it,
+  `linkcli.py hello`'s `role`, `board` and `fw_version` are the three the
+  descriptor gave, and `slot` is **0** on the single-RAK adapter. They are read
+  out of the descriptor object inside the running firmware, so a disagreement
+  here means the image on the board is not the image that was checked.
+- [ ] **p3-01** **The console agrees too.** `sensor get fw.version` on the USB
+  console reads `twinoak-repeater <version> on MeshCore <tag> (<pin>)` with the
+  same version, and upstream's own `ver` line is unchanged.
+- [ ] **p3-01** **The Walter's half, in the Walter's repository.** That a Walter
+  reads the descriptor out of the file it downloaded, compares it with the
+  manifest entry and with the radio position it is about to flash, and refuses
+  an image for another board or band, is `twinoak.meshcore.walter-firmware`'s
+  own tests against the same fixtures (`spec/fixtures/manifest/`). No session
+  and no bench of this repository can show it; it is listed here so that the
+  two halves are ticked together when that firmware exists.

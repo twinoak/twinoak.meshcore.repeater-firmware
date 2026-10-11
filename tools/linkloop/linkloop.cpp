@@ -2,7 +2,7 @@
 //
 // Why this exists: tools/linkcli.py has to be exercised before a board exists
 // (tasks/phase-1/03-the-link-session.md, the last acceptance criterion). This program is the same
-// portable Session the firmware runs - src/link/session/, byte for byte - with fixed fakes where
+// portable Session the firmware runs - src/common/link/session/, byte for byte - with fixed fakes where
 // the board would be, pumping stdin to stdout. `linkcli.py --pipe <this program>` then speaks the
 // real protocol to the real session with no serial port and no radio in the way.
 //
@@ -10,7 +10,7 @@
 // on Windows that is the container tasks/RUNBOOK.md section 2 names. Build and use:
 //
 //   g++ -std=c++17 -O2 -Wall -Wextra -I src -o out/linkloop/linkloop tools/linkloop/linkloop.cpp
-//       src/link/codec/*.cpp src/link/session/*.cpp src/clock/ClockKeeper.cpp   (one line)
+//       src/common/link/codec/*.cpp src/common/link/session/*.cpp src/roles/repeater/clock/ClockKeeper.cpp   (one line)
 //   python3 tools/linkcli.py --pipe out/linkloop/linkloop hello
 //   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
@@ -19,25 +19,25 @@
 // implement: caps 0x7f (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST).
 // Six things in it are the firmware's own code and not a stub:
 //
-//   - the **ClockKeeper** (src/clock/), with out/linkloop/clock where the board has its flash
+//   - the **ClockKeeper** (src/roles/repeater/clock/), with out/linkloop/clock where the board has its flash
 //     file, so `time` and `time set` exercise the rules the firmware will run; one run of this
 //     program is one boot, so a second run is a reset. `--emitted` starts it as a node that has
 //     already put a timestamp on the air;
-//   - the **AttentionMachine** (src/link/attention/), so the 300 ms gap, the ten sends a second
+//   - the **AttentionMachine** (src/common/link/attention/), so the 300 ms gap, the ten sends a second
 //     apart and the hourly limit are watched from a laptop with no box at all. `--wake` raises
 //     one at startup (reason 4), and `sensor set walter.wake 1` through `cli` raises it the way
 //     a mesh admin does;
-//   - the **settings table** (src/app/Settings.*), behind a `sensor list/get/set` that is a
+//   - the **settings table** (src/roles/repeater/app/Settings.*), behind a `sensor list/get/set` that is a
 //     miniature of upstream's own CommonCLI branch - including its 134-byte paging rule, so that
 //     what `cli "sensor list"` prints here is what the console prints on the board;
-//   - the **power and environment readers** (src/power/), driven over a fake I2C bus that answers
+//   - the **power and environment readers** (src/common/power/), driven over a fake I2C bus that answers
 //     real INA3221 register values - so `power`, `env` and `lpp` go through the firmware's own
 //     conversion, its own cache and its own Cayenne-LPP, and `--drop-ina` is the bench's
 //     "unplug the B-board" case with no board at all;
-//   - the **mesh client** (src/meshclient/), the job and the five sends and the reply record,
+//   - the **mesh client** (src/roles/repeater/meshclient/), the job and the five sends and the reply record,
 //     over a port where nothing is ever transmitted, so a send is answered as the firmware
 //     answers it and its wait ends in the silence event. `--job` begins a job at startup;
-//   - the **observation ring** (src/meshclient/ObservationRing.h and LinkObservations.h), so
+//   - the **observation ring** (src/roles/repeater/meshclient/ObservationRing.h and LinkObservations.h), so
 //     `obs`, `status` and `counters` through the pipe read the firmware's own ring, its own
 //     payload fitting and its own counters. `--adverts <n>` hears that many synthetic adverts at
 //     startup - a ring is per-boot RAM, like a job - and `--obs-wake` turns the `obs.wake`
@@ -194,7 +194,7 @@ class LoopSettingsHost : public twinoak::SettingsHost {
   uint16_t linkErrors() const override { return 0; }
   bool walterEverSeen() const override { return true; }
   uint32_t walterSeenSecondsAgo() const override { return 0; }
-  // The words src/clock/BoardClock.cpp's stateName() uses; that function reads the board's own
+  // The words src/roles/repeater/clock/BoardClock.cpp's stateName() uses; that function reads the board's own
   // keeper, so the mapping is repeated here over this program's.
   const char* clockStateName() const override {
     switch (g_keeper.timeState()) {
@@ -298,7 +298,7 @@ class LoopCli : public CliAccess {
 
 LoopCli g_cli;
 
-// --- power and environment (src/power/) ---------------------------------------------------------
+// --- power and environment (src/common/power/) ---------------------------------------------------------
 
 // A fake I2C bus that answers the registers a B-board with a panel in the sun and a pack on
 // charge would: 18.1 V at 120 mA into the charger, the pack at 4.01 V taking 52 mA, and the two
@@ -371,7 +371,7 @@ LoopTelemetry g_telemetry;
 twinoak::power::LinkPower g_link_power(g_telemetry);
 
 // The mesh client's job, its sends and its reply, and the box link's view of them
-// (src/meshclient/), so that `job begin`, `job end`, `path`, the five sends, `reply` and
+// (src/roles/repeater/meshclient/), so that `job begin`, `job end`, `path`, the five sends, `reply` and
 // `counters` through the pipe go through the firmware's own client - the same code a board runs.
 // Where the board builds a MeshCore packet there is this port: every send "succeeds" and nothing
 // goes anywhere, so a send with a timeout ends in EV_MESH_REPLY state 2 (silence) when the time
@@ -418,14 +418,14 @@ LoopMeshPort g_mesh_port;
 twinoak::meshclient::Job g_job;
 twinoak::meshclient::LinkMeshClient g_mesh_client(g_job, g_mesh_port);
 
-// The observation ring, the firmware's own (src/meshclient/). Nothing here decodes an advert: a
+// The observation ring, the firmware's own (src/roles/repeater/meshclient/). Nothing here decodes an advert: a
 // record is the bytes of section 7 and the name inside app_data is a stranger's, so the ring is
 // filled with synthetic records by --adverts and read back by `obs`, which decodes the name on
 // the laptop and only with --names (tools/linkcli.py).
 twinoak::meshclient::ObservationRing g_ring;
 twinoak::meshclient::LinkObservations g_observations(g_ring);
 
-// One advert heard, as src/app/TwinOakMesh.cpp builds the record from a packet: the nth node of a
+// One advert heard, as src/roles/repeater/app/TwinOakMesh.cpp builds the record from a packet: the nth node of a
 // made-up neighbourhood, half of them direct neighbours with an RSSI and half two hops away with
 // none, and an app_data MeshCore's AdvertDataBuilder would have written (a flags byte with the
 // repeater type and a name).
@@ -497,9 +497,9 @@ void wire() {
 // most ten milliseconds at a time, so that an attention's 300 ms gap and its 1000 ms repeats are
 // kept while nothing at all is being asked.
 int pump() {
-  // As src/main.cpp does it: the clock first, then the link.
+  // As src/roles/repeater/main.cpp does it: the clock first, then the link.
   g_keeper.begin(nowMs(), /*software_reset=*/false);
-  // "Something carrying this node's clock has already gone on the air" - what src/main.cpp says
+  // "Something carrying this node's clock has already gone on the air" - what src/roles/repeater/main.cpp says
   // when it has sent the boot advert. It is a flag here because a board decides it by doing
   // something this program cannot do, and because it is the only way to watch a backwards
   // TIME_SET be refused (spec/LINK-PROTOCOL.md section 5.4).
@@ -512,7 +512,7 @@ int pump() {
     fflush(stdout);
     session.outgoingSent(nowMs());
   }
-  // The restart attention, as src/link/BoardLink.cpp raises it: only for a Walter that was
+  // The restart attention, as src/roles/repeater/link/BoardLink.cpp raises it: only for a Walter that was
   // believed asleep, which no board can know - so here it is the --wake flag's business instead.
   if (g_wake) g_attention.raise(kAttentionPersonAsked, 0, nowMs());
 
@@ -535,7 +535,7 @@ int pump() {
   if (g_obs_wake) g_observations.setWakeEnabled(true);
   for (long n = 0; n < g_adverts; n++) hearAdvert(n, nowMs());
 
-  // As TwinOakSensors::begin() does it (src/board/target.cpp).
+  // As TwinOakSensors::begin() does it (src/common/board/target.cpp).
   g_power_reader.begin(nowMs());
   g_env_reader.begin(nowMs());
 
@@ -554,8 +554,8 @@ int pump() {
       session.feedByte(byte, nowMs());
     }
     g_keeper.loop(nowMs());
-    // The job's 120-second silence rule and the reply's deadline (src/meshclient/LinkMeshClient.cpp),
-    // once a pass as src/link/BoardLink.cpp's linkLoop() does it.
+    // The job's 120-second silence rule and the reply's deadline (src/roles/repeater/meshclient/LinkMeshClient.cpp),
+    // once a pass as src/roles/repeater/link/BoardLink.cpp's linkLoop() does it.
     g_mesh_client.loop(nowMs());
     // As TwinOakSensors::loop() does it, once a pass: one INA3221 channel, one BME280 sample,
     // and the battery thresholds looked at with whatever channel 2 last said.

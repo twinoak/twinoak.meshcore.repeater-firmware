@@ -1,4 +1,4 @@
-// src/power/: the INA3221's arithmetic, the two readers, the battery thresholds, the Cayenne-LPP
+// src/common/power/: the INA3221's arithmetic, the two readers, the battery thresholds, the Cayenne-LPP
 // and the preferences record - all of it host-portable and all of it against fakes
 // (tasks/phase-1/06-power-and-environment.md, "Tests (native)").
 //
@@ -11,10 +11,10 @@
 //     not hold the schedule;
 //   - the thresholds: a dip shorter than the minimum time raises nothing; low, then critical;
 //     recovery needs the hysteresis; and nothing re-raised inside the hour, through the real
-//     attention machine of src/link/attention/;
+//     attention machine of src/common/link/attention/;
 //   - the LPP of LPP_GET equals the LPP the telemetry path builds, for the same fake readings -
 //     and both equal bytes computed by hand from CayenneLPP's own arithmetic;
-//   - and POWER_GET's and ENV_GET's own bodies through src/power/LinkPower.h. Their *frames*,
+//   - and POWER_GET's and ENV_GET's own bodies through src/common/power/LinkPower.h. Their *frames*,
 //     byte for byte against the fixture, are test/test_link_session's.
 
 #include <gtest/gtest.h>
@@ -25,15 +25,15 @@
 #include <string>
 #include <vector>
 
-#include "link/attention/Attention.h"
-#include "link/codec/Numbers.h"
-#include "power/BatteryWatch.h"
-#include "power/Environment.h"
-#include "power/Ina3221.h"
-#include "power/LinkPower.h"
-#include "power/PowerReader.h"
-#include "power/Prefs.h"
-#include "power/Telemetry.h"
+#include "common/link/attention/Attention.h"
+#include "common/link/codec/Numbers.h"
+#include "common/power/BatteryWatch.h"
+#include "common/power/Environment.h"
+#include "common/power/Ina3221.h"
+#include "common/power/LinkPower.h"
+#include "common/power/PowerReader.h"
+#include "common/power/Prefs.h"
+#include "common/power/Telemetry.h"
 
 namespace {
 
@@ -50,7 +50,7 @@ std::string toHex(const uint8_t* data, size_t len) {
 }
 
 // The register value that carries a 13-bit measurement: the value left-aligned, the low three
-// bits unused (INA3221 datasheet; src/power/Ina3221.h's rawOf is the other direction).
+// bits unused (INA3221 datasheet; src/common/power/Ina3221.h's rawOf is the other direction).
 uint16_t regOf(int16_t raw) { return uint16_t(uint16_t(raw) << 3); }
 
 // ----------------------------------------------------------------------------- the fake bus
@@ -276,7 +276,7 @@ TEST(TheReader, AHealthyDeviceIsConfiguredOnceAndSweptOnceASecond) {
   EXPECT_EQ(uint8_t(kRegConfig), bus.last_written_reg);
   EXPECT_EQ(kConfigWord, bus.last_written) << "continuous shunt+bus, AVG 64, 1.1 ms, all three";
 
-  // One channel per pass (src/power/PowerReader.h, kChannelsPerPass), so a sweep is three
+  // One channel per pass (src/common/power/PowerReader.h, kChannelsPerPass), so a sweep is three
   // passes and not one.
   reader.loop(now);
   EXPECT_EQ(0u, reader.sweeps());
@@ -642,7 +642,7 @@ TEST(TheThresholds, AnInvalidChannelIsNotALowBattery) {
 
 TEST(TheThresholds, NothingIsReRaisedInsideTheHour) {
   // The hourly limit is section 8's and lives in the attention machine, not here: this is the
-  // pair working together, which is what the board does (src/power/BoardPower.cpp's loop).
+  // pair working together, which is what the board does (src/common/power/BoardPower.cpp's loop).
   BatteryWatch w;
   twinoak::link::AttentionMachine machine;
   uint32_t now = 1000;
@@ -692,7 +692,7 @@ TEST(TheTelemetry, TheFieldsAreOursOnTheChannelsThatNeverMove) {
     EXPECT_EQ(want_channel[i], f[i].channel) << "field " << i;
     EXPECT_EQ(want_type[i], f[i].type) << "field " << i;
   }
-  // Chosen once and never renumbered (src/power/Telemetry.h; the table in docs/link.md). A
+  // Chosen once and never renumbered (src/common/power/Telemetry.h; the table in docs/link.md). A
   // compile-time check, because a renumbering is a change to what MeshMaster already named and
   // not something a run should have to find.
   static_assert(kLppChannelSelf == 1, "channel 1 is upstream's own");
@@ -745,7 +745,7 @@ TEST(TheTelemetry, TheBytesAreWhatCayenneLppWrites) {
 }
 
 TEST(TheTelemetry, TheLppOfLppGetIsTheLppTheTelemetryPathBuilds) {
-  // The two compositions of src/power/Telemetry.h, for the same readings: LPP_GET's whole list,
+  // The two compositions of src/common/power/Telemetry.h, for the same readings: LPP_GET's whole list,
   // and what upstream's MyMesh::handleRequest writes around TwinOakSensors::querySensors.
   const TelemetrySnapshot s = sampleSnapshot();
   FakeSource source;

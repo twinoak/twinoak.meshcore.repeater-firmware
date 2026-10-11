@@ -1,4 +1,4 @@
-// src/link/codec/: the box link as bytes, held against spec/fixtures/link/link-v1.json - the file
+// src/common/link/codec/: the box link as bytes, held against spec/fixtures/link/link-v1.json - the file
 // spec/tools/linkref.py generates from spec/LINK-PROTOCOL.md and that the Walter's firmware tests
 // its own codec against, in its own repository.
 //
@@ -31,13 +31,13 @@
 #include <string>
 #include <vector>
 
-#include "link/codec/Cobs.h"
-#include "link/codec/Crc16.h"
-#include "link/codec/FrameReceiver.h"
-#include "link/codec/FrameWriter.h"
-#include "link/codec/Messages.h"
-#include "link/codec/Numbers.h"
-#include "link/codec/Packet.h"
+#include "common/link/codec/Cobs.h"
+#include "common/link/codec/Crc16.h"
+#include "common/link/codec/FrameReceiver.h"
+#include "common/link/codec/FrameWriter.h"
+#include "common/link/codec/Messages.h"
+#include "common/link/codec/Numbers.h"
+#include "common/link/codec/Packet.h"
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"

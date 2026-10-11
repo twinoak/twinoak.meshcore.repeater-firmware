@@ -91,13 +91,34 @@ flash held before it) and one with **any byte outside the region**.
 
 ### The descriptor
 
-Every image is meant to carry 96 bytes saying what it is
-(`spec/FIRMWARE-MANIFEST.md` §4), so that a renamed or mixed-up file is caught
-by the Walter before it is flashed. **No image carries one yet** — phase 3's
-task 01 places it. The check is written and switched off: the tooling says *no
-descriptor yet* per image, and `build_release.py --require-descriptor` turns it
-on, holding the descriptor against the manifest entry. The release workflow
-gains that flag in the same task that places the descriptor.
+Every image carries 96 bytes saying what it is — role, slot, the box-link
+version it speaks, its own version, the board and the band, with a CRC-32 over
+the first 92 (`spec/FIRMWARE-MANIFEST.md` §4) — so that a renamed or mixed-up
+file is caught by the Walter before it is flashed. The firmware's build places
+it as a `const` object and reads its own `HELLO` out of it
+(`src/common/fwdesc/`, `docs/ARCHITECTURE.md` §8).
+
+It is checked three times, and the first two are here:
+
+1. **in the build.** `tools/pio/descriptor.py` runs after every link: it cuts
+   the raw application binary out of the `.hex`, finds the descriptor with
+   `spec/tools/manifestref.py`'s own reader, and fails the build unless there
+   is **exactly one** and its role, board, band and version are the
+   environment's. So an image that is wrong about itself never reaches a
+   release. It leaves the raw binary as `firmware.bin` beside the other
+   images, which is what `tools/verify.ps1` copies to
+   `out/build/<env>/firmware.bin` — `python spec/tools/manifestref.py
+   descriptor out/build/<env>/firmware.bin` reads it back.
+2. **in the release.** `build_release.py --require-descriptor` is **on**, in
+   `.github/workflows/release.yml` and in the local dry run of
+   `tools/verify.ps1`: an image with no descriptor, with two, or with one that
+   disagrees with its manifest entry stops the release with one line.
+3. **in the Walter**, which reads the bytes out of what it downloaded before it
+   flashes anything, and after the flash holds the `HELLO` it gets against the
+   descriptor it wrote (`spec/FIRMWARE-MANIFEST.md` §5).
+
+Each image entry also carries `requires.link_major`: the box-link major the
+image speaks, so a Walter of another major is not offered it at all.
 
 ## The key
 
