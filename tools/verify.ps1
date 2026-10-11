@@ -174,7 +174,8 @@ if (Step-Wanted 'build') {
             # leave the evidence). hex: the Walter over SWD. zip: adafruit-nrfutil DFU over USB.
             # uf2: the bootloader's drive. elf: the debugger. buildinfo.json and ldscript.ld:
             # what the build knew about itself, which the release tooling reads instead of being
-            # told (tools/pio/buildinfo.py).
+            # told (tools/pio/buildinfo.py). map: the linker map, which object every symbol came
+            # from (tools/pio/linkmap.py).
             #
             # The release step reads this copy and not .pio/build/<env>, because the native step
             # runs PlatformIO inside a container: a different Python and a different core see a
@@ -183,7 +184,7 @@ if (Step-Wanted 'build') {
             $dest = Join-Path (Join-Path $outDir 'build') $e
             New-Item -ItemType Directory -Force -Path $dest | Out-Null
             foreach ($name in @('firmware.hex', 'firmware.zip', 'firmware.uf2', 'firmware.elf',
-                                'buildinfo.json', 'ldscript.ld')) {
+                                'firmware.map', 'buildinfo.json', 'ldscript.ld')) {
                 $src = Join-Path $root ".pio/build/$e/$name"
                 if (Test-Path $src) { Copy-Item $src (Join-Path $dest $name) -Force }
                 else { $ok = $false; $note = "$name missing" }

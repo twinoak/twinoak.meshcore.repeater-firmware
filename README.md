@@ -82,11 +82,17 @@ container provides it. The task piles that build the rest are run with
 - **Upstream is not edited.** Our code subclasses and composes
   (`docs/ARCHITECTURE.md` §2).
 - **Nothing the mesh says is logged as text.** `MESH_PACKET_LOGGING` and
-  `MESH_DEBUG` stay off; a test greps for them.
+  `MESH_DEBUG` stay off; `test/test_rails` reads `platformio.ini` and walks
+  `src/` for them, and for a line that prints a packet's payload.
 - **A password is in RAM for the length of a send** and nowhere else.
 - **One packet per send** for everything the mesh client originates.
 - **Path hashes this firmware chooses are two bytes or more.**
-- **No default password is ever on the air.**
+- **No default password is ever on the air.** A node that boots with no saved
+  settings draws itself a random admin password that nobody knows
+  (`src/app/FirstBoot.cpp`, `test/test_password`); the one a person sets at the
+  USB console with `password <new>` - which the console allows and the mesh
+  does not - is the first anyone can use. `test/test_rails` fails a board
+  environment whose `ADMIN_PASSWORD` is upstream's word, or missing.
 - **Never a chip erase.** The file system holds the node's identity; an image
   lives inside its application region and nowhere else.
 

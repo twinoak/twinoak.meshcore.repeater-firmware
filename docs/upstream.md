@@ -36,7 +36,7 @@ a checkout of MeshCore's own tree gets, and some things had to be arranged by
 hand. `tasks/phase-0/reports/01.md` has the whole list of ten with what each
 cost; what follows is the shorter list that matters here.
 
-## The seven places a bump re-reads
+## The eight places a bump re-reads
 
 Each of these depends on upstream in a way a compiler may not catch, so each is
 read again at the new tag — by the session of a red bump
@@ -48,10 +48,11 @@ merges a green one if they want to be sure.
 | 1 | **the copied flag blocks** — `[nrf52_base]` and `[env:repeater_rak4630_single]` of our `platformio.ini` | MeshCore's `[arduino_base]`, `[nrf52_base]` and `[sensor_base]` (its root `platformio.ini`) and `[rak4631]` and `[env:RAK_4631_repeater]` (`variants/rak4631/platformio.ini`). They use paths relative to MeshCore's own root (`-I variants/rak4631`, `extra_scripts = create-uf2.py`, `post:variants/rak4631/fix_bsec_lib.py`), so they cannot be included from here and are copied. A define added, removed or renamed upstream is a silent difference here: the build stays green and the firmware is not the one upstream ships. Our copy names the section it came from and says what was deliberately left out |
 | 2 | **`[libs]`**, every version exact | MeshCore asks with ranges (`library.json`: `jgromes/RadioLib ^7.6.0`, `rweather/Crypto ^0.4.0`, `adafruit/RTClib ^2.1.3`, `melopero/Melopero RV3028 ^1.1.0`; its `platformio.ini` adds the sensor libraries and a git commit for RadioLib). A reproducible build needs exact ones, so a bump re-resolves them and brings across what moved — and keeps our pins **first** in `lib_deps`, which is what makes MeshCore's own range resolve to the RadioLib we chose |
 | 3 | **`boards/rak4631.json`**, vendored byte for byte | PlatformIO reads `boards_dir` before it clones a dependency, so `board = rak4631` cannot name a file inside MeshCore (`boards/README.md`). A bump re-copies upstream's and `diff`s it — the `ldscript` line in it is what decides place 7 |
-| 4 | **`tools/pio/`** — what each script reaches for inside the pinned tree | `meshcore_private_libs.py` compiles `lib/ed25519` out of the checkout (a *private* library of upstream's project, which a package consumer does not get); `meshcore_uf2.py` runs `bin/uf2conv/uf2conv.py` out of it with the nRF52840 family id `0xADA52840`. Both raise with this page's name in the message if the pin moves what they reach for, so these two fail loudly rather than quietly. `buildinfo.py` reaches for nothing of upstream's |
-| 5 | **every place that cites a line of upstream's at the old pin** | a comment in `src/` that names a file and a function of MeshCore's, as the convention asks (`tasks/README.md`), and anything else that spells the pin out. `grep -rn "<the old pin's first eight characters>"` finds them. Today that grep finds no comment in `src/` — there is no code of ours yet — but it does find **two tests with the pin as a literal**, which is the thing to read first: see *What a bump costs today* below |
-| 6 | **`build_as_lib.py`'s defines** | it is upstream's own script, run by its `library.json`, and it decides which of MeshCore's sources are compiled. We set `MC_VARIANT=rak4631` (which adds `variants/rak4631`) and `BUILD_EXAMPLE=simple_repeater` (which adds `examples/simple_repeater/*.cpp`), and phase 1 adds `EXCLUDE_FROM_EXAMPLE=main.cpp`. We deliberately set neither `DISPLAY_CLASS` nor `MC_UI_FLAVOR`. A rename there, or an example renamed, is a build that compiles the wrong set of files or none |
+| 4 | **`tools/pio/`** — what each script reaches for inside the pinned tree | `meshcore_private_libs.py` compiles `lib/ed25519` out of the checkout (a *private* library of upstream's project, which a package consumer does not get); `meshcore_variant.py` compiles `variants/rak4631/RAK4631Board.cpp` and `variant.cpp` out of it — and refuses to run if `MC_VARIANT` is set, because that would compile upstream's `target.cpp` beside ours; `meshcore_uf2.py` runs `bin/uf2conv/uf2conv.py` out of it with the nRF52840 family id `0xADA52840`. All three raise with this page's name in the message if the pin moves what they reach for, so they fail loudly rather than quietly. `buildinfo.py` and `linkmap.py` reach for nothing of upstream's |
+| 5 | **every place that cites a line of upstream's at the old pin** | a comment in `src/` that names a file and a function of MeshCore's, as the convention asks (`tasks/README.md`), and anything else that spells the pin out. `grep -rn "<the old pin's first eight characters>"` finds them: `src/app/TwinOakMesh.h` (the eight overrides, each with the upstream declaration and definition it matches, and `Mesh::onRecvPacket`'s peer loop by line), `src/main.cpp` (upstream's `main.cpp`, which ours is a copy of minus the display, Ethernet and the other platforms), `src/app/FirstBoot.h` (`CommonCLI::loadPrefs` and the two files it reads), `src/board/target.h` (upstream's `target.{h,cpp}`), `docs/ARCHITECTURE.md` §11 (every claim with its line) — and **two tests with the pin as a literal**, which is the thing to read first: see *What a bump costs today* below |
+| 6 | **`build_as_lib.py`'s defines** | it is upstream's own script, run by its `library.json`, and it decides which of MeshCore's sources are compiled. We set `BUILD_EXAMPLE=simple_repeater` (which adds `examples/simple_repeater/*.cpp`) and, after it — the script reads the defines in order — `EXCLUDE_FROM_EXAMPLE=main.cpp`. We deliberately set neither `MC_VARIANT` (it would compile upstream's `target.cpp`, the file `src/board/target.cpp` replaces; the two variant files we do need are place 4's) nor `DISPLAY_CLASS` nor `MC_UI_FLAVOR`. A rename there, or an example renamed, is a build that compiles the wrong set of files or none |
 | 7 | **the application region in the linker script** | `boards/rak4631.json` names `nrf52840_s140_v6.ld`, which the Adafruit core fork provides, and its `FLASH` region (`ORIGIN = 0x26000, LENGTH = 0xED000 - 0x26000`) is where an image may live and nothing else. `tools/pio/buildinfo.py` copies the script the link used and the release tooling reads `app_region` out of that copy, with tests that refuse a byte outside it — so a move is caught. But the manifest's `app_region` then **changes**, and the Walter writes images at that address: a bump that moves the region is a bump whose report says so, loudly, because the other box has to be told |
+| 8 | **what our sources take from upstream's headers** | `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` are the only two files of ours that include an upstream header, as system headers, so that upstream's warnings do not fail our `-Werror` (`docs/ARCHITECTURE.md` §11). A bump that adds a header we need is a line in one of them. And upstream's `MyMesh.h` includes `<target.h>` *unqualified*, which is what lets ours shadow theirs by include order — a bump that qualifies that include, or adds a `target.h` of its own earlier on the path, is a build that constructs two boards |
 
 And the rails that must survive a bump, because a bump is exactly when one gets
 quietly lost: nothing the mesh says logged as text (`MESH_PACKET_LOGGING` and
@@ -61,12 +62,10 @@ and the `spec/` fixtures green.
 
 ## What of MeshCore this firmware stands on
 
-Today: nothing of ours is compiled into the image at all. Phase 0 builds
-upstream's stock `simple_repeater` from the pin, so the only things a bump can
-break are the seven above.
-
-From phase 1 on, our application is `TwinOakMesh : public MyMesh` and what it
-needs of upstream is a short list of **public and protected virtual** members —
+Since phase 1's first task, our application is `TwinOakMesh : public MyMesh`
+(`src/app/`), our `main.cpp` constructs it, and `src/board/target.cpp` is the
+board. What it needs of upstream is a short list of **public and protected
+virtual** members —
 `handleCommand`, `getNodePrefs`/`savePrefs`, the `sensors` seams,
 `onAdvertRecv`, `logRx`, `logTx`, `searchPeersByHash`, `getPeerSharedSecret`,
 `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv`, and `Mesh`'s own
@@ -154,7 +153,7 @@ delete both branches afterwards — a rehearsal is a test, not a bump.
 It writes `tasks/sync/NN-meshcore-<tag>.md` from
 [`tasks/sync/TEMPLATE.md`](../tasks/sync/TEMPLATE.md) — the tag, the pull
 request, the failing log, and the standing instructions: read what upstream
-changed, re-read the seven places, bring the code to the new API, keep the
+changed, re-read the eight places, bring the code to the new API, keep the
 rails, verify locally, and say in the report what upstream changed that
 mattered. It adds the row the driver's table needs and changes nothing else:
 the pin was already moved by the branch the workflow pushed, and the session

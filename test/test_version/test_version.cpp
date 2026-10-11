@@ -1,10 +1,10 @@
-// src/version.cpp: the string, its shape, and the defines platformio.ini feeds it.
+// src/app/Version.cpp: the string, its shape, and the defines platformio.ini feeds it.
 
 #include <gtest/gtest.h>
 
 #include <string.h>
 
-#include "version.h"
+#include "app/Version.h"
 
 TEST(Version, FormatsTheThreeParts) {
   char buf[96];

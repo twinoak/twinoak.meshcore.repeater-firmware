@@ -49,9 +49,32 @@ fails goes back to the task's follow-ups.
   reason before any other, which `docs/upstream.md`'s *What a bump costs today*
   names.
 
-## 1. The repeater on the rig
+## 1. The repeater alone on USB
 
-(phase 1, task 01)
+- [ ] **p1-01** Flash the UF2 (double-tap reset on the adapter's USB-C; the
+  bootloader's drive appears) and open the console at 115200. It prints
+  `Repeater ID: <64 hex digits>`, and on the very first boot of a module - or
+  after `erase` - one more line, `First boot: a random admin password was set
+  (not shown; …)`. `ver` says `v1.17.1 (Build: 14 Aug 2026)`, upstream's.
+  `board` says `RAK 4631`. `get radio` says `869.618,62.5,8,8`. `sensor list`
+  says `1 vars` and `fw.version=twinoak-repeater 0.0.0-dev on MeshCore
+  repeater-v1.17.1 (d9296435)` (a release build says its version instead);
+  `sensor get fw.version` the same string; `sensor set fw.version x` is
+  refused (`can't find custom var`, upstream's wording for a key that took no
+  value).
+- [ ] **p1-01** It hears adverts (`neighbors` after a few minutes on the roof
+  antenna) and repeats (a message through it from a phone).
+- [ ] **p1-01** A phone login with the password `password` is refused, and so
+  is `not-a-password` (the build's placeholder, which the first boot
+  overwrote). After `password <something>` on the console that one is
+  accepted; a power cycle keeps it (`/prefs.json` holds it) and prints no
+  `First boot` line.
+- [ ] **p1-01** `INFO.VARIANT` of the module, for the Walter's flasher
+  (hardware repository, `BENCH-BREADBOARD.md` caveat 6): record it here.
+- [ ] **p1-01** I2C is at 100 kHz on the scope (SCL, P0.14) - `Wire.setClock`
+  after upstream's `begin()`; the BME280, if fitted, is found by itself
+  (`sensor list` does not show it - upstream lists no setting for it - but a
+  telemetry request from a phone carries temperature, humidity and pressure).
 
 ## 2. The link from a laptop
 
