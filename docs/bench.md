@@ -16,9 +16,6 @@ fails goes back to the task's follow-ups.
   `Repeater ID:` on the USB console at 115200 and advertise on 869.618 MHz,
   62.5 kHz, SF8, CR8 — and it carries upstream's default admin password, which
   phase 3's provisioning replaces.
-- [ ] **p0-01** Branch protection on `main` is set through the GitHub API by
-  the task; if the report says `gh` had no right to, set it by hand
-  (`tasks/phase-0/reports/01.md`, *Not verified here*).
 
 ## 1. The repeater on the rig
 
