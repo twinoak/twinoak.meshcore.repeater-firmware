@@ -1,0 +1,367 @@
+# The release: a GitHub Release a person, MeshMaster's catalogue and the Walter can all use.
+#
+#   push a tag vX.Y.Z   -> refuse a commit ci has not passed -> build every board -> sign ->
+#                          verify the signature -> publish
+#   Run workflow        -> the same jobs, published nowhere: a dry run whose artifact is the proof
+#                          that the tag path works. Input "ref": the commit to rehearse on.
+#
+# The shape is twinoak/meshmaster-agent-firmware's release.yml at 51faafb4: a ci-green job that
+# refuses a commit CI has not passed, the build, the publish, and a dry run that is the same jobs
+# with one step fewer. What is different here is what a repeater release carries
+# (spec/FIRMWARE-MANIFEST.md): not only the images but a manifest.json that says what each image
+# is, the signature over it, and SHA256SUMS.
+#
+# Per board, named twinoak-<role>-<board>-<band>-vX.Y.Z.<ext>:
+#   .bin   the raw application binary for the Walter's SWD flasher, with its load_address
+#   .zip   the nrfutil DFU package, for a laptop on the adapter's USB-C port
+#   .uf2   for the bootloader's drag-and-drop drive
+# and once for the release:
+#   manifest.json      the canonical manifest (spec/FIRMWARE-MANIFEST.md section 2)
+#   manifest.json.sig  one Ed25519 line over its bytes (section 3)
+#   SHA256SUMS         over every file above, the manifest included
+#
+# **A tag with no RELEASE_SIGNING_KEY fails.** A release is signed or it is not a release; the
+# message says how the key is made (keys/README.md). A dry run signs with the specification's
+# public test key and its version is 0.0.0-dryrun+<sha7>, which is not a release version, so
+# tools/release/sign_manifest.py would refuse to sign a real release the same way.
+#
+# **Merging never releases.** A release is a person pushing a tag, or pressing *Run workflow* for
+# a rehearsal (tasks/RUNBOOK.md section 4).
+
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit or branch to rehearse the release on. Empty: this workflow's ref."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# One release at a time, and none is ever cancelled half-way through a publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  # The same pin as ci.yml, which is this machine's (tasks/README.md, phase 0's task 01).
+  PIO_VERSION: "6.2.0"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  # Nothing is released whose build and tests are red or unknown, and nothing is released that
+  # cannot be signed. Both are settled here, before anything is built.
+  ci-green:
+    name: ci is green for this commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      version: ${{ steps.commit.outputs.version }}
+      release: ${{ steps.commit.outputs.release }}
+      envs: ${{ steps.envs.outputs.envs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: The commit, and the version it is released as
+        id: commit
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}+${sha:0:7}"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          else
+            # Not a release version (spec/FIRMWARE-MANIFEST.md section 3): the test key may sign
+            # it, and no artifact of a rehearsal can be mistaken for a release.
+            version="0.0.0-dryrun+${sha:0:7}"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "$GITHUB_REF_NAME -> $version" >> "$GITHUB_STEP_SUMMARY"
+
+      # The commit a tag names must be one of main's: a tag on a side branch is not a release.
+      - name: And that it is on main
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/main \
+            || { echo "::error::$(git rev-parse HEAD) is not a commit of main"; exit 1; }
+
+      # A release is signed or it is not a release. Only whether the secret is empty is tested;
+      # its value is never printed, compared or written anywhere (keys/README.md).
+      - name: And that there is a key to sign it with
+        if: github.ref_type == 'tag'
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::RELEASE_SIGNING_KEY is not set, so this tag cannot be signed, so it is not a release. The key is made once, by a person: python spec/tools/manifestref.py keygen. The private half becomes this repository's RELEASE_SIGNING_KEY secret and exists nowhere else; the public half goes in keys/release.pub (keys/README.md)."
+            exit 1
+          fi
+          echo "a signing key is present; its value is never printed"
+
+      # The board environments of platformio.ini, so that adding a role or a board stays one
+      # section of that file and no second list (phase 0's task 01, decision 2).
+      - name: The board environments to build
+        id: envs
+        run: |
+          set -euo pipefail
+          envs=$(sed -n 's/^\[env:\([^]]*\)\]$/\1/p' platformio.ini | grep -vx native | jq -R . | jq -sc .)
+          echo "envs=$envs" >> "$GITHUB_OUTPUT"
+          echo "the images: $envs"
+
+      # ci.yml runs on a push to main and on a pull request, once per commit, and never on a
+      # branch push (phase 0's task 01): so a green run of either event for this commit is the
+      # evidence, and a rehearsal on a branch has its pull request's run.
+      - name: Wait for the ci workflow of that commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$SHA" \
+                     --limit 20 --json status,conclusion,event,url)
+            green=$(echo "$runs" | jq -r '[.[] | select(.status == "completed" and .conclusion == "success")] | length')
+            pending=$(echo "$runs" | jq -r '[.[] | select(.status != "completed")] | length')
+            total=$(echo "$runs" | jq -r 'length')
+            echo "ci for $SHA: $total run(s), $green green, $pending still running"
+            if [ "$green" -gt 0 ]; then
+              echo "$runs" | jq -r '.[] | select(.conclusion == "success") | "ci green: \(.url) (\(.event))"'
+              exit 0
+            fi
+            if [ "$total" -gt 0 ] && [ "$pending" -eq 0 ]; then
+              echo "::error::ci has completed for $SHA without a green run. Nothing is released."
+              echo "$runs" | jq -r '.[] | "  \(.event) \(.conclusion) \(.url)"'
+              exit 1
+            fi
+            sleep 20
+          done
+          echo "::error::ci has not gone green for $SHA within 20 minutes. A commit ci has not passed is not released."
+          exit 1
+
+  build:
+    name: build (${{ matrix.env }})
+    needs: ci-green
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        env: ${{ fromJSON(needs.ci-green.outputs.envs) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ci-green.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
+
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==${PIO_VERSION}"
+
+      # The version is a build flag, so it is inside the image and not in a file beside it;
+      # src/version.cpp turns it into the string the firmware reports. tools/pio/buildinfo.py
+      # writes it, the role, the board, the band, the MCU and the linker script of this build
+      # into the build directory, and the publish job reads that rather than being told.
+      - name: Build with the version baked in
+        env:
+          PLATFORMIO_BUILD_FLAGS: -D TWINOAK_FW_VERSION='"${{ needs.ci-green.outputs.version }}"'
+        run: pio run -e ${{ matrix.env }}
+
+      - name: What the publish job needs of this build
+        run: |
+          set -euo pipefail
+          out="out/builds/${{ matrix.env }}"
+          mkdir -p "$out"
+          build=".pio/build/${{ matrix.env }}"
+          cp "$build/buildinfo.json" "$build/ldscript.ld" \
+             "$build/firmware.hex" "$build/firmware.zip" "$build/firmware.uf2" "$out/"
+          cat "$out/buildinfo.json"
+          test "$(jq -r .version "$out/buildinfo.json")" = "${{ needs.ci-green.outputs.version }}" \
+            || { echo "::error::the build does not report the version this release is for"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.env }}
+          path: out/builds/${{ matrix.env }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: ${{ needs.ci-green.outputs.release == 'true' && 'publish the release' || 'dry run (nothing published)' }}
+    needs: [ci-green, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.ci-green.outputs.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install what the release tooling needs
+        run: pip install --quiet -r tools/release/requirements.txt
+
+      # No merge-multiple: each artifact lands in out/builds/build-<env>/, so the next step finds
+      # the build directories without a second list of environments anywhere.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: out/builds
+
+      - name: The images, the manifest and SHA256SUMS
+        env:
+          VERSION: ${{ needs.ci-green.outputs.version }}
+          SHA: ${{ needs.ci-green.outputs.sha }}
+        run: |
+          set -euo pipefail
+          args=""
+          for dir in out/builds/*/; do args="$args --build-dir ${dir%/}"; done
+          echo "building a release from:$args"
+          python tools/release/build_release.py --clean --out out/release \
+            --commit "$SHA" --version "$VERSION" $args
+          ls -l out/release
+
+      # The key is in the environment and nowhere else. A dry run never sees it: --test-key, and
+      # sign_manifest.py refuses to sign a release version with that key.
+      - name: Sign the manifest
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE: ${{ needs.ci-green.outputs.release }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE" = "true" ]; then
+            python tools/release/sign_manifest.py --public-out out/public.hex out/release/manifest.json
+          else
+            python tools/release/sign_manifest.py --test-key --public-out out/public.hex out/release/manifest.json
+          fi
+          cat out/release/manifest.json.sig
+
+      # Before anything is published: the signature just made passes against the public half,
+      # with the specification's own verifier (spec/tools/manifestref.py).
+      - name: Verify the signature before anything is published
+        run: |
+          set -euo pipefail
+          python spec/tools/manifestref.py verify "$(cat out/public.hex)" out/release/manifest.json
+          # And that SHA256SUMS is true of the files beside it: the names in it have no path.
+          (cd out/release && sha256sum -c SHA256SUMS)
+
+      - name: The release notes
+        env:
+          RELEASE: ${{ needs.ci-green.outputs.release }}
+        run: |
+          set -euo pipefail
+          python - <<'PY' > out/NOTES.md
+          import json, os
+          m = json.load(open("out/release/manifest.json"))
+          sig = open("out/release/manifest.json.sig").read().split()
+          up = m["upstream"]
+          release = os.environ["RELEASE"] == "true"
+          v = "v" + m["version"].split("+")[0]
+          print("TwinOak repeater firmware %s, built from `%s` on %s `%s` (`%s`)."
+                % (v, m["commit"][:7], up["name"], up["tag"], up["commit"][:8]))
+          print()
+          print("The firmware reports `%s`, and the box link it speaks is %d.%d."
+                % (m["version"], m["link"]["major"], m["link"]["minor"]))
+          if not release:
+              print()
+              print("**This is a dry run.** The files are the workflow's artifact, nothing is "
+                    "published, and the signature is the specification's public *test* key: "
+                    "`%s`. A release is a person pushing a tag." % sig[1])
+          print()
+          print("## What is in it")
+          print()
+          print("| File | For |")
+          print("|---|---|")
+          for image in m["images"]:
+              for f in image["files"]:
+                  for_what = {
+                      "swd": "**the Walter**, over SWD: the raw application binary, written at "
+                             "`%s` and nowhere else" % f.get("load_address", ""),
+                      "usb-dfu": "a laptop on the adapter's **USB-C** port: "
+                                 "`adafruit-nrfutil dfu serial -pkg <file> -p <PORT> -b 115200`",
+                      "usb-uf2": "a laptop on the **USB-C** port, the bootloader's drag-and-drop "
+                                 "drive (double-tap reset, then copy the file onto it)",
+                  }.get(f["use"], "`use: %s` (spec/FIRMWARE-MANIFEST.md section 2)" % f["use"])
+                  print("| `%s` | %s |" % (f["name"], for_what))
+          print("| `manifest.json` | what each image is, for the Walter and for MeshMaster's "
+                "catalogue (`spec/FIRMWARE-MANIFEST.md`) |")
+          print("| `manifest.json.sig` | one Ed25519 line over the manifest's bytes, key id "
+                "`%s` |" % sig[1])
+          print("| `SHA256SUMS` | every file above, the manifest included |")
+          print()
+          print("Because the manifest carries the SHA-256 of every file, that one signature "
+                "covers the whole release. A file is identified by its hash, never by its name.")
+          print()
+          print("## An image is only ever written to the application region")
+          print()
+          for image in m["images"]:
+              r = image.get("app_region")
+              if r:
+                  print("On `%s` (%s) that region is **`%s`..`%s`** - read from the linker script "
+                        "this firmware was linked with, not typed in. Above it lies the file "
+                        "system that holds the node's identity, its settings, the ACL and the "
+                        "clock; below it the MBR, the SoftDevice. An update writes the "
+                        "application region and nothing else: no chip erase, ever, and the "
+                        "Walter refuses a manifest that asks for more "
+                        "(`spec/SYSTEM.md` S-5, `docs/ARCHITECTURE.md` section 9)."
+                        % (image["board"], image["id"], r["start"], r["end"]))
+          print()
+          print("## Flashing one")
+          print()
+          print("`docs/release.md` in this repository is the long version. In short: the Walter "
+                "does this by itself for a unit in the field, and a board on a bench takes the "
+                "`.uf2` or the `.zip` over USB-C. Nothing has to be erased first.")
+          PY
+          cat out/NOTES.md
+          cat out/NOTES.md >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+      - name: Publish
+        if: needs.ci-green.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "TwinOak repeater firmware $GITHUB_REF_NAME" \
+            --notes-file out/NOTES.md \
+            out/release/*
+
+      - name: The dry run's output, for the record
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ needs.ci-green.outputs.sha }}
+          path: |
+            out/release/*
+            out/NOTES.md
+          if-no-files-found: error
+          retention-days: 14

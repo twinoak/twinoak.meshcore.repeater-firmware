@@ -2,15 +2,17 @@
 #
 # One step matters: pwsh tools/verify.ps1. It is the definition of "verified" in this repository
 # (spec/SYSTEM.md S-10): the check of spec/ against its manifest, the link fixture, every board
-# environment's build and the native tests, in that order, with a log per step under out/verify/.
+# environment's build, the native tests and a dry run of the release over what was just built, in
+# that order, with a log per step under out/verify/.
 # A task is green on the machine it was written on before it is pushed; this run confirms it, and
 # a red run after a green local one is a finding about the script (tasks/RUNBOOK.md section 4).
 #
 # One run per commit is twinoak/meshmaster.dk's rule and it is here from the first commit: a
 # branch push and its pull request are two refs, so the concurrency group below cannot collapse
 # them. A pull request is where a check blocks a merge, and a push to main is what the release
-# workflow's ci-green waits for (phase 0's task 02), so those two are the triggers and a branch
-# push is not one.
+# workflow's ci-green waits for before a tag is released (phase 0's task 02 - which, because a
+# branch push starts nothing here, lets a *rehearsal* on a branch stand on that branch's pull
+# request run instead), so those two are the triggers and a branch push is not one.
 #
 # A red job blocks the merge: tasks/RUNBOOK.md merges on green only, and the branch protection
 # of this repository makes GitHub insist too.
@@ -55,12 +57,16 @@ jobs:
           path: |
             ~/.platformio
             ~/.cache/pip
-          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini', 'tools/release/requirements.txt') }}
           restore-keys: |
             pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
 
-      - name: Install PlatformIO Core
-        run: pip install --quiet "platformio==${PIO_VERSION}"
+      # The release step of tools/verify.ps1 needs cryptography (Ed25519 for the manifest's
+      # signature), pinned in tools/release/requirements.txt. Installed into this runner's own
+      # Python, which is the one PlatformIO runs on, so the script takes its host path here; on a
+      # Windows box with no cryptography it uses the container instead.
+      - name: Install PlatformIO Core and what the release tooling needs
+        run: pip install --quiet "platformio==${PIO_VERSION}" -r tools/release/requirements.txt
 
       # The one step that matters. g++ is the runner's own, so the native tests run on the host
       # here; on a Windows box the script runs them in a container instead.
@@ -84,7 +90,8 @@ jobs:
           done
 
       # The images (the .hex the Walter flashes over SWD, the DFU .zip for a laptop, the .uf2 for
-      # the bootloader's drive, the .elf) and every step's log.
+      # the bootloader's drive, the .elf), the dry run of the release the verify script makes, and
+      # every step's log.
       - name: Keep the images and the logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -92,6 +99,7 @@ jobs:
           name: firmware-${{ github.sha }}
           path: |
             out/build/
+            out/release/
             out/verify/
           if-no-files-found: error
           retention-days: 14

@@ -1,0 +1,142 @@
+# The release
+
+A release of this firmware is a GitHub Release that three readers can use: a
+person with a laptop, MeshMaster's firmware catalogue, and the Walter that
+flashes the RAK over SWD. What it carries and how each reader checks it is
+`spec/FIRMWARE-MANIFEST.md`; this page is how it is made here, and what to do
+when it refuses.
+
+**Merging never releases.** A release is a person pushing a tag. CI on `main`
+proves a commit is releasable; it publishes nothing.
+
+## Making one
+
+```powershell
+git checkout main
+git pull --ff-only
+git tag v0.3.0            # the commit must be one of main's, and ci must be green on it
+git push origin v0.3.0
+```
+
+That starts `.github/workflows/release.yml`, which does, in order:
+
+1. **`ci-green`** — refuses a tag whose commit `ci` has not passed, refuses a
+   tag that is not on `main`, refuses a tag when there is no signing key, and
+   works out the version: `X.Y.Z+<sha7>`, which is what the firmware itself
+   reports.
+2. **`build`** — one job per board environment of `platformio.ini`, built with
+   `-D TWINOAK_FW_VERSION="X.Y.Z+<sha7>"` so the version is *inside* the image.
+   `tools/pio/buildinfo.py` leaves `buildinfo.json` and a copy of the linker
+   script beside the images, which is what the next job reads instead of being
+   told anything.
+3. **`publish`** — `tools/release/build_release.py` writes the files,
+   `tools/release/sign_manifest.py` signs the manifest with the repository
+   secret `RELEASE_SIGNING_KEY`, `spec/tools/manifestref.py verify` proves that
+   signature **before** anything is published, and then `gh release create`
+   uploads the lot.
+
+### A rehearsal
+
+*Actions → release → Run workflow*, with `ref` left empty or set to a commit or
+branch. It is the same three jobs and the same code; nothing is published. The
+files are the run's artifact, the version is `0.0.0-dryrun+<sha7>` and the
+signature is the specification's **public test key** — so an artifact of a
+rehearsal can never be mistaken for a release, and
+`tools/release/sign_manifest.py` would refuse to sign a real `X.Y.Z` with that
+key.
+
+The same rehearsal happens on this machine on every commit:
+`tools/verify.ps1`'s `release` step runs the tooling's tests and then a dry run
+over the build it has just made (`out/release/`, `out/verify/release.log`). The
+release path is therefore exercised without GitHub and without the key.
+
+## What is in it
+
+Per image — one role on one board in one band — three files, named
+`twinoak-<role>-<board>-<band>-vX.Y.Z.<ext>`:
+
+| File | `use` | For |
+|---|---|---|
+| `.bin` | `swd` | **the Walter.** The raw application binary with its `load_address`: exactly the bytes that go in the application region and nothing else. |
+| `.zip` | `usb-dfu` | a laptop on the adapter's USB-C port: `adafruit-nrfutil dfu serial -pkg <file> -p <PORT> -b 115200` |
+| `.uf2` | `usb-uf2` | a laptop on the USB-C port: double-tap reset, then copy the file onto the drive that appears |
+
+and once for the whole release:
+
+| File | |
+|---|---|
+| `manifest.json` | what each image is: role, board, band, MCU, the application region, and every file's size and SHA-256 (`spec/FIRMWARE-MANIFEST.md` §2) |
+| `manifest.json.sig` | one ASCII line, `ed25519 <key id> <base64>`, over the manifest's bytes (§3) |
+| `SHA256SUMS` | every file above, the manifest included |
+
+Because the manifest carries the hash of every file, **one signature covers the
+whole release**, and a file is identified by its hash and never by its name.
+
+### The application region
+
+`app_region` in the manifest is read from the linker script the build actually
+used — the `FLASH` region of its `MEMORY` block — and is never a constant in
+the tooling. On the RAK4630 today that is `0x00026000`..`0x000ED000`: the
+application starts at `0x26000` above the MBR and the SoftDevice, and ends
+where the file system holding the node's identity, its settings, the ACL and
+the clock file begins. An update writes that span and nothing else; no chip
+erase, ever (`spec/SYSTEM.md` S-5, `docs/ARCHITECTURE.md` §9). A firmware
+change that moves the end of the region moves `app_region` with it by itself,
+and the Walter refuses a manifest that asks to write outside the region it
+knows for that board.
+
+`build_release.py` also refuses an image that is **not one contiguous span**
+(the raw binary is written at one address, so a gap would leave whatever the
+flash held before it) and one with **any byte outside the region**.
+
+### The descriptor
+
+Every image is meant to carry 96 bytes saying what it is
+(`spec/FIRMWARE-MANIFEST.md` §4), so that a renamed or mixed-up file is caught
+by the Walter before it is flashed. **No image carries one yet** — phase 3's
+task 01 places it. The check is written and switched off: the tooling says *no
+descriptor yet* per image, and `build_release.py --require-descriptor` turns it
+on, holding the descriptor against the manifest entry. The release workflow
+gains that flag in the same task that places the descriptor.
+
+## The key
+
+One Ed25519 key signs releases. Its private half is the repository secret
+`RELEASE_SIGNING_KEY` and lives nowhere else; its public half is
+`keys/release.pub` and is compiled into the Walter firmware.
+[`keys/README.md`](../keys/README.md) is how it is made, by a person, once.
+
+Nothing in the pipeline prints a key, and no error message quotes one: when
+something is wrong with the key the message says what is wrong and not what it
+was given.
+
+## When a tag is refused
+
+The run stops in `ci-green` or at the signing step, and nothing is published —
+a refused tag has published nothing, so the fix is a new commit and a new tag
+(`v0.3.1`), not a forced one.
+
+| What the log says | What happened | What to do |
+|---|---|---|
+| `RELEASE_SIGNING_KEY is not set` | the repository has no signing key | make it: `keys/README.md`. Until it exists, no tag can be released, which is the safe state |
+| `… is not a commit of main` | the tag is on a side branch | tag a commit of `main` |
+| `ci has completed for … without a green run` | `ci` was red on that commit | fix it on `main`, then tag the new commit |
+| `ci has not gone green for … within 20 minutes` | `ci` never ran, or is still running | wait for `ci` on `main` to finish and tag again; a tag whose commit CI has not passed is not released |
+| `… is not the key keys/release.pub publishes` | the secret and the published public half are not two halves of one key | one of them is wrong. Replace the secret, or publish the right public half in a commit — and work out which, because a Walter trusts only what `keys/release.pub` says |
+| `this manifest says version X.Y.Z, which is a release` | something tried to sign a release with the test key | that is the guard working; a release is signed with `RELEASE_SIGNING_KEY` |
+| `is not one contiguous span` / `outside the application region` | the linked image is not a single span inside the application region | a change to the linker script or to a `KEEP` section put bytes somewhere an update may not write. Read the addresses in the message against the script line it quotes |
+| `was built as version … and this release says …` | the images were not built for this release | re-run the workflow; the version is a build flag and must be in the image |
+
+The same messages come out of `tools/verify.ps1` on this machine, with no tag
+and no key involved, which is where they are meant to be met first.
+
+## Versions
+
+`X.Y.Z+<sha7>` is what the firmware reports and what the manifest records; the
+file names carry `vX.Y.Z` without the build metadata. A tag is `vX.Y.Z` and
+nothing else — the workflow's trigger is `v[0-9]+.[0-9]+.[0-9]+`, so a
+pre-release tag does not start it.
+
+A version with a pre-release part (`0.0.0-dev` from a local build,
+`0.0.0-dryrun+<sha7>` from a rehearsal) is not a release version: that is the
+line `sign_manifest.py` draws when it decides whether the test key may sign.

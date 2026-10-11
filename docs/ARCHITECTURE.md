@@ -22,8 +22,9 @@ src/
   fwdesc/               the image descriptor
 test/                   native tests, one directory per subject
 spec/                   a copy of the system specification and its fixtures - never edited here
-tools/                  verify.ps1, the release tooling, PlatformIO helper scripts
-docs/                   this file, upstream.md, link.md, bench.md
+keys/                   release.pub, the public half of the release key - and nothing secret, ever
+tools/                  verify.ps1, release/ (the release tooling and its tests), pio/ (build scripts)
+docs/                   this file, release.md, upstream.md, link.md, bench.md
 tasks/                  the piles
 ```
 

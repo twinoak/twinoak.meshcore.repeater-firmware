@@ -1,0 +1,8 @@
+# What the release tooling needs beyond the standard library, pinned here and nowhere else:
+# tools/verify.ps1 and .github/workflows/release.yml both install from this file.
+#
+# cryptography is Ed25519 (RFC 8032, no pre-hash, no context) for the manifest's signature.
+# spec/tools/manifestref.py imports it, and only for signing and verifying - the manifest and the
+# descriptor halves of that file need nothing. Exact, like every other dependency of this
+# repository (tasks/README.md): the newest release on the day this was written.
+cryptography==50.0.2
