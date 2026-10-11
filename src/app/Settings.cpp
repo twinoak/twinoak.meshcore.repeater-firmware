@@ -6,34 +6,59 @@
 namespace twinoak {
 namespace {
 
-// The order `sensor list` prints, and the order upstream's paging counts in. It is chosen and
-// not alphabetical, because upstream's `sensor list` stops adding lines once it has written
-// **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp at the pin d9296435) and the
-// `fw.version` line alone is 78 of them:
+// The order `sensor list` prints, and the order upstream's paging counts in. **It is phase 1's
+// task 05's order of five keys with two appended**, which is the only place a new key can go
+// without renumbering one a bench instruction or a document already names (docs/link.md,
+// docs/bench.md, tasks/phase-1/reports/05.md).
 //
-//   - `fw.version` first, where phase 1's task 01 put it and where a bench reads it;
-//   - `walter.wake` next, because it is the one key here that *does* something, and task 03's
-//     two keys keep the order they had;
-//   - `clock.state` last, because it is the only one of the five whose value is one of four
-//     words: the two counters above it are what can grow to ten characters, and the key a
-//     long-running node pushes behind a page should be pushed by a width and not by a name.
+// That order was chosen for one quirk of upstream's: `sensor list` stops adding lines once it has
+// written **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp at the pin d9296435),
+// and the `fw.version` line alone is 78 of them. With five keys everything fitted on one page.
+// With seven it does not, and what the order buys is that **the key pushed off is pushed by a
+// width and the pair of thresholds stays together**:
 //
-// So a fresh node lists all five on one page (148 bytes of the 160) and a node whose counters
-// have grown wide lists four and `... next:4`. test/test_settings runs that arithmetic over this
-// table, so a reordering which pushes a key off the first page of a fresh node fails there and
-// not on the bench.
+//   - a fresh node lists all five of task 05's and `... next:5`, 159 bytes of the 160;
+//   - a node whose counters have grown wide lists four and `... next:4`;
+//   - `sensor list 5` is then how the two thresholds are read, and `sensor get <key>` always
+//     works whatever the paging does.
+//
+// A listing that would be longer than the window is **cut, not spilled**: the session keeps 64
+// guard bytes behind upstream's 160 and counts the cut (src/link/session/Session.h,
+// cliTruncations). The one case that reaches it is a release whose version string is longer than
+// `0.0.0-dev` *and* a clock state of `restored` - 162 bytes, cut at 159, which costs the tail of
+// `... next:5` and nothing else. tasks/phase-1/reports/06.md has that arithmetic; the test below
+// walks upstream's own loop over this table so that it is measured and not assumed.
+
 enum Key : int {
   kFwVersion = 0,
   kWalterWake,
   kLinkErrors,
   kWalterSeen,
   kClockState,
+  kPowerLowMv,
+  kPowerCritMv,
   kKeyCount,
 };
 
 const char* const kNames[kKeyCount] = {
-    "fw.version", "walter.wake", "link.errors", "walter.seen", "clock.state",
+    "fw.version",  "walter.wake",  "link.errors", "walter.seen",
+    "clock.state", "power.low_mv", "power.crit_mv",
 };
+
+// A decimal millivolt value, with nothing else in it: "3500" yes, "3500 " no, "3.5" no, "+3500"
+// no, "" no. Upstream's CLI has two words for a `set` - "ok" and "can't find custom var" - so a
+// value it cannot use must be refused and not rounded into something it can.
+bool parseMilliVolts(const char* text, uint16_t& out) {
+  if (text == nullptr || *text == 0) return false;
+  uint32_t value = 0;
+  for (const char* p = text; *p != 0; p++) {
+    if (*p < '0' || *p > '9') return false;
+    value = value * 10u + uint32_t(*p - '0');
+    if (value > 0xFFFFu) return false;
+  }
+  out = uint16_t(value);
+  return true;
+}
 
 }  // namespace
 
@@ -51,6 +76,8 @@ const char* Settings::value(int i) {
       // "0, or 1 while an attention is pending" (ARCHITECTURE section 4). Any reason, not only
       // the one this key raises: what it answers is "does this node still want the box awake".
       return host_.attentionPending() ? "1" : "0";
+    case kClockState:
+      return host_.clockStateName();
     case kLinkErrors:
       snprintf(buf_, sizeof(buf_), "%u", unsigned(host_.linkErrors()));
       return buf_;
@@ -58,8 +85,12 @@ const char* Settings::value(int i) {
       if (!host_.walterEverSeen()) return "never";
       snprintf(buf_, sizeof(buf_), "%lu", (unsigned long)host_.walterSeenSecondsAgo());
       return buf_;
-    case kClockState:
-      return host_.clockStateName();
+    case kPowerLowMv:
+      snprintf(buf_, sizeof(buf_), "%u", unsigned(host_.batteryLowMv()));
+      return buf_;
+    case kPowerCritMv:
+      snprintf(buf_, sizeof(buf_), "%u", unsigned(host_.batteryCritMv()));
+      return buf_;
     default:
       return nullptr;
   }
@@ -67,10 +98,22 @@ const char* Settings::value(int i) {
 
 bool Settings::set(const char* name, const char* value) {
   if (name == nullptr || value == nullptr) return false;
-  if (strcmp(name, kNames[kWalterWake]) != 0) return false;  // the other four are read-only
-  if (strcmp(value, "1") != 0) return false;                 // and 1 is the only value this takes
-  host_.raiseWalterWake();
-  return true;
+  if (strcmp(name, kNames[kWalterWake]) == 0) {
+    if (strcmp(value, "1") != 0) return false;  // 1 is the only value this takes
+    host_.raiseWalterWake();
+    return true;
+  }
+  if (strcmp(name, kNames[kPowerLowMv]) == 0) {
+    uint16_t mv = 0;
+    if (!parseMilliVolts(value, mv)) return false;
+    return host_.setBatteryLowMv(mv);  // the host refuses a pair it would not accept
+  }
+  if (strcmp(name, kNames[kPowerCritMv]) == 0) {
+    uint16_t mv = 0;
+    if (!parseMilliVolts(value, mv)) return false;
+    return host_.setBatteryCritMv(mv);
+  }
+  return false;  // the other four are read-only
 }
 
 }  // namespace twinoak

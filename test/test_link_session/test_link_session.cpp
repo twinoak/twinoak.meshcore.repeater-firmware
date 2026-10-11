@@ -1,6 +1,7 @@
 // src/link/session/: the whole box-link session, driven the way src/link/SerialTransport.cpp
 // drives it, against fakes - and held against spec/fixtures/link/link-v1.json for every request
-// this firmware answers today (HELLO, PING, STATUS, IDENTITY, REBOOT) and for EV_BOOT.
+// this firmware answers today (HELLO, PING, STATUS, TIME_SET, TIME_GET, IDENTITY, REBOOT, CLI,
+// SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET) and for EV_BOOT and EV_ATTENTION.
 //
 // The fixture is read at run time from FIXTURES_DIR (platformio.ini's [env:native]). For each
 // request case the suite finds the response case of the same type and seq, sets the fakes to
@@ -278,19 +279,48 @@ class FakeAttention : public AttentionAccess {
   }
 };
 
+// The readers themselves are test/test_power's, against a fake I2C bus. Here they only have to
+// answer, so these hold whatever the test - or the fixture - told them to.
 class FakePower : public PowerAccess {
  public:
+  PowerResponse answer;
+  bool ok = true;
+  int calls = 0;
+
   bool readPower(PowerResponse& out) override {
-    (void)out;
-    return false;  // task 06 owns POWER_GET; this fake is here for the caps bit
+    calls++;
+    out = answer;
+    return ok;
   }
 };
 
 class FakeEnv : public EnvAccess {
  public:
+  EnvResponse answer;
+  bool ok = true;
+  int calls = 0;
+
   bool readEnv(EnvResponse& out) override {
-    (void)out;
-    return false;
+    calls++;
+    out = answer;
+    return ok;
+  }
+};
+
+class FakeLpp : public LppAccess {
+ public:
+  std::vector<uint8_t> answer;
+  int calls = 0;
+  uint8_t last_mask = 0;
+  size_t last_cap = 0;
+
+  size_t readLpp(uint8_t perm_mask, uint8_t* out, size_t cap) override {
+    calls++;
+    last_mask = perm_mask;
+    last_cap = cap;
+    const size_t n = answer.size() > cap ? cap : answer.size();
+    if (n > 0) memcpy(out, answer.data(), n);
+    return n;
   }
 };
 
@@ -334,7 +364,7 @@ class Harness {
     services.attention = &attention;
     services.power = &power;
     services.env = &env;
-    services.lpp = nullptr;  // no capability bit of its own (LINK-PROTOCOL.md section 4)
+    services.lpp = &lpp;  // no capability bit of its own (LINK-PROTOCOL.md section 4)
     services.mesh = &mesh;
     services.observations = &observations;
   }
@@ -405,6 +435,7 @@ class Harness {
   FakeAttention attention;
   FakePower power;
   FakeEnv env;
+  FakeLpp lpp;
   FakeMeshClient mesh;
   FakeObservations observations;
   Services services;
@@ -483,6 +514,27 @@ void arrange(Harness& h, const Case& response) {
     case kMsgCli:
       h.cli.answer = f["text"].as<std::string>();
       break;
+    case kMsgPowerGet: {
+      h.power.answer.valid = f["valid"].as<uint8_t>();
+      JsonArray channels = f["channels"].as<JsonArray>();
+      ASSERT_EQ(size_t(kPowerChannels), channels.size());
+      uint8_t i = 0;
+      for (JsonObject c : channels) {
+        h.power.answer.channels[i].bus_mv = c["bus_mv"].as<uint16_t>();
+        h.power.answer.channels[i].current_ma = c["current_ma"].as<int16_t>();
+        i++;
+      }
+      break;
+    }
+    case kMsgEnvGet:
+      h.env.answer.valid = f["valid"].as<uint8_t>();
+      h.env.answer.temp_centi = f["temp_centi"].as<int16_t>();
+      h.env.answer.rh_centi = f["rh_centi"].as<uint16_t>();
+      h.env.answer.pressure_pa = f["pressure_pa"].as<uint32_t>();
+      break;
+    case kMsgLppGet:
+      h.lpp.answer = fromHex(f["lpp"].as<std::string>());
+      break;
     case kMsgSleepNotice:
       break;  // its response is a status byte and nothing else
     default:
@@ -491,11 +543,13 @@ void arrange(Harness& h, const Case& response) {
   }
 }
 
-// The request types this firmware answers: task 03's five, task 04's two, task 05's two.
+// The request types this firmware answers: task 03's five, task 04's two, task 05's two,
+// task 06's three.
 bool handledHere(uint8_t type) {
   return type == kMsgHello || type == kMsgPing || type == kMsgStatus || type == kMsgIdentity ||
          type == kMsgReboot || type == kMsgTimeSet || type == kMsgTimeGet || type == kMsgCli ||
-         type == kMsgSleepNotice;
+         type == kMsgSleepNotice || type == kMsgPowerGet || type == kMsgEnvGet ||
+         type == kMsgLppGet;
 }
 
 }  // namespace
@@ -521,7 +575,8 @@ TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
     EXPECT_EQ(1u, h.session.executed()) << c.name << ": one handler call";
     n++;
   }
-  EXPECT_EQ(9, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET, CLI, SLEEP_NOTICE";
+  EXPECT_EQ(12, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET, CLI,"
+                      " SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET";
 }
 
 TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
@@ -1435,6 +1490,125 @@ TEST(TheResetReason, SeveralBitsAtOnceReadAsWhatMattersMost) {
     EXPECT_LE(code, kResetSystemOff) << "bit 0x" << std::hex << bit;
     EXPECT_NE(kResetBootloader, code);
   }
+}
+
+
+// ----------------------------------------------------------------------------- telemetry (5.8)
+
+TEST(Telemetry, TheLargestLppPayloadIsTheFixturesFrame) {
+  // The fixture's own 239-byte case: the whole of a response payload but its status byte, which
+  // is the largest frame this link can carry (section 2).
+  const Case* want = findCaseNamed("the largest payload");
+  ASSERT_NE(nullptr, want);
+  ASSERT_EQ(kMsgLppGet, want->type);
+
+  Harness h;
+  h.lpp.answer = fromHex(want->fields["lpp"].as<std::string>());
+  ASSERT_EQ(239u, h.lpp.answer.size());
+
+  h.feed(frameOf(kMsgLppGet, want->seq, {0x05}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame());
+  EXPECT_EQ(239u, h.lpp.last_cap) << "the whole payload but its status byte";
+}
+
+TEST(Telemetry, ThePermissionMaskIsHandedThroughUntouched) {
+  Harness h;
+  h.lpp.answer = {0x01, 0x74, 0x01, 0x90};
+
+  // Every mask, the unknown bits included: "unknown bits are ignored" is what handing it through
+  // means (section 5.8), and it is the node's telemetry path that decides what they mean.
+  for (uint8_t mask = 0; mask < 16; mask++) {
+    h.feed(frameOf(kMsgLppGet, uint8_t(100 + mask), {mask}));
+    h.run();
+    EXPECT_EQ(mask, h.lpp.last_mask) << "mask 0x0" << int(mask);
+  }
+  EXPECT_EQ(16, h.lpp.calls);
+}
+
+TEST(Telemetry, AnEmptyLppIsAStatusByteAndNothingElse) {
+  // A node with no readings at all - nothing valid, no permission - answers OK with no bytes
+  // after it, which is a legal body and not a failure.
+  Harness h;
+  h.lpp.answer.clear();
+
+  h.feed(frameOf(kMsgLppGet, 7, {0x00}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgLppGet), 7, {kOk})), h.lastFrame());
+}
+
+TEST(Telemetry, AMalformedLppGetIsMalformedAndNothingIsAsked) {
+  Harness h;
+  h.feed(frameOf(kMsgLppGet, 8, {}));  // perm_mask missing
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgLppGet), 8, {kErrMalformed})), h.lastFrame());
+  EXPECT_EQ(0, h.lpp.calls);
+}
+
+TEST(Telemetry, WithNoInterfaceEachOfTheThreeIsUnsupported) {
+  // "A capability is an interface that is there": a build with no readers does not advertise
+  // POWER or ENV, and answers kErrUnsupported for all three messages - LPP_GET included, which
+  // section 4 gates on CLI and which therefore has no bit of its own to go missing.
+  Harness h;
+  h.services.power = nullptr;
+  h.services.env = nullptr;
+  h.services.lpp = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapPower);
+  EXPECT_EQ(0u, capsOf(h.services) & kCapEnv);
+  EXPECT_NE(0u, capsOf(h.services) & kCapCli) << "and CLI is still there";
+
+  const uint8_t types[] = {kMsgPowerGet, kMsgEnvGet, kMsgLppGet};
+  uint8_t seq = 20;
+  for (uint8_t type : types) {
+    const std::vector<uint8_t> body = type == kMsgLppGet ? std::vector<uint8_t>{0x05}
+                                                         : std::vector<uint8_t>{};
+    h.feed(frameOf(type, seq, body));
+    h.run();
+    EXPECT_EQ(toHex(frameOf(responseType(type), seq, {kErrUnsupported})), h.lastFrame())
+        << "type 0x0" << std::hex << int(type);
+    seq++;
+  }
+  EXPECT_EQ(3u, h.sent.size());
+}
+
+TEST(Telemetry, AReaderThatCannotAnswerAtAllIsErrFailed) {
+  // The readers always have an answer - a channel that could not be read has its bit clear - so
+  // this is the shape of the seam and not a case the board reaches (src/power/LinkPower.cpp).
+  Harness h;
+  h.power.ok = false;
+  h.env.ok = false;
+
+  h.feed(frameOf(kMsgPowerGet, 30, {}));
+  h.run();
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgPowerGet), 30, {kErrFailed})), h.lastFrame());
+
+  h.feed(frameOf(kMsgEnvGet, 31, {}));
+  h.run();
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgEnvGet), 31, {kErrFailed})), h.lastFrame());
+}
+
+TEST(Telemetry, ARetriedRequestDoesNotAskTheReadersAgain) {
+  // Section 3's one-entry memory. It matters here because a POWER_GET and its retry must answer
+  // with the same numbers: a Walter that lost a response and asked again is comparing the two.
+  Harness h;
+  h.power.answer.valid = 0x07;
+  h.power.answer.channels[1].bus_mv = 3912;
+  const std::vector<uint8_t> frame = frameOf(kMsgPowerGet, 44, {});
+
+  h.feed(frame);
+  h.run();
+  const std::string first = h.lastFrame();
+  EXPECT_EQ(1, h.power.calls);
+
+  h.power.answer.channels[1].bus_mv = 3700;  // the pack moved on
+  h.feed(frame);
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  EXPECT_EQ(first, h.lastFrame()) << "the remembered response, to the byte";
+  EXPECT_EQ(1, h.power.calls);
 }
 
 int main(int argc, char** argv) {

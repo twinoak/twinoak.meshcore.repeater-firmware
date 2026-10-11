@@ -16,7 +16,16 @@
 //     (tasks/phase-1/02-the-link-codec.md, 03, 04);
 //   - a board environment whose resolved build flags define ADMIN_PASSWORD as upstream's default,
 //     or do not define it at all (without the define upstream's MyMesh.cpp defaults it to that
-//     same word, which is how phase 0's stock image came to carry it).
+//     same word, which is how phase 0's stock image came to carry it);
+//   - a board environment that turns on either of upstream's two sensor drivers this firmware
+//     replaces: ENV_INCLUDE_INA3221, which applies one shunt value to all three channels where
+//     this board has 100, 20 and 50 milliohm, and ENV_INCLUDE_BME280, which samples the part
+//     inside querySensors and so would put an I2C conversion on the path of a box-link request
+//     (tasks/phase-1/06-power-and-environment.md; src/power/Environment.h);
+//   - a file of src/link/ or of src/power/ other than BoardPower.cpp that names an I2C bus or a
+//     sensor driver: "a request on the box link never performs I2C" is a property of the shape -
+//     one file reaches a bus, and the handlers answer out of a cache - and this is that shape
+//     held in place.
 // The forbidden names are written as split strings so that a grep of the repository for them finds
 // the places that set them and not this test.
 //
@@ -43,6 +52,10 @@ namespace fs = std::filesystem;
 const std::string kPacketLogging = std::string("MESH_PACKET") + "_LOGGING";
 const std::string kMeshDebug = std::string("MESH_") + "DEBUG";
 const std::string kAdminPassword = std::string("ADMIN_") + "PASSWORD";
+// The two of upstream's sensor drivers src/power/ replaces. Split like the names above so that a
+// grep of the repository for them finds platformio.ini's comment and not this test.
+const std::string kUpstreamIna3221 = std::string("ENV_INCLUDE_") + "INA3221";
+const std::string kUpstreamBme280 = std::string("ENV_INCLUDE_") + "BME280";
 const std::string kUpstreamDefault = std::string("pass") + "word";
 
 // The project root: PROJECT_DIR as the build passed it, or - should that path not hold a
@@ -238,6 +251,35 @@ TEST(Rails, EveryBoardEnvironmentDefinesAnAdminPasswordThatIsNotUpstreamsDefault
   EXPECT_GT(boards, 0) << "platformio.ini has no board environment";
 }
 
+TEST(Rails, NoBoardEnvironmentTurnsOnUpstreamsOwnIna3221OrBme280) {
+  const fs::path root = projectRoot();
+  const Ini ini = readIni(root / "platformio.ini");
+  int boards = 0;
+  for (const std::string& section : ini.order) {
+    if (section.rfind("env:", 0) != 0 || section == "env:native") continue;
+    boards++;
+    std::set<std::string> seen;
+    std::vector<std::pair<int, std::string>> lines;
+    resolve(ini, section, seen, lines);
+    for (const auto& entry : lines) {
+      std::string value;
+      if (defineValue(entry.second, kUpstreamIna3221, value)) {
+        ADD_FAILURE() << "platformio.ini:" << entry.first << ": [" << section << "] defines "
+                      << kUpstreamIna3221
+                      << " - upstream applies one shunt value to all three channels and this"
+                         " board's are 100, 20 and 50 milliohm (CURRENT-SENSE.md section 4)";
+      }
+      if (defineValue(entry.second, kUpstreamBme280, value)) {
+        ADD_FAILURE() << "platformio.ini:" << entry.first << ": [" << section << "] defines "
+                      << kUpstreamBme280
+                      << " - upstream samples the part inside querySensors, which is on the path"
+                         " of the box link's LPP_GET (src/power/Environment.h)";
+      }
+    }
+  }
+  EXPECT_GT(boards, 0) << "platformio.ini has no board environment";
+}
+
 TEST(Rails, NothingInSrcMentionsMeshDebugOrPacketLogging) {
   const fs::path root = projectRoot();
   const std::vector<fs::path> files = filesUnder(root / "src");
@@ -318,6 +360,48 @@ TEST(Rails, NothingUnderThePortableLinkOrTheClockAllocatesOrHoldsAString) {
       }
     }
   }
+}
+
+TEST(Rails, NoRequestHandlerCanReachAnI2cBus) {
+  // The acceptance criterion of phase 1's task 06: **a request on the box link never performs
+  // I2C**, shown from the code's structure. That structure is one file deep: src/power/
+  // BoardPower.cpp owns the only `Wire` of this firmware's own sources (src/board/target.cpp's
+  // setClock is upstream's bus being configured, not a transaction) and the only sensor driver,
+  // and it hands them to the two readers behind an interface; the readers are driven from
+  // TwinOakSensors::loop() once a pass; and POWER_GET, ENV_GET and LPP_GET answer out of the
+  // snapshot those readers leave (src/power/LinkPower.h). So nothing under src/link/, and
+  // nothing under src/power/ but that one file, may name a bus or a driver at all.
+  const fs::path root = projectRoot();
+  const char* const kBusNames[] = {"Wire.", "Wire1.", "TwoWire", "Adafruit_BME280",
+                                   "Adafruit_INA3221"};
+  const char* const kDirs[] = {"link", "power"};
+
+  int walked = 0;
+  for (const char* name : kDirs) {
+    for (const fs::path& file : filesUnder(root / "src" / name)) {
+      // The board's half of src/power/ is where the bus is allowed to be, and it is the only
+      // file of either directory that is.
+      if (file.filename() == "BoardPower.cpp" || file.filename() == "BoardPower.h") continue;
+      walked++;
+      std::ifstream in(file, std::ios::binary);
+      std::string line;
+      int n = 0;
+      while (std::getline(in, line)) {
+        n++;
+        const size_t comment = line.find("//");
+        const std::string code = comment == std::string::npos ? line : line.substr(0, comment);
+        for (const char* bus : kBusNames) {
+          if (code.find(bus) != std::string::npos) {
+            ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << bus
+                          << "' - a request on the box link never performs I2C, and this"
+                             " directory answers out of a cache"
+                             " (tasks/phase-1/06-power-and-environment.md)";
+          }
+        }
+      }
+    }
+  }
+  EXPECT_GT(walked, 10) << "almost nothing under src/link or src/power - is PROJECT_DIR right?";
 }
 
 TEST(Rails, NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {

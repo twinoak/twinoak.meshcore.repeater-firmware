@@ -37,4 +37,10 @@
 #include <helpers/radiolib/RadioLibWrappers.h>
 #include <helpers/sensors/EnvironmentSensorManager.h>
 
+// The BME280's driver, for src/power/: upstream's own BME280 support is out of this build
+// (src/power/Environment.h says why) and this firmware drives the part itself. The library is a
+// pinned dependency already (platformio.ini, [libs].sensors) and CayenneLPP comes in above,
+// through upstream's SensorManager.h.
+#include <Adafruit_BME280.h>
+
 #include <RAK4631Board.h>
