@@ -1,0 +1,97 @@
+# Every pull request and every push to main, once per commit.
+#
+# One step matters: pwsh tools/verify.ps1. It is the definition of "verified" in this repository
+# (spec/SYSTEM.md S-10): the check of spec/ against its manifest, the link fixture, every board
+# environment's build and the native tests, in that order, with a log per step under out/verify/.
+# A task is green on the machine it was written on before it is pushed; this run confirms it, and
+# a red run after a green local one is a finding about the script (tasks/RUNBOOK.md section 4).
+#
+# One run per commit is twinoak/meshmaster.dk's rule and it is here from the first commit: a
+# branch push and its pull request are two refs, so the concurrency group below cannot collapse
+# them. A pull request is where a check blocks a merge, and a push to main is what the release
+# workflow's ci-green waits for (phase 0's task 02), so those two are the triggers and a branch
+# push is not one.
+#
+# A red job blocks the merge: tasks/RUNBOOK.md merges on green only, and the branch protection
+# of this repository makes GitHub insist too.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # PlatformIO Core is pinned like every other dependency here (tasks/README.md): the version
+  # the machine the tasks run on has, so the local run and this one are the same run.
+  PIO_VERSION: "6.2.0"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The platform, the toolchain and every library, keyed by the file that decides them: a hit
+      # turns a cold build of minutes into seconds. MeshCore is a git dependency, so the pin is
+      # in the key through platformio.ini.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ env.PIO_VERSION }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ runner.os }}-${{ env.PIO_VERSION }}-
+
+      - name: Install PlatformIO Core
+        run: pip install --quiet "platformio==${PIO_VERSION}"
+
+      # The one step that matters. g++ is the runner's own, so the native tests run on the host
+      # here; on a Windows box the script runs them in a container instead.
+      - name: Verify
+        run: pwsh -File tools/verify.ps1
+
+      # The size of what was built, for the record; -Werror on src/ has already failed the step
+      # above if a warning of ours was in it.
+      - name: What was built
+        if: always()
+        run: |
+          set -euo pipefail
+          for log in out/verify/build-*.log; do
+            [ -f "$log" ] || continue
+            {
+              echo "### $(basename "$log" .log | sed 's/^build-//')"
+              echo '```'
+              grep -E '^(RAM|Flash):' "$log" || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      # The images (the .hex the Walter flashes over SWD, the DFU .zip for a laptop, the .uf2 for
+      # the bootloader's drive, the .elf) and every step's log.
+      - name: Keep the images and the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: |
+            out/build/
+            out/verify/
+          if-no-files-found: error
+          retention-days: 14
