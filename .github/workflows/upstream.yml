@@ -1,0 +1,214 @@
+# Keeping up with MeshCore, tier one: automatic.
+#
+# This firmware is built against MeshCore at one commit (spec/SYSTEM.md S-2) and keeping up is
+# three tiers (docs/upstream.md). This is the first and the common one: weekly, and on demand,
+# this looks at meshcore-dev/MeshCore's repeater-v* tags - the family our [meshcore].tag is from.
+# When there is one newer than the pin in platformio.ini it opens a branch upstream/<tag> that
+# moves `pin` and `tag`, and a pull request "MeshCore <tag>" whose body is upstream's commits
+# between the two pins. CI (ci.yml - tools/verify.ps1, nothing else) runs on that pull request
+# like any other; green means the bump built for every board, the native tests still pass and the
+# release still assembles, and a person merges it. Nobody spends a session on a green bump.
+#
+# Red is tier two, and the one command for it is tools/new-sync-task.ps1 (docs/upstream.md).
+#
+# The comparison itself is tools/upstream-check.ps1, so that it can be run by hand and this
+# workflow is only the git and the gh around it.
+#
+# REHEARSAL. With the pin_tag input this workflow proves itself without waiting for upstream: it
+# pushes a throwaway base branch whose pin is that older tag, then does the real thing on top of
+# it and opens the pull request between the two. Close the pull request and delete both branches
+# afterwards - the rehearsal is a test, not a bump.
+
+name: upstream
+
+on:
+  schedule:
+    # Monday morning, off the hour and off the minute the two MeshMaster repositories watch on
+    # (06:17 in meshmaster-agent-firmware, 06:41 in meshmaster.dk): nothing else here runs then.
+    - cron: "29 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      pin_tag:
+        description: "Rehearsal only: pretend the pin is this tag, e.g. repeater-v1.17.0. Leave empty for a real check."
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: is there a newer MeshCore?
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      PIN_TAG: ${{ inputs.pin_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # MeshCore's URL is [meshcore].url of platformio.ini and is named nowhere else in this
+      # repository; upstream-check.ps1 reads it from there by itself, and the steps below that
+      # clone upstream read it the same way rather than carrying a second copy.
+      - name: Where upstream is
+        id: upstream
+        run: |
+          set -euo pipefail
+          url=$(sed -n 's|^url[[:space:]]*=[[:space:]]*\(.*\)$|\1|p' platformio.ini | head -1)
+          test -n "$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "MeshCore: $url"
+
+      - name: Who commits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Rehearsal: a base branch that really is one tag back, so the pull request shows the diff a
+      # real bump would show instead of an empty one. --force because a rehearsal is run more than
+      # once and this branch is a throwaway; the bump branch below is never forced.
+      - name: Rehearsal - rewind the pin on a throwaway base branch
+        id: rehearsal
+        if: inputs.pin_tag != ''
+        env:
+          UPSTREAM: ${{ steps.upstream.outputs.url }}
+        run: |
+          set -euo pipefail
+          # The peeled ref first: MeshCore's repeater tags are annotated, so refs/tags/X is the
+          # tag object and refs/tags/X^{} is the commit - and a pin has to be a commit.
+          sha=$(git ls-remote --tags "$UPSTREAM" "refs/tags/${PIN_TAG}^{}" | cut -f1)
+          if [ -z "$sha" ]; then sha=$(git ls-remote --tags "$UPSTREAM" "refs/tags/${PIN_TAG}" | cut -f1); fi
+          test -n "$sha"
+          base="upstream/rehearsal-base-${PIN_TAG}"
+          git checkout -B "$base"
+          sed -i -e "s|^pin = .*|pin = $sha|" -e "s|^tag = .*|tag = ${PIN_TAG}|" platformio.ini docs/upstream.md
+          git add platformio.ini docs/upstream.md
+          git commit -m "Rehearsal base: MeshCore pinned at ${PIN_TAG}"
+          git push --force origin "$base"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          {
+            echo "REHEARSAL: base branch \`$base\` pins ${PIN_TAG} (\`$sha\`)."
+            echo "The pin's history in docs/upstream.md is left as it is, so the bump's diff"
+            echo "below shows a second row for the tag it re-adopts. That is the rehearsal, not"
+            echo "the workflow: close the pull request and delete both branches afterwards."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Is there a newer repeater tag?
+        id: check
+        shell: pwsh
+        run: ./tools/upstream-check.ps1 -GitHubOutput
+
+      - name: Nothing newer
+        if: steps.check.outputs.newer != 'true'
+        run: |
+          {
+            echo "The pin is the newest \`repeater-v*\` tag upstream has (\`${{ steps.check.outputs.previous_tag }}\`,"
+            echo "\`${{ steps.check.outputs.previous_sha }}\`). Nothing to do."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # One open bump at a time: last week's unmerged pull request is not reopened.
+      - name: Is the branch already there?
+        id: branch
+        if: steps.check.outputs.newer == 'true'
+        run: |
+          set -euo pipefail
+          name="upstream/${{ steps.check.outputs.tag }}"
+          if git ls-remote --exit-code --heads origin "$name" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$name is already on origin - its pull request is the open bump." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      # A blobless clone: every commit, no file contents. Enough for the log and quick.
+      - name: What upstream changed
+        id: log
+        if: steps.check.outputs.newer == 'true' && steps.branch.outputs.exists == 'false'
+        env:
+          UPSTREAM: ${{ steps.upstream.outputs.url }}
+          PREVIOUS: ${{ steps.check.outputs.previous_sha }}
+          NEW: ${{ steps.check.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" /tmp/meshcore
+          {
+            echo "## MeshCore ${{ steps.check.outputs.previous_tag }} -> ${{ steps.check.outputs.tag }}"
+            echo
+            echo "\`${PREVIOUS:0:8}\` -> \`${NEW:0:8}\`, and what is between them:"
+            echo
+            echo '```'
+            git -C /tmp/meshcore log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
+            echo '```'
+            echo
+            echo "CI on this pull request is the test - \`tools/verify.ps1\`, which is every board"
+            echo "environment's build, the native tests, the check of \`spec/\` and a dry run of the"
+            echo "release. **Green** means the bump compiled against the new tag and nothing of ours"
+            echo "broke: merge it. **Red** means a session, and the one command for that is in"
+            echo "\`docs/upstream.md\`:"
+            echo
+            echo '```powershell'
+            printf '.\\tools\\new-sync-task.ps1 -Tag %s -Pr <this one>\n' '${{ steps.check.outputs.tag }}'
+            printf '.\\tasks\\run-all.ps1 -Phase sync\n'
+            echo '```'
+            echo
+            echo "Whichever it is, a bump re-reads seven places that depend on upstream in a way a"
+            echo "compiler may not catch - the copied flag blocks, \`[libs]\`, \`boards/rak4631.json\`,"
+            echo "\`tools/pio/*\`, every comment in \`src/\` citing the old pin, \`build_as_lib.py\`'s"
+            echo "defines and the application region in the linker script - and the rails have to"
+            echo "survive it: nothing the mesh says logged as text, not one upstream file edited,"
+            echo "the native tests and the spec fixtures green. \`tasks/sync/TEMPLATE.md\` is the list."
+            echo
+            echo "_(If no CI run appears below, it is waiting for **Approve and run** on the Actions"
+            echo "tab: GitHub holds workflows on a pull request that a workflow opened."
+            echo "\`docs/upstream.md\` says why.)_"
+          } > /tmp/body.md
+          cat /tmp/body.md
+
+      - name: Move the pin and open the pull request
+        if: steps.check.outputs.newer == 'true' && steps.branch.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.check.outputs.tag }}
+          NEW: ${{ steps.check.outputs.sha }}
+          BASE: ${{ steps.rehearsal.outputs.base }}
+        run: |
+          set -euo pipefail
+          git checkout -B "${{ steps.branch.outputs.name }}"
+          # The two lines that are the pin, in platformio.ini and in the block docs/upstream.md
+          # opens with - the same two lines, so the same sed. A page that quotes a pin it is no
+          # longer on is worse than one that quotes none.
+          sed -i -e "s|^pin = .*|pin = $NEW|" -e "s|^tag = .*|tag = $TAG|" platformio.ini docs/upstream.md
+          # And the row of that page's history table, so that a green bump merged by a person -
+          # with no session anywhere near it - still leaves the history true.
+          marker='<!-- upstream.yml inserts the newest row directly under this line -->'
+          test "$(grep -cF "$marker" docs/upstream.md)" = "1"
+          row="| \`$TAG\` | \`${NEW:0:8}\` | $(LC_ALL=C date -u '+%-d %B %Y') | the weekly bump (\`upstream.yml\`), pull request below |"
+          awk -v m="$marker" -v r="$row" '{ print } index($0, m) { print r }' docs/upstream.md > /tmp/upstream.md
+          mv /tmp/upstream.md docs/upstream.md
+          git diff --stat
+          git add platformio.ini docs/upstream.md
+          git commit -m "MeshCore $TAG"
+          # Not --force: the step above established that this branch is not on origin, so a push
+          # that is not a fast-forward means something else is there and this job should stop.
+          git push origin "${{ steps.branch.outputs.name }}"
+          # The label is how `gh pr list --label meshcore` finds these, and how auto-merge could be
+          # turned on for them one day. Creating it twice is not an error worth stopping for.
+          gh label create meshcore --color 0e8a16 --description "A MeshCore pin bump" 2>/dev/null || true
+          gh pr create \
+            --title "MeshCore $TAG" \
+            --body-file /tmp/body.md \
+            --label meshcore \
+            --head "${{ steps.branch.outputs.name }}" \
+            --base "${BASE:-main}"
+          {
+            echo "Opened **MeshCore $TAG** from \`${{ steps.branch.outputs.name }}\` onto \`${BASE:-main}\`."
+            echo "CI on it is the test; \`docs/upstream.md\` says what green and red mean."
+          } >> "$GITHUB_STEP_SUMMARY"

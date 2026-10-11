@@ -21,7 +21,10 @@ The plan, the decisions and the two protocols are in [`spec/`](spec/README.md)
 (start with `spec/SYSTEM.md`). How this firmware is put together is
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How it gets built is
 [`tasks/`](tasks/README.md); how it gets released is
-[`docs/release.md`](docs/release.md).
+[`docs/release.md`](docs/release.md); how it keeps up with MeshCore — the weekly
+pull request that moves the pin, the one command for a bump that needs a
+session, and the seven places a bump re-reads — is
+[`docs/upstream.md`](docs/upstream.md).
 
 ## Building it
 
@@ -65,7 +68,7 @@ container provides it. The task piles that build the rest are run with
 | | |
 |---|---|
 | MCU / radio | nRF52840 + SX1262 (RAK4630 stamp, u.FL) |
-| Built with | PlatformIO; MeshCore as a pinned dependency; the Adafruit nRF52 core MeshCore pins |
+| Built with | PlatformIO; MeshCore as a pinned dependency ([`docs/upstream.md`](docs/upstream.md)); the Adafruit nRF52 core MeshCore pins |
 | Builds | `pio run -e <role>_<board>`; `pio test -e native` for everything that needs no board |
 | Verified by | `tools/verify.ps1` — locally first; CI runs the same script |
 | Flashed | in service: by the Walter over SWD, application region only. At a bench: UF2 or serial DFU over the adapter's USB-C |
