@@ -70,8 +70,10 @@ def check_descriptor(source, target, env):  # noqa: ARG001 (SCons' signature)
     except ValueError as exc:
         raise Exception(
             "the image this build produced does not carry exactly one valid descriptor: %s. "
-            "src/common/fwdesc/ImageDescriptor.cpp places it and the firmware references it "
-            "through imageFields(); spec/FIRMWARE-MANIFEST.md section 4 is the format." % exc
+            "src/common/fwdesc/ImageDescriptor.cpp places it as a const object and the "
+            "firmware references it through imageRole(), imageVersion() and imageBoard(), "
+            "which is what keeps --gc-sections from dropping it; "
+            "spec/FIRMWARE-MANIFEST.md section 4 is the format." % exc
         )
 
     expected = {

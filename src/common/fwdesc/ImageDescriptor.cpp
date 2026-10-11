@@ -55,8 +55,16 @@ static_assert(fits(TWINOAK_BAND, kBandSize),
   byteAt(kRole, kDescriptorSlot, link::kProtoMajor, link::kProtoMinor,           \
          TWINOAK_FW_VERSION, TWINOAK_BOARD, TWINOAK_BAND, (i))
 
-// `used` so the compiler emits it although only imageDescriptor() names it, `aligned(4)` because
-// a reader finds a descriptor on a 4-byte boundary (spec/FIRMWARE-MANIFEST.md section 4).
+// `aligned(4)` because a reader finds a descriptor on a 4-byte boundary
+// (spec/FIRMWARE-MANIFEST.md section 4), and `used` so that the compiler emits it even where
+// only the accessors below name it.
+//
+// `used` is **not** what keeps it in the image: the build has -fdata-sections and
+// -Wl,--gc-sections, and a section nothing reaches is dropped whatever the attribute says. What
+// keeps it is that the firmware reads its HELLO out of it. Measured, on this pin: with the
+// accessors below answering from the defines instead of from these bytes, the linker drops the
+// object and tools/pio/descriptor.py fails the build with "0 valid descriptors"
+// (tasks/phase-3/reports/01.md).
 const uint8_t kImageDescriptor[kLength] __attribute__((used, aligned(4))) = {
     DESC_BYTE(0), DESC_BYTE(1), DESC_BYTE(2), DESC_BYTE(3), DESC_BYTE(4), DESC_BYTE(5),
     DESC_BYTE(6), DESC_BYTE(7), DESC_BYTE(8), DESC_BYTE(9), DESC_BYTE(10), DESC_BYTE(11),
