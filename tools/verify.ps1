@@ -13,6 +13,14 @@
                 images are copied to out/build/<env>/
     4. native   pio test -e native - with this machine's own g++ or clang++ when there is one,
                 otherwise in the container tasks/RUNBOOK.md section 2 names (Docker)
+    5. release  python tools/release/selfcheck.py - the release tooling's own tests, then a dry
+                run of the real release over out/build/<env>, what step 3 left: the images, a validated
+                manifest, its signature by the specification's public test key, and that
+                signature verified. So the release path is exercised on every commit without
+                GitHub and without the release key. It needs the `cryptography` of
+                tools/release/requirements.txt: this machine's Python when it has it, otherwise
+                the same container as step 4, where pip installs it into the container and not
+                into this machine.
 
   Every step's output goes to out/verify/<step>.log, a one-line summary per step is printed at
   the end, and the exit code is non-zero when anything failed. Runs on Windows PowerShell 5.1 and
@@ -23,11 +31,11 @@
   itself runs on (`pio system info`), which is always there.
 
     .\tools\verify.ps1               everything
-    .\tools\verify.ps1 -Only build   one step (spec, link, build, native)
+    .\tools\verify.ps1 -Only build   one step (spec, link, build, native, release)
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('', 'spec', 'link', 'build', 'native')]
+    [ValidateSet('', 'spec', 'link', 'build', 'native', 'release')]
     [string]$Only = ''
 )
 
@@ -162,15 +170,23 @@ if (Step-Wanted 'build') {
         $ok = ($code -eq 0)
         $note = ''
         if ($ok) {
-            # The images, kept where a reviewer and the release tooling find them (tasks/README.md:
+            # The images, kept where a reviewer and the release step find them (tasks/README.md:
             # leave the evidence). hex: the Walter over SWD. zip: adafruit-nrfutil DFU over USB.
-            # uf2: the bootloader's drive. elf: the debugger and the release tooling.
+            # uf2: the bootloader's drive. elf: the debugger. buildinfo.json and ldscript.ld:
+            # what the build knew about itself, which the release tooling reads instead of being
+            # told (tools/pio/buildinfo.py).
+            #
+            # The release step reads this copy and not .pio/build/<env>, because the native step
+            # runs PlatformIO inside a container: a different Python and a different core see a
+            # different project checksum, and PlatformIO then cleans .pio/build out from under
+            # whatever comes after it. out/build/<env> is the build output that survives the run.
             $dest = Join-Path (Join-Path $outDir 'build') $e
             New-Item -ItemType Directory -Force -Path $dest | Out-Null
-            foreach ($ext in @('hex', 'zip', 'uf2', 'elf')) {
-                $img = Join-Path $root ".pio/build/$e/firmware.$ext"
-                if (Test-Path $img) { Copy-Item $img (Join-Path $dest "firmware.$ext") -Force }
-                else { $ok = $false; $note = "firmware.$ext missing" }
+            foreach ($name in @('firmware.hex', 'firmware.zip', 'firmware.uf2', 'firmware.elf',
+                                'buildinfo.json', 'ldscript.ld')) {
+                $src = Join-Path $root ".pio/build/$e/$name"
+                if (Test-Path $src) { Copy-Item $src (Join-Path $dest $name) -Force }
+                else { $ok = $false; $note = "$name missing" }
             }
             if ($ok) { $note = Get-MemoryLines $log }
         }
@@ -202,6 +218,45 @@ if (Step-Wanted 'native') {
     else {
         "no g++, no clang++ and no docker: pio test -e native cannot run here" | Out-File -FilePath $log -Encoding utf8
         Add-Result 'native' $false $log 'no compiler and no docker'
+    }
+}
+
+# 5. release ---------------------------------------------------------------------------------
+if (Step-Wanted 'release') {
+    $log = Join-Path $logDir 'release.log'
+    Write-Line "`n== release: the release tooling's tests and a dry run over the build"
+    # The commit the manifest records. A dry run over a working tree with uncommitted changes
+    # names the commit the tree came from, which is what a rehearsal can know.
+    $commit = (& git -C $root rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0 -or -not ($commit -match '^[0-9a-f]{40}$')) { $commit = '0' * 40 }
+    # out/build/<env>, what step 3 copied there: see the note in that step for why not .pio/.
+    $selfcheck = @('tools/release/selfcheck.py', '--commit', "$commit")
+    foreach ($e in (Get-BoardEnvironments)) { $selfcheck += @('--build-dir', "out/build/$e") }
+
+    $hasCrypto = $false
+    if ($python) {
+        & $python -c 'import cryptography' 2>$null | Out-Null
+        $hasCrypto = ($LASTEXITCODE -eq 0)
+    }
+    if (-not $python) { Add-Result 'release' $false $log 'no python' }
+    elseif ($hasCrypto) {
+        $code = Invoke-Logged $log $python $selfcheck
+        Add-Result 'release' ($code -eq 0) $log "with this machine's python"
+    }
+    elseif (Get-Command docker -ErrorAction SilentlyContinue) {
+        # No cryptography here, and nothing is installed into this machine's own Python: the
+        # container of step 4, where pip may do as it likes.
+        $mount = ($root -replace '\\', '/') + ':/w'
+        $inner = "pip install -q -r tools/release/requirements.txt && python " + ($selfcheck -join ' ')
+        $code = Invoke-Logged $log 'docker' @('run', '--rm', '-v', $mount, '-w', '/w',
+            '-e', 'PIP_ROOT_USER_ACTION=ignore', '-e', 'PIP_DISABLE_PIP_VERSION_CHECK=1',
+            'python:3.11-slim', 'bash', '-c', $inner)
+        Add-Result 'release' ($code -eq 0) $log 'in a container (no cryptography on this machine)'
+    }
+    else {
+        "no cryptography in this machine's python and no docker: the release step cannot run here" |
+            Out-File -FilePath $log -Encoding utf8
+        Add-Result 'release' $false $log 'no cryptography and no docker'
     }
 }
 

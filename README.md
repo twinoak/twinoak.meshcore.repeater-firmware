@@ -20,7 +20,8 @@ commit — with four things added:
 The plan, the decisions and the two protocols are in [`spec/`](spec/README.md)
 (start with `spec/SYSTEM.md`). How this firmware is put together is
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How it gets built is
-[`tasks/`](tasks/README.md).
+[`tasks/`](tasks/README.md); how it gets released is
+[`docs/release.md`](docs/release.md).
 
 ## Building it
 
@@ -44,7 +45,15 @@ are `firmware.hex` (the Walter, over SWD), `firmware.zip` (a laptop,
 `pio test -e native` is a host build. Linux and CI use the machine's `g++`;
 this Windows machine has none, so `tools/verify.ps1` runs that step in a
 `python:3.11-slim` container (`tasks/RUNBOOK.md` §2 has the one-line
-`docker run`). The task piles that build the rest are run with
+`docker run`).
+
+`tools/verify.ps1` also rehearses the release on every run: the release
+tooling's own tests, then a dry run over the build it has just made, leaving
+`out/release/` with the three images, a validated `manifest.json`, its
+signature by the specification's public *test* key and `SHA256SUMS`
+([`docs/release.md`](docs/release.md)). That step needs the `cryptography` of
+`tools/release/requirements.txt`, and on a machine without it the same
+container provides it. The task piles that build the rest are run with
 
 ```powershell
 .\tasks\run-pile.ps1          # phases 0 to 3, one headless session per task

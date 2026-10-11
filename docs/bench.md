@@ -16,6 +16,24 @@ fails goes back to the task's follow-ups.
   `Repeater ID:` on the USB console at 115200 and advertise on 869.618 MHz,
   62.5 kHz, SF8, CR8 — and it carries upstream's default admin password, which
   phase 3's provisioning replaces.
+- [ ] **p0-02** **The release key, which only Thomas can make.**
+  `python spec/tools/manifestref.py keygen`, then the private hex into the
+  repository secret `RELEASE_SIGNING_KEY` and the public hex into
+  `keys/release.pub` in a commit (`keys/README.md`). Until it exists a tag is
+  refused, which is the safe state, and the tag path of
+  `.github/workflows/release.yml` has never run — only its dry run, which is
+  the same jobs with `gh release create` left out.
+- [ ] **p0-02** **The raw `.bin` written over SWD boots.** The release's
+  `twinoak-repeater-rak4630-single-868-vX.Y.Z.bin` is the application bytes
+  alone, to be written at the `load_address` the manifest gives (`0x00026000`
+  today) with nothing else erased. The Walter's flasher does this in service;
+  on the bench it is a J-Link or a CMSIS-DAP with an explicit base address, for
+  example `pyocd flash -t nrf52840 --base-address 0x26000 <file>` or
+  `openocd … -c "program <file> 0x26000 verify reset exit"`. What is being
+  checked: the board comes up exactly as it does from the `.uf2` of the same
+  release — same console line, same advert — and the file system, the identity
+  and the bootloader are untouched afterwards. No session can do it: nothing
+  was flashed and no radio was heard.
 
 ## 1. The repeater on the rig
 
