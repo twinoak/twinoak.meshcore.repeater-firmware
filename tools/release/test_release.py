@@ -13,6 +13,9 @@ path is exercised without GitHub. What is held here:
     outside the application region - the two refusals that keep an update off the bootloader, the
     SoftDevice and the file system;
   * the descriptor check, off by default and on with --require-descriptor;
+  * the names: every [img_*] section of platformio.ini - the one place a role, a board and a
+    band are written - becomes a manifest entry whose id and file names are that section's
+    (test/test_image holds the firmware's half of the same rule);
   * what may be signed: the specification's public test key never signs a release version, a tag
     with no key in the environment is refused and says how the key is made, and no message
     carries a key.
@@ -37,6 +40,31 @@ import sign_manifest  # noqa: E402
 
 FIXTURES = os.path.join(REPO, "spec", "fixtures", "manifest")
 COMMIT = "abc1234" + "0" * 33
+
+
+def platformio_images(path=None):
+    """Every [img_*] section of platformio.ini: {section: {"role", "board", "band"}}.
+
+    That file is the only place any of the three is written (phase 3's task 01), so a test that
+    wants to know what this repository builds reads it rather than restating it.
+    """
+    path = path or os.path.join(REPO, "platformio.ini")
+    images = {}
+    section = None
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line[0] in ";#":
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                section = line[1:-1]
+                if section.startswith("img_"):
+                    images[section] = {}
+                continue
+            if section in images and "=" in line:
+                key, value = line.split("=", 1)
+                images[section][key.strip()] = value.strip()
+    return images
 
 # The board this repository builds today, and the numbers of the linker script it builds with. The
 # script below is a copy of the shape the Adafruit nRF52 core's nrf52840_s140_v6.ld has, not of its
@@ -259,8 +287,7 @@ class TheManifest(ReleaseTestCase):
         self.assertEqual(list(manifest["link"]), list(self.fixture["link"]))
         self.assertEqual(list(manifest["upstream"]), list(self.fixture["upstream"]))
         image, want = manifest["images"][0], self.fixture["images"][0]
-        # `requires` is the one optional field of an image and this firmware asks nothing yet.
-        self.assertEqual(list(image), [key for key in want if key != "requires"])
+        self.assertEqual(list(image), list(want))
         self.assertEqual(list(image["app_region"]), list(want["app_region"]))
         for got in image["files"]:
             same_use = [f for f in want["files"] if f["use"] == got["use"]][0]
@@ -274,6 +301,30 @@ class TheManifest(ReleaseTestCase):
 
     def test_the_image_id_is_role_board_band(self):
         self.assertEqual(self.release()["images"][0]["id"], "repeater.rak4630-single.868")
+
+    def test_every_image_of_platformio_ini_becomes_its_own_entry(self):
+        """The names, from the one place they are written, through to the manifest."""
+        images = platformio_images()
+        self.assertTrue(images, "platformio.ini has no [img_*] section")
+        for section, names in sorted(images.items()):
+            role, board, band = names["role"], names["board"], names["band"]
+            # The section is named after the environment, and the environment after the image.
+            self.assertEqual(section, "img_%s_%s" % (role, board.replace("-", "_")))
+            manifest = self.release(build_dirs=[self.build_dir(
+                role=role, board=board, band=band, name=section)])
+            image = manifest["images"][0]
+            self.assertEqual(image["id"], "%s.%s.%s" % (role, board, band))
+            self.assertEqual([image["role"], image["board"], image["band"]], [role, board, band])
+            self.assertEqual([f["name"] for f in image["files"]],
+                             ["twinoak-%s-%s-%s-v0.3.0.%s" % (role, board, band, ext)
+                              for ext in ("bin", "zip", "uf2")])
+
+    def test_the_image_requires_the_link_major_it_speaks(self):
+        """A Walter of another box-link major is not given this image at all
+        (spec/FIRMWARE-MANIFEST.md section 2, `requires`; section 5, step 3)."""
+        manifest = self.release()
+        self.assertEqual(manifest["images"][0]["requires"],
+                         {"link_major": manifest["link"]["major"]})
 
     def test_it_validates_and_is_canonical(self):
         manifest = self.release()

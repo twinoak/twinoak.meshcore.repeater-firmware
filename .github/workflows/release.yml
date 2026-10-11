@@ -16,6 +16,10 @@
 #   .zip   the nrfutil DFU package, for a laptop on the adapter's USB-C port
 #   .uf2   for the bootloader's drag-and-drop drive
 # and once for the release:
+# Every image carries its own descriptor (spec/FIRMWARE-MANIFEST.md section 4), and
+# --require-descriptor refuses to publish an image that does not, or whose descriptor is not
+# what its manifest entry says. The local dry run passes the same flag (tools/verify.ps1).
+#
 #   manifest.json      the canonical manifest (spec/FIRMWARE-MANIFEST.md section 2)
 #   manifest.json.sig  one Ed25519 line over its bytes (section 3)
 #   SHA256SUMS         over every file above, the manifest included
@@ -185,7 +189,7 @@ jobs:
         run: pip install --quiet "platformio==${PIO_VERSION}"
 
       # The version is a build flag, so it is inside the image and not in a file beside it;
-      # src/version.cpp turns it into the string the firmware reports. tools/pio/buildinfo.py
+      # src/common/version/Version.cpp turns it into the string the firmware reports. tools/pio/buildinfo.py
       # writes it, the role, the board, the band, the MCU and the linker script of this build
       # into the build directory, and the publish job reads that rather than being told.
       - name: Build with the version baked in
@@ -246,7 +250,7 @@ jobs:
           args=""
           for dir in out/builds/*/; do args="$args --build-dir ${dir%/}"; done
           echo "building a release from:$args"
-          python tools/release/build_release.py --clean --out out/release \
+          python tools/release/build_release.py --clean --out out/release --require-descriptor \
             --commit "$SHA" --version "$VERSION" $args
           ls -l out/release
 

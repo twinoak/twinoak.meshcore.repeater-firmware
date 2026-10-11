@@ -14,7 +14,7 @@ reply with `REPLY_GET`, `OBS_PULL` and `MESH_COUNTERS`, and `EV_BOOT`,
 `EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type protocol
 1.0 defines** outside its two reserved ranges (provisioning, phase 3's task 03;
 the bridge role, later). `HELLO`'s `caps` is `0x7f`, every bit of it, because a
-capability is an interface that is there (`src/link/session/Interfaces.h`).
+capability is an interface that is there (`src/common/link/session/Interfaces.h`).
 `LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
@@ -116,7 +116,7 @@ into a report when a frame is refused.
 
 ### Every request this firmware answers, and the bit that carries it
 
-A capability is an interface that is there (`src/link/session/Interfaces.h`), so
+A capability is an interface that is there (`src/common/link/session/Interfaces.h`), so
 this table is `caps` read the other way round: what each bit buys, and what a
 build without it would answer. `0x7f` is every bit protocol 1.0 defines, which
 is what this role has.
@@ -235,7 +235,7 @@ CLI sensor list
   `reboot`.
 - Nothing about a `CLI` line or its reply is ever printed by the firmware: a
   line can be `password <new>`, and upstream's reply to that one echoes the
-  password back. A test walks `src/link/` and fails on any print-like call
+  password back. A test walks `src/common/link/` and fails on any print-like call
   (`test/test_rails`).
 
 ### Our settings, from here, from the console and from the mesh
@@ -386,7 +386,7 @@ ENV_GET
   second and the BME280 every five, both out of the firmware's own `loop()`;
   every request answers out of that cache. A sensor that stops answering is a
   missing reading and the firmware leaves it alone for five seconds before
-  asking again (`src/power/PowerReader.h`).
+  asking again (`src/common/power/PowerReader.h`).
 - The battery voltage a `status` reports over the mesh, and the one upstream's
   own power management reads, is **channel 2's bus voltage** — not the WisBlock
   ADC pin, which is not wired on this adapter.
@@ -604,7 +604,7 @@ thing.
 
 | | what it counts | the limit | what happens over it |
 |---|---|---|---|
-| **the client's ceiling**, ours (`src/meshclient/SendCeiling.h`) | the sends the Walter asks for, one per `SEND_*` — the same count as `counters`' `client_tx` | **6 in any 60 s**, and **2 s** between two | the send is **`ERR_BUSY`** and nothing leaves; `sensor get client.refused` counts it |
+| **the client's ceiling**, ours (`src/roles/repeater/meshclient/SendCeiling.h`) | the sends the Walter asks for, one per `SEND_*` — the same count as `counters`' `client_tx` | **6 in any 60 s**, and **2 s** between two | the send is **`ERR_BUSY`** and nothing leaves; `sensor get client.refused` counts it |
 | **the duty cycle**, upstream's (`mesh::Dispatcher`) | *every* packet the radio transmits, the hundreds it forwards included | an airtime budget of a one-hour window — **half** of it by default, and `cli "set dutycycle <1..100>"` changes it | the radio waits; nothing is refused and nothing is lost |
 
 The first is a backstop on a mistake in the Walter. Its agent paces itself to a
@@ -673,7 +673,7 @@ answer while lines beginning with `{` appear is a scanner, not a broken link
 ## 4. Testing the tool without a board
 
 [`tools/linkloop/`](../tools/linkloop/) is the firmware's own
-`src/link/session/` — the same portable code, compiled for the host — with
+`src/common/link/session/` — the same portable code, compiled for the host — with
 fixed fakes where the board would be, pumping stdin to stdout.
 `tools/linkcli.py --pipe <program>` then speaks the real protocol to the real
 session with no port and no radio:
@@ -711,13 +711,13 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 
 | | Where | What |
 |---|---|---|
-| codec | `src/link/codec/` | CRC-16/CCITT-FALSE, COBS, packets, frames, one function per message. Portable. |
-| session | `src/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
-| attention | `src/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
-| power | `src/power/` | the INA3221's registers and per-channel shunts, the BME280, the two readers' schedules, the battery thresholds and the Cayenne-LPP. Portable but for `BoardPower.cpp`. |
-| mesh client | `src/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule; the five sends behind `MeshPort`; the reply record and its matching rules; `PeerSlot`, the index arithmetic of the extra peer; the observation ring, its pull and the RSSI note table. Portable; the peer overrides, the packet building and the advert capture are in `src/app/TwinOakMesh.cpp`. |
-| transport | `src/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
-| the board's half | `src/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
+| codec | `src/common/link/codec/` | CRC-16/CCITT-FALSE, COBS, packets, frames, one function per message. Portable. |
+| session | `src/common/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
+| attention | `src/common/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
+| power | `src/common/power/` | the INA3221's registers and per-channel shunts, the BME280, the two readers' schedules, the battery thresholds and the Cayenne-LPP. Portable but for `BoardPower.cpp`. |
+| mesh client | `src/roles/repeater/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule; the five sends behind `MeshPort`; the reply record and its matching rules; `PeerSlot`, the index arithmetic of the extra peer; the observation ring, its pull and the RSSI note table. Portable; the peer overrides, the packet building and the advert capture are in `src/roles/repeater/app/TwinOakMesh.cpp`. |
+| transport | `src/common/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
+| the board's half | `src/roles/repeater/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
 
 One pass of `loop()` reads what the UART has (bounded), handles **at most one**
 request, and writes what fits without blocking. A request that completes while

@@ -1,4 +1,4 @@
-// src/link/session/: the whole box-link session, driven the way src/link/SerialTransport.cpp
+// src/common/link/session/: the whole box-link session, driven the way src/common/link/SerialTransport.cpp
 // drives it, against fakes - and held against spec/fixtures/link/link-v1.json for every request
 // this firmware answers today (HELLO, PING, STATUS, TIME_SET, TIME_GET, IDENTITY, REBOOT, CLI,
 // SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL) and for EV_BOOT and EV_ATTENTION.
@@ -39,19 +39,19 @@
 #include <string>
 #include <vector>
 
-#include "link/codec/FrameReceiver.h"
-#include "link/codec/FrameWriter.h"
-#include "link/codec/Messages.h"
-#include "link/codec/Numbers.h"
-#include "link/session/Interfaces.h"
-#include "link/session/ResetReason.h"
-#include "link/session/Session.h"
-#include "meshclient/Job.h"
-#include "meshclient/LinkMeshClient.h"
-#include "meshclient/LinkObservations.h"
-#include "meshclient/MeshPort.h"
-#include "meshclient/ObservationRing.h"
-#include "meshclient/Reply.h"
+#include "common/link/codec/FrameReceiver.h"
+#include "common/link/codec/FrameWriter.h"
+#include "common/link/codec/Messages.h"
+#include "common/link/codec/Numbers.h"
+#include "common/link/session/Interfaces.h"
+#include "common/link/session/ResetReason.h"
+#include "common/link/session/Session.h"
+#include "roles/repeater/meshclient/Job.h"
+#include "roles/repeater/meshclient/LinkMeshClient.h"
+#include "roles/repeater/meshclient/LinkObservations.h"
+#include "roles/repeater/meshclient/MeshPort.h"
+#include "roles/repeater/meshclient/ObservationRing.h"
+#include "roles/repeater/meshclient/Reply.h"
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -343,7 +343,7 @@ class FakeMeshClient : public MeshClientAccess {
   bool replyAwaited() const override { return awaiting; }
 
   // The generic sweep only reads the two bits above (for STATUS); the job requests, the sends,
-  // the reply and the counters are driven against the real src/meshclient/ further down, so
+  // the reply and the counters are driven against the real src/roles/repeater/meshclient/ further down, so
   // these answer plainly.
   uint8_t beginJob(const JobBegin&, uint32_t) override {
     job = true;
@@ -371,10 +371,10 @@ class FakeMeshClient : public MeshClientAccess {
   void getCounters(MeshCountersResponse&) override {}
 };
 
-// The board's half of the five sends (src/meshclient/MeshPort.h), as a fake that records what it
+// The board's half of the five sends (src/roles/repeater/meshclient/MeshPort.h), as a fake that records what it
 // was asked to put on the air - the plaintext, the route, the trace's fields - and answers the
 // time and the radio's counters with whatever the test set. It builds no packet: what MeshCore
-// makes of the plaintext is upstream's, and src/app/TwinOakMesh.cpp cites it against the pin.
+// makes of the plaintext is upstream's, and src/roles/repeater/app/TwinOakMesh.cpp cites it against the pin.
 class FakeMeshPort : public twinoak::meshclient::MeshPort {
  public:
   struct Sent {
@@ -487,7 +487,7 @@ class FakeObservations : public ObservationAccess {
 // ----------------------------------------------------------------------------- the harness
 
 // A session with every interface present (so HELLO advertises all seven capability bits, as the
-// fixture's HELLO response does) and a transport written exactly as src/link/SerialTransport.cpp
+// fixture's HELLO response does) and a transport written exactly as src/common/link/SerialTransport.cpp
 // writes it: read until a request is waiting, poll once, write the whole frame if there is one.
 class Harness {
  public:
@@ -1746,7 +1746,7 @@ TEST(Telemetry, WithNoInterfaceEachOfTheThreeIsUnsupported) {
 
 TEST(Telemetry, AReaderThatCannotAnswerAtAllIsErrFailed) {
   // The readers always have an answer - a channel that could not be read has its bit clear - so
-  // this is the shape of the seam and not a case the board reaches (src/power/LinkPower.cpp).
+  // this is the shape of the seam and not a case the board reaches (src/common/power/LinkPower.cpp).
   Harness h;
   h.power.ok = false;
   h.env.ok = false;
@@ -1783,7 +1783,7 @@ TEST(Telemetry, ARetriedRequestDoesNotAskTheReadersAgain) {
 
 // ----------------------------------------------------------------------------- the mesh client
 
-// The four job requests of section 6.1 driven against the **real** src/meshclient/ through a real
+// The four job requests of section 6.1 driven against the **real** src/roles/repeater/meshclient/ through a real
 // Session: the Harness's FakeMeshClient is replaced with a LinkMeshClient over a real Job, so
 // JOB_BEGIN, JOB_END, PATH_SET and PATH_GET are answered by the code the board runs and held
 // against spec/fixtures/link/link-v1.json byte for byte. (The peer overrides of TwinOakMesh need
@@ -1984,7 +1984,7 @@ TEST(TheMeshClient, AnyRequestRestartsTheJobsSilenceCountThroughTheSession) {
 // ----------------------------------------------------------------------------- the five sends
 
 // The five sends, the reply and the counters of sections 6.2 to 6.4 driven against the **real**
-// src/meshclient/ - a LinkMeshClient over a real Job and a real Reply - through a real Session,
+// src/roles/repeater/meshclient/ - a LinkMeshClient over a real Job and a real Reply - through a real Session,
 // with a FakeMeshPort where the board builds the packet. What goes to the port is the plaintext
 // the agent firmware's AgentMesh builds (tasks/phase-2/02-the-five-sends.md); what comes back on
 // the link is held against spec/fixtures/link/link-v1.json byte for byte.
@@ -2024,7 +2024,7 @@ struct ClientRig {
     return answeredStatus(h, type, seq);
   }
 
-  // Lets the send ceiling's two-second gap pass (src/meshclient/SendCeiling.h). Every test that
+  // Lets the send ceiling's two-second gap pass (src/roles/repeater/meshclient/SendCeiling.h). Every test that
   // makes a second successful send through one rig says this, because the firmware refuses one
   // that follows another inside two seconds - and saying it is cheaper than a seam that would
   // let a test turn the ceiling off.
@@ -2338,7 +2338,7 @@ TEST(TheFiveSends, WhatCannotBeSentIsRefusedBeforeAnythingIsBuilt) {
   EXPECT_FALSE(r.job.awaiting());
 
   // Ten refusals and the ceiling is untouched: none of them was a send, so the next legitimate
-  // one is admitted at once (src/meshclient/SendCeiling.h).
+  // one is admitted at once (src/roles/repeater/meshclient/SendCeiling.h).
   EXPECT_EQ(0u, r.client.refused()) << "nothing above was refused by the ceiling";
 
   // And the two that are legal and nearly were not: 148 bytes of line, 162 bytes of data.
@@ -2534,7 +2534,7 @@ TEST(TheReply, ReplyGetIsTheFixturesFramesWhileWaitingAndWhenNothingIsHeld) {
 
 TEST(TheReply, TheFourEventsOfTheFixtureByteForByte) {
   // Each event's payload, with the arrival scripted the way the board's peer overrides would
-  // report it (src/app/TwinOakMesh.cpp). The frames are compared by payload: the fixture's events
+  // report it (src/roles/repeater/app/TwinOakMesh.cpp). The frames are compared by payload: the fixture's events
   // carry a seq of their own and the session counts its own from 0.
   //
   // "a response that came back as a path": a flooded request answered with a returned path, the
@@ -2812,7 +2812,7 @@ TEST(TheCounters, MeshCountersReadsTheRadioTheClientAndTheRing) {
   for (uint32_t i = 0; i < sends; i++) {
     // Twenty seconds apart, which is the gap the MeshMaster server's default budget asks of the
     // Walter: 42 sends at that pace never meet the RAK's ceiling of six a minute, which is the
-    // whole point of where the ceiling was put (src/meshclient/SendCeiling.h).
+    // whole point of where the ceiling was put (src/roles/repeater/meshclient/SendCeiling.h).
     if (i > 0) r.h.now += 20000;
     r.answer(frameOf(kMsgSendRequest, uint8_t(100 + i), sendPayload(0, {0x01})));
     ASSERT_EQ(kOk, r.lastStatus()) << "send " << i;
@@ -2861,7 +2861,7 @@ TEST(TheCounters, WithNoMeshClientTheEightAreUnsupported) {
 
 namespace {
 
-// A session with the **real** observation ring behind it (src/meshclient/), so that OBS_PULL, the
+// A session with the **real** observation ring behind it (src/roles/repeater/meshclient/), so that OBS_PULL, the
 // retry, STATUS's two fields and MESH_COUNTERS' three are the firmware's own code end to end.
 struct ObsRig {
   Harness h;

@@ -9,22 +9,33 @@ on, and this file is corrected by whichever task finds it wrong.
 ## 1. Layout
 
 ```
-platformio.ini          the pin, the libraries, one environment per role and board, [env:native]
+platformio.ini          the pin, the libraries, one [img_*] and one [env:*] per image, the
+                        [band_*] blocks, [env:native]
 boards/                 board definitions PlatformIO must see before it clones a dependency
 src/
-  main.cpp              ours: setup() and loop(), replacing upstream's example main
-  app/                  TwinOakMesh (the subclass), first-boot provisioning, the version string,
-                        Settings (our keys on upstream's CLI, portable)
-  board/                target.h / target.cpp for our adapter: the board object, the radio, the clock, the sensors;
-                        UpstreamHeaders.h, the one place upstream's headers are included from (section 11)
-  link/                 the box link: codec (portable), session and dispatcher (portable),
+  common/               what every role on this board shares. An environment compiles all of it
+    board/              target.h / target.cpp for our adapter: the board object, the radio, the
+                        clock, the sensors; Boards.h (a row per board: the radio slot);
+                        RoleHooks.h (the six things common/ asks of the role); UpstreamHeaders.h,
+                        the one place upstream's headers are included from (section 11)
+    bands/              Bands.h (a row per band) and the static_assert that holds a build's
+                        default frequency to the band it says it is in
+    fwdesc/             the image descriptor: the portable builder, and this image's own 96
+                        bytes as a const object the firmware reads its HELLO out of
+    link/               the box link: codec (portable), session and dispatcher (portable),
                         attention (the machine of section 8, portable), UART transport
-  clock/                ClockKeeper (the rules, portable), BoardClock (the board's ports and
-                        its flash file), LinkClock (the keeper as the link's ClockAccess)
-  power/                INA3221 with per-channel shunts, BME280, the two readers' schedules,
+    power/              INA3221 with per-channel shunts, BME280, the two readers' schedules,
                         the battery thresholds and the Cayenne-LPP (all portable but BoardPower)
-  meshclient/           the job, the five sends, the reply, the observation ring (state portable)
-  fwdesc/               the image descriptor
+    version/            the version string, "twinoak-<role> <version> on MeshCore <tag> (<pin>)"
+  roles/                one directory per role. An environment compiles exactly one of them
+    repeater/
+      main.cpp          ours: setup() and loop(), replacing upstream's example main
+      app/              TwinOakMesh (the subclass), first-boot provisioning, Settings (our keys
+                        on upstream's CLI, portable), RoleHooks.cpp (this role's half of them)
+      clock/            ClockKeeper (the rules, portable), BoardClock (the board's ports and
+                        its flash file), LinkClock (the keeper as the link's ClockAccess)
+      link/             BoardLink: the one Session and the board facts it answers from
+      meshclient/       the job, the five sends, the reply, the observation ring (state portable)
 test/                   native tests, one directory per subject
 spec/                   a copy of the system specification and its fixtures - never edited here
 keys/                   release.pub, the public half of the release key - and nothing secret, ever
@@ -32,6 +43,11 @@ tools/                  verify.ps1, release/ (the release tooling and its tests)
 docs/                   this file, release.md, upstream.md, link.md, bench.md
 tasks/                  the piles
 ```
+
+**`common/` never includes a role's header.** The six places it would have to are one file,
+`src/common/board/RoleHooks.h`: the restart the role gets its last word before, the attention a
+battery raises, and the four calls of the role's own settings on upstream's CLI. A role defines
+all six and there is no weak default, so a role that forgets one does not link.
 
 "Portable" means: no Arduino include, no MeshCore include, compiled by `[env:native]` beside its
 tests. The rule of thumb is the agent firmware's — if it can be a pure function or a class behind
@@ -119,7 +135,7 @@ comment above the override, and listed among the places a bump re-reads.
 
 ## 3. The board target
 
-`src/board/target.{h,cpp}` is ours: MeshCore's `variants/rak4631/target.cpp` assumes a WisBlock
+`src/common/board/target.{h,cpp}` is ours: MeshCore's `variants/rak4631/target.cpp` assumes a WisBlock
 base — a GPS on `Serial1`, a display, a battery divider on an ADC pin. On our adapter `Serial1` is
 the link, there is no display or GPS, and the battery is read by the INA3221.
 
@@ -141,7 +157,7 @@ the link, there is no display or GPS, and the battery is read by the INA3221.
   `querySensors` is on the path of the box link's `LPP_GET`, which must never perform I2C. Ours
   reads both parts itself, on a schedule, into one cache (§6). The class adds three things and
   substitutes none: `begin()`/`loop()`, where those readers are driven — the manager is what
-  `src/main.cpp` already calls once in `setup()` and once in `loop()`; `querySensors()`, which
+  `src/roles/repeater/main.cpp` already calls once in `setup()` and once in `loop()`; `querySensors()`, which
   appends this unit's own telemetry after whatever upstream's manager adds (nothing, on this
   board); and the settings seam (§4), where our keys follow upstream's own (none here, since
   there is no GPS) in `sensor list`, `sensor get` and `sensor set`.
@@ -157,7 +173,7 @@ it clones a dependency. And `MC_VARIANT` is *not* set: with it, `build_as_lib.py
 `variants/rak4631/` — upstream's `target.cpp` included — and the script refuses to run.
 
 Upstream's `MyMesh.h` includes `<target.h>` unqualified, so ours replaces theirs by include order:
-`src/board` is first on the path, `variants/rak4631` (still needed for `variant.h`'s LoRa pins and
+`src/common/board` is first on the path, `variants/rak4631` (still needed for `variant.h`'s LoRa pins and
 `RAK4631Board.h`) after it. The MeshCore library's own files that include `target.h` —
 `MyMesh.cpp`, `UITask.cpp`, `helpers/NRF52Board.cpp` — get ours too, which is why its globals keep
 upstream's names and base types.
@@ -169,7 +185,7 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
 
 `spec/LINK-PROTOCOL.md` is the protocol. In the firmware it is three layers:
 
-1. **Codec** (portable, `src/link/codec/`, proved by p1-02): `Crc16`, `Cobs`, `Packet`,
+1. **Codec** (portable, `src/common/link/codec/`, proved by p1-02): `Crc16`, `Cobs`, `Packet`,
    `FrameReceiver` (which counts what it drops) and `FrameWriter` are the framing; `Numbers.h` is
    every type, status, mode and limit of the protocol in one header; `Bytes.h`'s `Reader` and
    `Writer` are the little-endian scalars; `Messages.{h,cpp}` is a plain struct per payload with
@@ -178,7 +194,7 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
    RAK sends events, and the other half of each pair is the Walter's firmware's. Tested against
    every case of `spec/fixtures/link/link-v1.json` (`test/test_link_codec`), with a test that
    fails when the fixture gains a case nothing exercises.
-2. **Session** (portable, `src/link/session/`, proved by p1-03): a receiver that turns bytes into
+2. **Session** (portable, `src/common/link/session/`, proved by p1-03): a receiver that turns bytes into
    packets and counts what it drops; a dispatcher from request type to handler; the one-entry
    memory of the last request and its response, which is what makes a retried request harmless;
    the event counter. It talks to the rest of the firmware through the interfaces of
@@ -188,10 +204,10 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
    interface that is there**: `HELLO`'s `caps` is built from which of those pointers are non-null
    and from nothing else, so a firmware that has not implemented a thing does not advertise it and
    answers `ERR_UNSUPPORTED` for it. Nothing keeps a second list of what a build can do.
-3. **Transport** (`src/link/SerialTransport.*`): `Serial1` at 115200. Read what is there, write
-   what fits, never wait. `src/link/BoardLink.*` is the board's half of those interfaces —
+3. **Transport** (`src/common/link/SerialTransport.*`): `Serial1` at 115200. Read what is there, write
+   what fits, never wait. `src/roles/repeater/link/BoardLink.*` is the board's half of those interfaces —
    uptime, the reset reason, the per-boot identifier from the radio's RNG, the restart, the
-   identity — and the one call `src/main.cpp` makes in each of `setup()` and `loop()`.
+   identity — and the one call `src/roles/repeater/main.cpp` makes in each of `setup()` and `loop()`.
 
 **The link never stalls the mesh.** `loop()` gives it a bounded slice: it drains the UART's receive
 buffer, handles at most one request, and queues its answer. A handler that would take time — a
@@ -211,10 +227,10 @@ back what it wrote. The reply window is the 160 bytes upstream's own console loo
 64 bytes of guard behind it that the session checks after every line, because upstream's
 `sensor list` can write past 160 on a console that has nothing behind it at all. Four console
 commands never return (`reboot`, `clkreboot`, `poweroff`, `shutdown`); the response to those is
-not owed and the handler does not try to out-run the restart. **Nothing under `src/link/` prints**,
+not owed and the handler does not try to out-run the restart. **Nothing under `src/common/link/` prints**,
 and a rails test holds that: a `CLI` line can be `password <new>`, whose reply echoes it back.
 
-**Attention** (`src/link/attention/`, §8) is one small portable machine: one reason pending with
+**Attention** (`src/common/link/attention/`, §8) is one small portable machine: one reason pending with
 a queue behind it, the two `0x00` wake bytes, 300 ms, then `EV_ATTENTION` every 1000 ms with
 `repeat` counting from 0 and at most ten sends, ended by any valid request, and at most one new
 attention per reason per hour. It also holds the belief that the Walter is asleep
@@ -223,7 +239,7 @@ The session asks it once a pass what to put on the wire and tells it when the by
 every rule about *when* is in one file with a fake clock in front of it.
 
 Nine more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
-`src/app/Settings.{h,cpp}`, portable and tested; the board's half is a dozen one-line readers and
+`src/roles/repeater/app/Settings.{h,cpp}`, portable and tested; the board's half is a dozen one-line readers and
 writers. They work from the USB console and from a mesh admin's `sensor get/set`, in this order,
 which is the order `sensor list` prints:
 
@@ -259,7 +275,7 @@ every boot at a fixed date in 2024 (`VolatileRTCClock`, `src/helpers/ArduinoHelp
 `base_time = 1715770351`), and a node whose clock runs backwards has its adverts and replies taken
 for replays by everyone who heard the later ones.
 
-`src/clock/` is three files: `ClockKeeper.{h,cpp}` is every rule, portable and tested natively
+`src/roles/repeater/clock/` is three files: `ClockKeeper.{h,cpp}` is every rule, portable and tested natively
 against fakes; `BoardClock.{h,cpp}` is the only one that knows what a RAK4630 is; `LinkClock.h` is
 twenty lines that make the keeper the box link's `ClockAccess` - and the one place that holds the
 keeper's four states against the wire's `time_state` with a `static_assert`.
@@ -377,7 +393,7 @@ reciprocal path returns. One send is one packet.
 The Walter's agent paces itself to a budget the MeshMaster server sets - `budget 2/min gap 20 s`
 by default (twinoak/meshmaster-agent-firmware's README at `51faafb4`). The RAK enforces a ceiling
 that budget cannot reach: **at most 6 sends in any 60 seconds and at least 2 seconds between two**
-(`src/meshclient/SendCeiling.h`, portable, tested against a fake clock). Over it a send is refused
+(`src/roles/repeater/meshclient/SendCeiling.h`, portable, tested against a fake clock). Over it a send is refused
 `ERR_BUSY` before anything is built and counted in `sensor get client.refused`; the ceiling is
 counted in the same two lines as `client_tx`, so the two cannot disagree about what a send is, and
 a refused send costs nothing - it does not enter the window and does not restart the gap. The
@@ -445,7 +461,9 @@ radio that cannot transmit, where the 31 entries left are not what the node's tr
 
 ## 8. The family: roles, boards, bands
 
-An environment is `<role>_<board>` and builds one image:
+An **image** is one role on one board in one band (`spec/FIRMWARE-MANIFEST.md` §2), and it is one
+PlatformIO environment, named `<role>_<board with its hyphens as underscores>`:
+`repeater_rak4630_single`.
 
 | Role | What | When |
 |---|---|---|
@@ -453,22 +471,100 @@ An environment is `<role>_<board>` and builds one image:
 | `scanner` | NoiseScope: the SX1262 spectrum scanner, RX only, moved here from the hardware repository | phase 3 |
 | `bridge` | two radios of one unit carrying packets between two bands over a UART of their own | later |
 
-| Board | What | When |
-|---|---|---|
-| `rak4630_single` | the single-RAK adapter that was ordered | phases 0–2 |
-| `rak4630_dual_a`, `_b` | the two positions of the dual adapter; `a` owns the I2C bus and the link's telemetry | later |
+| Board | Slot | What | When |
+|---|---|---|---|
+| `rak4630-single` | 0 | the single-RAK adapter that was ordered | phases 0–2 |
+| `rak4630-dual-a`, `-b` | 0, 1 | the two positions of the dual adapter; `a` owns the I2C bus and the link's telemetry | later |
 
-The band is a build constant (`868` today), in the descriptor and the manifest, because a 433 MHz
-module is a different part and must never be given an 868 image.
+| Band | What it is | The radio's defaults | When |
+|---|---|---|---|
+| `868` | 863–870 MHz | 869.618 MHz, 62.5 kHz, SF8, CR8, +22 dBm | phases 0–2 |
+| `433` | — | — | when a radio has been measured against it |
 
-Every image carries the descriptor of `spec/FIRMWARE-MANIFEST.md` §4, and the same strings come
-back in the link's `HELLO`. A role that cannot do something says so in its capability bits rather
-than failing a request; the bridge will have its own messages in the reserved range. The scanner
-is the exception that proves the rule: NoiseScope 0.1 speaks text lines on the same UART, not
-frames, and the Walter tells the two apart as `spec/LINK-PROTOCOL.md` §9 says.
+### The three names are written in one place
+
+`platformio.ini` keeps one `[img_*]` section per image — `role`, `board`, `band` — and that is
+the only place any of the three is written. Everything else derives from them:
+
+| Who | What it reads |
+|---|---|
+| the environment's name | `<role>_<board>` with underscores, and `[img_<env>]` is named after it |
+| `TWINOAK_ROLE`, `TWINOAK_BOARD`, `TWINOAK_BAND` | the defines the environment passes, interpolated from its own `[img_*]` section |
+| the image descriptor | `src/common/fwdesc/ImageDescriptor.cpp`, from those three defines, at compile time |
+| the link's `HELLO` | `role`, `board` and `version` read **out of the descriptor object** (`src/roles/repeater/link/BoardLink.cpp`); `slot` from the board's row in `src/common/board/Boards.h` |
+| the version string | `twinoak-<role> …` (`src/common/version/Version.cpp`) |
+| `buildinfo.json` | `tools/pio/buildinfo.py`, from the same three defines |
+| the manifest entry | `tools/release/build_release.py`, from `buildinfo.json`; the image `id` is `<role>.<board>.<band>` |
+
+`test/test_image` reads `platformio.ini` and holds each of those against it, and
+`tools/release/test_release.py` runs every `[img_*]` section through the release tooling. A name
+that drifts is a red test and not a wrong image.
+
+### The band is real
+
+A 433 MHz module is a different part and must never be given an 868 image, so the band is not a
+label. Each band is a `[band_*]` block in `platformio.ini` — the frequency, bandwidth, spreading
+factor, coding rate and transmit power an image of that band is built with — and a row in
+`src/common/bands/Bands.h` saying what the band *is*. `src/common/bands/BandCheck.cpp` is two
+`static_assert`s over that table: a build whose `TWINOAK_BAND` has no row, or whose `LORA_FREQ`
+lies outside it, does not compile, and the error is a sentence. The mechanism is tested with a
+made-up band in `test/test_image`, because `433` has no block yet.
+
+### Every image says what it is
+
+Every image carries the 96 bytes of `spec/FIRMWARE-MANIFEST.md` §4, built at compile time as a
+`const` object (`src/common/fwdesc/`) — C++11 `constexpr` is enough for the CRC-32 and the
+string fields at the board's standard, so nothing patches the linked image afterwards and no
+checksum downstream is of bytes the linker did not produce. The firmware *reads* its `HELLO` out
+of that object, which is what keeps the linker from discarding it and what makes the two unable
+to disagree.
+
+Three things then check it, in the order a release meets them:
+
+1. **the build** — `tools/pio/descriptor.py`, a post-build script on every board environment: it
+   cuts the raw application binary out of the linked `.hex` (leaving it as `firmware.bin`), finds
+   the descriptor with `spec/tools/manifestref.py`'s own `find_descriptor`, and fails the build
+   unless there is **exactly one** and its fields are the environment's;
+2. **the release** — `--require-descriptor`, on in `.github/workflows/release.yml` and in the
+   local dry run of `tools/verify.ps1`: no image is published whose descriptor is missing,
+   doubled or not what its manifest entry says. The entry also carries `requires.link_major`,
+   the box-link major the image speaks;
+3. **the Walter** — which reads the bytes out of what it downloaded before it flashes anything
+   (`spec/FIRMWARE-MANIFEST.md` §5, step 5), and after the flash holds the `HELLO` it gets
+   against the descriptor it wrote.
+
+A role that cannot do something says so in its capability bits rather than failing a request; the
+bridge will have its own messages in the reserved range. The scanner is the exception that proves
+the rule: NoiseScope 0.1 speaks text lines on the same UART, not frames, and the Walter tells the
+two apart as `spec/LINK-PROTOCOL.md` §9 says.
 
 For the bridge, the second UART (`Serial2`, P0.19/P0.20) is reserved to connect the two radios of
 a dual adapter. `Serial1` stays the link to the Walter on every board.
+
+### Adding a role
+
+1. `src/roles/<role>/` with its own `main.cpp`, and a definition of all six functions of
+   `src/common/board/RoleHooks.h` — without them it does not link.
+2. `[img_<role>_<board>]` in `platformio.ini` with `role`, `board` and `band`, and
+   `[env:<role>_<board>]` beside it: `build_src_filter = +<common/> +<roles/<role>/>`, the three
+   `TWINOAK_*` defines interpolated from that `[img_*]` section, and the band's five radio flags
+   from its `[band_*]` block.
+3. A row in the **Role** table above. The role's name must be one of the codes of
+   `spec/FIRMWARE-MANIFEST.md` §4 — `bridge` and `scanner` are already there;
+   `src/common/fwdesc/Descriptor.h`'s `roleCode()` is this firmware's copy of that list, and a
+   role it does not know fails a `static_assert`.
+4. Nothing else. `tools/verify.ps1` and both workflows read the board environments out of
+   `platformio.ini`, so the new image is built, descriptor-checked and released by itself.
+
+### Adding a board
+
+1. A row in `src/common/board/Boards.h`: the board as `FIRMWARE-MANIFEST.md` spells it, the radio
+   `slot` its `HELLO` reports, and the `descriptor_slot` an image of it may be put in.
+2. `[img_*]` and `[env:*]` as above and — if the pin map or the parts differ — a board target
+   beside `src/common/board/target.cpp` with the same globals upstream's `<target.h>` expects
+   (section 3).
+3. A row in the **Board** table above. A board that brings a new band brings a `[band_*]` block
+   and a row in `src/common/bands/Bands.h` with it.
 
 ## 9. Flash, and what an update may touch
 
@@ -496,7 +592,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | shunt arithmetic, the two readers' schedules, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part, and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view |
 | job state, reply matching, the send ceiling | ✔ (the ceiling against a fake clock, and through a real session) | the overrides, the sends | a login to a real repeater |
 | the observation ring, the pull's payload fitting, the RSSI note table, `obs.wake` | ✔ against fakes, and the `OBS_PULL` fixture through the real session | advert capture, the two overrides | adverts heard on the roof |
-| descriptor, manifest | ✔ against the fixtures | placement in the image | the Walter reads it |
+| the descriptor builder, the names across `platformio.ini` and its consumers, the band table | ✔ against the specification's fixtures and against `platformio.ini` (`test/test_image`), and every `[img_*]` section through the release tooling (`tools/release/test_release.py`) | the `static_assert`s of `src/common/bands/BandCheck.cpp` and `src/common/fwdesc/ImageDescriptor.cpp`; the post-build check of `tools/pio/descriptor.py`, which finds the descriptor in the linked image | the Walter reads it out of what it downloaded, and holds `HELLO` against it |
 
 ## 11. Proved by task p1-01
 
@@ -506,7 +602,7 @@ against the build, by the task that first compiled our application onto upstream
 
 | Claim | Evidence |
 |---|---|
-| `build_as_lib.py` compiles `examples/<name>/*.cpp` for `BUILD_EXAMPLE` and leaves one file out for `EXCLUDE_FROM_EXAMPLE` | `build_as_lib.py` lines 42–53: `+<../examples/{example_name}/*.cpp>` then `-<../examples/{example_name}/{exclude_name}>`; the exclude needs `example_name` already set, so the define order matters. The linker map (`out/build/<env>/firmware.map`) has `libMeshCore.a(MyMesh.cpp.o)` and no `main.cpp.o` member of that archive; `setup` and `loop` are in `src/main.cpp.o` |
+| `build_as_lib.py` compiles `examples/<name>/*.cpp` for `BUILD_EXAMPLE` and leaves one file out for `EXCLUDE_FROM_EXAMPLE` | `build_as_lib.py` lines 42–53: `+<../examples/{example_name}/*.cpp>` then `-<../examples/{example_name}/{exclude_name}>`; the exclude needs `example_name` already set, so the define order matters. The linker map (`out/build/<env>/firmware.map`) has `libMeshCore.a(MyMesh.cpp.o)` and no `main.cpp.o` member of that archive; `setup` and `loop` are in `src/roles/repeater/main.cpp.o` |
 | `MC_VARIANT` compiles the whole variant directory, `target.cpp` included | `build_as_lib.py` lines 37–40: `+<../variants/{variant_name}>`. Without the define the map has exactly one `target.cpp.o`, ours, and `RAK4631Board.cpp.o` / `variant.cpp.o` in `libmeshcore_variant.a` |
 | `MyMesh : public mesh::Mesh, public CommonCLICallbacks`, most state private | `MyMesh.h`: the members from `FILESYSTEM* _fs` to `matching_peer_indexes[MAX_CLIENTS]` precede the first access specifier |
 | `handleCommand(0, command, reply)` is public | `MyMesh.h`, under `public:`: `void handleCommand(uint32_t sender_timestamp, char* command, char* reply);`. `sender_timestamp == 0` is the console's privilege (`MyMesh.cpp:1262`, `get acl`) |
@@ -514,45 +610,56 @@ against the build, by the task that first compiled our application onto upstream
 | the settings seam is virtual and the CLI uses it | `SensorManager.h:21–24`: `getNumSettings`, `getSettingName`, `getSettingValue`, `setSettingValue`, all `virtual`; `CommonCLI.cpp:276–316`: `sensor get` (`getSettingByKey`), `sensor set` (`setSettingValue`), `sensor list` (the three by index). `TwinOakSensors` overrides the four with `override` and the build accepts it |
 | telemetry goes through `sensors.querySensors(perm, lpp)` | `MyMesh.cpp:250`, in `handleRequest` for `REQ_TYPE_GET_TELEMETRY_DATA`; `querySensors` is `virtual` (`SensorManager.h:19`) |
 | `getBattMilliVolts()` is virtual on the board | `MeshCore.h:47`: `virtual uint16_t getBattMilliVolts() = 0;` on `mesh::MainBoard`; `RAK4631Board.h` overrides it with the ADC reading; `MyMesh.cpp:218` and `:244` call it for `status` and the telemetry base channel |
-| the eight overrides are virtual and reachable | `MyMesh.h`, under `protected:`: `searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, `onPeerPathRecv` (`override`), `onAdvertRecv` (no keyword; virtual via `Mesh.h:122`), `logRx`, `logTx` (`override`); `onTraceRecv` is not in `MyMesh.h` at all — the base is `Mesh.h:107`'s empty virtual. `src/app/TwinOakMesh.h` declares all eight with `override` and the build is green; `nm` shows all eight `TwinOakMesh::` symbols beside the `MyMesh::` ones |
+| the eight overrides are virtual and reachable | `MyMesh.h`, under `protected:`: `searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, `onPeerPathRecv` (`override`), `onAdvertRecv` (no keyword; virtual via `Mesh.h:122`), `logRx`, `logTx` (`override`); `onTraceRecv` is not in `MyMesh.h` at all — the base is `Mesh.h:107`'s empty virtual. `src/roles/repeater/app/TwinOakMesh.h` declares all eight with `override` and the build is green; `nm` shows all eight `TwinOakMesh::` symbols beside the `MyMesh::` ones |
 | `Mesh::onRecvPacket` tries matched peers in index order and the first MAC that verifies wins | `Mesh.cpp:147–186`: `searchPeersByHash(&src_hash)`, then `for (int j = 0; j < num; j++) { getPeerSharedSecret(secret, j); … MACThenDecrypt … if (len > 0) { … onPeerPathRecv(pkt, j, …) or onPeerDataRecv(pkt, type, j, …); found = true; break; } }`. Upstream's match array is `matching_peer_indexes[MAX_CLIENTS]` (32), filled at `MyMesh.cpp:623` |
 | `onTraceRecv` is called for a direct TRACE at the end of its path | `Mesh.cpp:56–57`: `if (offset >= len) onTraceRecv(pkt, trace_tag, auth_code, flags, pkt->path, &pkt->payload[i], len)` |
 | `logRx` sees the packet while its RSSI is still the radio's last | `Dispatcher.cpp:238`: `logRx(pkt, pkt->getRawLength(), score)` in the receive path, after `_radio->getLastSNR()`/`getLastRSSI()` were read for the score and before the packet is queued inbound; `logTx` at `Dispatcher.cpp:109`, when the outbound packet has been handed to the radio |
 | `createAnonDatagram`, `createDatagram`, `createTrace`, `sendDirect`, `sendFlood` are public on `Mesh` | `Mesh.h:185–224`, under `public:` |
-| "no saved preferences" is readable | `CommonCLI.cpp:30–47`, `loadPrefs`: `/prefs.json` is loaded if it exists, else `/com_prefs` is converted if it exists, else nothing is loaded and the constructor's defaults stand. `src/app/FirstBoot.cpp` tests exactly those two files, before `begin()` runs `loadPrefs` |
+| "no saved preferences" is readable | `CommonCLI.cpp:30–47`, `loadPrefs`: `/prefs.json` is loaded if it exists, else `/com_prefs` is converted if it exists, else nothing is loaded and the constructor's defaults stand. `src/roles/repeater/app/FirstBoot.cpp` tests exactly those two files, before `begin()` runs `loadPrefs` |
 | the admin password's field is 16 bytes | `CommonCLI.h:29`: `char password[16];` — fifteen characters and the NUL, which is what `StrHelper::strncpy` leaves (`TxtDataHelpers.cpp:3`) and what the login compares with `strcmp` (`MyMesh.cpp:102`). A sixteen-character password cannot exist at this pin; ours is fifteen |
 | upstream's default password is the constructor's and only the constructor's | `MyMesh.cpp:32–34` defaults `ADMIN_PASSWORD` to the word every stock repeater ships with when the define is absent; `MyMesh.cpp:897` copies the define into `_prefs.password`. Our build defines it as `not-a-password` and `FirstBoot.cpp` overwrites it in `setup()`, before `loop()` runs |
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
-| `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
+| `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/common/board/UpstreamHeaders.h` and `src/roles/repeater/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
 
+Corrections and additions made above by **p3-01**, roles and boards: §1 (the tree, which is now
+`src/common/` and `src/roles/<role>/`, and the one seam between them), §8 (rewritten: an image's
+three names and the one place they are written, the band blocks and their check, the descriptor
+and the three things that check it, and the *adding a role* / *adding a board* lists) and §10.
+Three couplings the split had to break are worth knowing, because they say what `common/` may
+not do: `src/common/board/target.cpp` reached the clock keeper and the repeater's settings table
+directly, and `src/common/power/BoardPower.cpp` reached the repeater's board link for
+`raiseAttention` and upstream's `MyMesh.h` for `FILESYSTEM` — the first three are now the six
+functions of `src/common/board/RoleHooks.h`, and the fourth is one more include in
+`src/common/board/UpstreamHeaders.h`. No behaviour changed with them.
+
 Corrections and additions made above by **p1-06**, power and environment: §1 (what is under
-`src/power/`), §3 (`getBattMilliVolts()` is channel 2 now, and `TwinOakSensors` gained
+`src/common/power/`), §3 (`getBattMilliVolts()` is channel 2 now, and `TwinOakSensors` gained
 `begin()`/`loop()`/`querySensors()`; **upstream's BME280 support had to leave the build** too, for
 a reason this file did not foresee - it samples the part inside `querySensors`, which is on the
 path of `LPP_GET`), §4 (the settings table is seven keys and `sensor list` pages), §6 (rewritten:
 one cache and its four readers, why no request touches a bus, what the I2C layer cannot promise,
 the thresholds' own rules, and the one field list with two appliers) and §10. What that task read
-of upstream is cited where it is used - `src/power/Environment.h` for upstream's BME280 query,
-`src/power/Telemetry.{h,cpp}` for `handleRequest`'s two fields and CayenneLPP's `addField`,
-`src/board/target.h` for what reads `getBattMilliVolts()`, `src/power/BoardPower.cpp` for the
+of upstream is cited where it is used - `src/common/power/Environment.h` for upstream's BME280 query,
+`src/common/power/Telemetry.{h,cpp}` for `handleRequest`'s two fields and CayenneLPP's `addField`,
+`src/common/board/target.h` for what reads `getBattMilliVolts()`, `src/common/power/BoardPower.cpp` for the
 core's TWIM driver - and `docs/upstream.md` place 5 lists them.
 
-Corrections and additions made above by **p1-05**, local management: §1 (`src/app/Settings.*` and
-`src/link/attention/`), §4 (what `CLI` does and what it costs; the attention machine; the settings
+Corrections and additions made above by **p1-05**, local management: §1 (`src/roles/repeater/app/Settings.*` and
+`src/common/link/attention/`), §4 (what `CLI` does and what it costs; the attention machine; the settings
 table gained `fw.version` and the order `sensor list` really prints, and who may run `sensor set`
 over the mesh, from the source at the pin) and §10. What that task read of upstream is cited where
-it is used — `src/link/BoardLink.cpp` for `handleCommand`, the reply window and the four commands
-that never return, `src/app/Settings.{h,cpp}` for the ACL gate and `sensor list`'s 134-byte
+it is used — `src/roles/repeater/link/BoardLink.cpp` for `handleCommand`, the reply window and the four commands
+that never return, `src/roles/repeater/app/Settings.{h,cpp}` for the ACL gate and `sensor list`'s 134-byte
 cut-off — and `docs/upstream.md` place 5 lists them.
 
-Corrections made above by **p1-04**, the clock: §1 (what is under `src/clock/`), §2 (two more
+Corrections made above by **p1-04**, the clock: §1 (what is under `src/roles/repeater/clock/`), §2 (two more
 rows of the table - the virtuals the clock keeper needs, which p1-01 did not know about - and "the
 eight" is now ten), §5 (rewritten: the file is the only memory there is, and why; the *clean*
 flag; the sane window; the jump poll; which virtuals count as a timestamp leaving the node) and
-§10. What that task read of upstream is cited where it is used - `src/clock/BoardClock.cpp` for
-the clock helpers and the reset reason, `src/app/TwinOakMesh.h` for the four virtuals and the
-advert timers, `src/board/target.h` for `reboot()`/`powerOff()` - and `docs/upstream.md` place 5
+§10. What that task read of upstream is cited where it is used - `src/roles/repeater/clock/BoardClock.cpp` for
+the clock helpers and the reset reason, `src/roles/repeater/app/TwinOakMesh.h` for the four virtuals and the
+advert timers, `src/common/board/target.h` for `reboot()`/`powerOff()` - and `docs/upstream.md` place 5
 lists them.
 
 Corrections made above by that task: §1 (the wrapper headers), §2 (the define order, `UITask.cpp`,

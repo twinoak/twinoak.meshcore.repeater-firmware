@@ -67,7 +67,7 @@ info = {
     "board": define("TWINOAK_BOARD"),
     "band": define("TWINOAK_BAND"),
     "mcu": env.BoardConfig().get("build.mcu"),
-    # The version the image itself reports. src/version.h has the same default for a build that
+    # The version the image itself reports. src/common/version/Version.h has the same default for a build that
     # no release passed TWINOAK_FW_VERSION to; the release tooling refuses to publish a version
     # other than this one.
     "version": define("TWINOAK_FW_VERSION", "0.0.0-dev"),

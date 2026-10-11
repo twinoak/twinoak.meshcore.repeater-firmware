@@ -123,7 +123,7 @@ POWER_VALID_NAMES = [(0x01, "channel 1"), (0x02, "channel 2"), (0x04, "channel 3
 ENV_VALID_NAMES = [(0x01, "temperature"), (0x02, "humidity"), (0x04, "pressure")]
 # LPP_GET's perm_mask: MeshCore's telemetry permission bits.
 LPP_PERM_NAMES = [(0x01, "base"), (0x02, "location"), (0x04, "environment")]
-# The LPP types this firmware writes, and how to read one (src/power/Telemetry.h; MeshCore's
+# The LPP types this firmware writes, and how to read one (src/common/power/Telemetry.h; MeshCore's
 # src/helpers/sensors/LPPDataHelpers.h). Each is two bytes, most significant first.
 LPP_TYPES = {
     103: ("temperature", 10.0, True, "C"),

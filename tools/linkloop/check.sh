@@ -28,17 +28,17 @@ if ! command -v g++ > /dev/null; then
 fi
 
 echo "== build"
-# src/power/BoardPower.cpp is the one file of that directory left out: it is the board's half -
+# src/common/power/BoardPower.cpp is the one file of that directory left out: it is the board's half -
 # Wire, the Adafruit driver and the file system - and tools/linkloop/ has its own fakes for each.
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
-  tools/linkloop/linkloop.cpp src/link/codec/*.cpp src/link/session/*.cpp \
-  src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp \
-  src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp \
-  src/meshclient/LinkObservations.cpp src/meshclient/ObservationRing.cpp \
-  src/meshclient/Reply.cpp src/meshclient/SendCeiling.cpp \
-  src/power/BatteryWatch.cpp src/power/Environment.cpp src/power/Ina3221.cpp \
-  src/power/LinkPower.cpp src/power/PowerReader.cpp src/power/Prefs.cpp \
-  src/power/Telemetry.cpp
+  tools/linkloop/linkloop.cpp src/common/link/codec/*.cpp src/common/link/session/*.cpp \
+  src/common/link/attention/*.cpp src/roles/repeater/clock/ClockKeeper.cpp src/roles/repeater/app/Settings.cpp \
+  src/roles/repeater/meshclient/Job.cpp src/roles/repeater/meshclient/LinkMeshClient.cpp \
+  src/roles/repeater/meshclient/LinkObservations.cpp src/roles/repeater/meshclient/ObservationRing.cpp \
+  src/roles/repeater/meshclient/Reply.cpp src/roles/repeater/meshclient/SendCeiling.cpp \
+  src/common/power/BatteryWatch.cpp src/common/power/Environment.cpp src/common/power/Ina3221.cpp \
+  src/common/power/LinkPower.cpp src/common/power/PowerReader.cpp src/common/power/Prefs.cpp \
+  src/common/power/Telemetry.cpp
 echo "built $out/linkloop"
 
 cli="python3 tools/linkcli.py --pipe $out/linkloop"

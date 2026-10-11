@@ -1,4 +1,4 @@
-// src/app/Settings.{h,cpp}: our nine keys as upstream's CLI sees them - `sensor list`,
+// src/roles/repeater/app/Settings.{h,cpp}: our nine keys as upstream's CLI sees them - `sensor list`,
 // `sensor get <key>`, `sensor set <key> <value>` - against a fake host.
 //
 // What is checked: the order of `sensor list` is stable (it is what a bench reads and what
@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-#include "app/Settings.h"
+#include "roles/repeater/app/Settings.h"
 
 namespace {
 
@@ -38,7 +38,7 @@ class FakeHost : public twinoak::SettingsHost {
   bool wake_accepted = true;
   uint16_t low_mv = 3500;
   uint16_t crit_mv = 3300;
-  // The board refuses a pair the thresholds would not accept (src/power/BatteryWatch.h); here
+  // The board refuses a pair the thresholds would not accept (src/common/power/BatteryWatch.h); here
   // the window is the same one, written out so that the table's own job - parsing - is what this
   // suite is testing.
   bool accept_thresholds = true;
@@ -141,7 +141,7 @@ TEST(TheTable, FiveOfTheNineAreReadOnlyAndAnUnknownKeyIsNotOurs) {
 
   // `client.refused` is read-only on purpose: the ceiling it counts is a build constant, because
   // a limit the Walter could raise would be no backstop against the Walter
-  // (src/meshclient/SendCeiling.h).
+  // (src/roles/repeater/meshclient/SendCeiling.h).
   const char* const read_only[] = {"fw.version", "link.errors", "walter.seen", "clock.state",
                                    "client.refused"};
   for (const char* key : read_only) {
@@ -219,7 +219,7 @@ TEST(TheTable, TheTwoThresholdsTakeADecimalNumberOfMillivolts) {
   EXPECT_EQ(1, host.crit_sets);
 
   // A pair the board refuses is refused here too - upstream's CLI then says "can't find custom
-  // var", which is its only word for "no" (src/app/Settings.h).
+  // var", which is its only word for "no" (src/roles/repeater/app/Settings.h).
   host.accept_thresholds = false;
   EXPECT_FALSE(s.set("power.low_mv", "4000"));
   EXPECT_EQ(2, host.low_sets);
@@ -234,7 +234,7 @@ TEST(TheTable, TheTwoThresholdsTakeADecimalNumberOfMillivolts) {
 
 TEST(TheTable, ObsWakeTakesZeroAndOneAndGoesBothWays) {
   // Section 8's reason 5 is off by default, because a unit on a busy mesh must not wake its
-  // Walter every hour for adverts alone (src/meshclient/LinkObservations.h). Unlike
+  // Walter every hour for adverts alone (src/roles/repeater/meshclient/LinkObservations.h). Unlike
   // `walter.wake`, which is a request, this one is a setting: it can be turned off again.
   FakeHost host;
   twinoak::Settings s(host);
@@ -333,7 +333,7 @@ TEST(SensorList, WithBothCountersAtTheirWidestOnlyFourFitAndNothingOverruns) {
 
 TEST(SensorList, TheOneCaseThatOutgrowsTheWindowIsKnownCountedAndCutRatherThanSpilled) {
   // A release image's version string is longer than `0.0.0-dev` (the release build passes
-  // TWINOAK_FW_VERSION, src/app/Version.cpp), which pushes the fw.version line from 78 bytes to
+  // TWINOAK_FW_VERSION, src/common/version/Version.cpp), which pushes the fw.version line from 78 bytes to
   // 82 - and with a `restored` clock and both counters still narrow, upstream's own loop writes
   // 162 bytes into a 160-byte reply.
   FakeHost host;
@@ -350,7 +350,7 @@ TEST(SensorList, TheOneCaseThatOutgrowsTheWindowIsKnownCountedAndCutRatherThanSp
 
   // What the firmware does with it: the session's 64 guard bytes absorb the write, the cut is
   // counted, and what leaves the link is the window's own 159 characters
-  // (src/link/session/Session.cpp's cliHandler; test/test_link_session drives the real thing).
+  // (src/common/link/session/Session.cpp's cliHandler; test/test_link_session drives the real thing).
   // So the cost is the tail of `... next:5` and nothing else - every key is still readable with
   // `sensor get`, and `sensor list 5` still prints the pair.
   EXPECT_LT(out.size(), 160u + 64u) << "and it stays well inside the guard";
