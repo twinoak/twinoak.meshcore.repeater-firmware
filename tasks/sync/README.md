@@ -13,7 +13,7 @@ job's log in it, and the driver runs it like any other task:
 ```
 
 [`docs/upstream.md`](../../docs/upstream.md) is the page that explains all three
-tiers and holds the list of the seven places a bump re-reads;
+tiers and holds the list of the eight places a bump re-reads;
 `TEMPLATE.md` is that list as a session's checklist. Reports land in
 [`reports/NN.md`](reports/README.md) as everywhere else.
 

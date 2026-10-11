@@ -40,7 +40,7 @@ it, and the pull request is already open, so CI runs on every push.
    is red before anything of upstream's has even been looked at
    (`docs/upstream.md`, *What a bump costs today*) — so do them first and get a
    clean signal for the rest.
-3. **Re-read the seven places a bump re-reads.** The table in
+3. **Re-read the eight places a bump re-reads.** The table in
    `docs/upstream.md` is the list; each row says what it depends on upstream
    for. In short:
    1. the flag blocks copied into `platformio.ini` — `diff` our `[nrf52_base]`
@@ -56,20 +56,28 @@ it, and the pull request is already open, so CI runs on every push.
    3. `boards/rak4631.json` — re-copy upstream's and `diff` it; the one file of
       upstream's in this repository (`boards/README.md`);
    4. `tools/pio/*` — `meshcore_private_libs.py` wants `lib/ed25519`,
-      `meshcore_uf2.py` wants `bin/uf2conv/uf2conv.py`. Both raise if the pin
-      moved them, which is a build that fails and not a question;
+      `meshcore_variant.py` wants `variants/rak4631/RAK4631Board.cpp` and
+      `variant.cpp` (and refuses `MC_VARIANT`), `meshcore_uf2.py` wants
+      `bin/uf2conv/uf2conv.py`. All three raise if the pin moved them, which is
+      a build that fails and not a question;
    5. every place that cites a line of upstream's at the old pin:
       `grep -rn "{{OLD_PIN_SHORT}}" --include=*.cpp --include=*.h --include=*.py --include=*.md --include=*.ini .`
       finds the ones that say so out loud, and a comment in `src/` that names a
       file and a function of MeshCore's is read at the new tag and re-cited;
-   6. `build_as_lib.py`'s defines — `MC_VARIANT`, `BUILD_EXAMPLE` and (from
-      phase 1) `EXCLUDE_FROM_EXAMPLE`: read upstream's script at the new tag
-      and check it still selects the sources we think it does;
+   6. `build_as_lib.py`'s defines — `BUILD_EXAMPLE` and, after it,
+      `EXCLUDE_FROM_EXAMPLE` (and `MC_VARIANT` deliberately *not* set): read
+      upstream's script at the new tag and check it still selects the sources
+      we think it does;
    7. the application region in the linker script — the release tooling fails
       if an image falls outside it, so a move is caught; but the manifest's
       `app_region` then **changes**, and the Walter writes images at that
       address. If it moved, the report says so loudly and in its own paragraph,
-      because the other box has to be told.
+      because the other box has to be told;
+   8. what our sources take from upstream's headers —
+      `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` are the only
+      files of ours that include upstream, as system headers; a header we newly
+      need goes there. And upstream's `MyMesh.h` must still include `<target.h>`
+      unqualified, or ours no longer shadows theirs (`docs/ARCHITECTURE.md` §3).
 4. **Bring the code to the new API.** A rename upstream is a rename here; a
    changed packet layout is a changed reader here. What is **not** allowed is
    to work around a compile error by loosening a rail, by editing a file of
@@ -116,7 +124,7 @@ gets quietly lost:
 ## Acceptance criteria
 
 - [ ] `tools/verify.ps1` green at `{{NEW_PIN}}` on the machine the session ran on, and then in CI on the pull request.
-- [ ] Each of the seven places of `docs/upstream.md` read at the new tag, and the report says for each: *unchanged*, or *changed: was X, is now Y*.
+- [ ] Each of the eight places of `docs/upstream.md` read at the new tag, and the report says for each: *unchanged*, or *changed: was X, is now Y*.
 - [ ] Every test written from upstream's source re-checked against the new tag's source, and the rails above each named in the report with the test or the grep that holds it.
 - [ ] The report says what upstream changed **that mattered** — not "the pin moved", but which of their commits this session had to answer.
 - [ ] If the application region moved: its own paragraph in the report, and the new `app_region` named, because the Walter has to be told (`spec/SYSTEM.md` S-5).

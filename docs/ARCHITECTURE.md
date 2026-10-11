@@ -14,7 +14,8 @@ boards/                 board definitions PlatformIO must see before it clones a
 src/
   main.cpp              ours: setup() and loop(), replacing upstream's example main
   app/                  TwinOakMesh (the subclass), first-boot provisioning, the version string
-  board/                target.h / target.cpp for our adapter: the board object, the radio, the clock, the sensors
+  board/                target.h / target.cpp for our adapter: the board object, the radio, the clock, the sensors;
+                        UpstreamHeaders.h, the one place upstream's headers are included from (section 11)
   link/                 the box link: codec (portable), session and dispatcher (portable), UART transport
   clock/                the clock keeper (portable) and its flash file
   power/                INA3221 with per-channel shunts, BME280, thresholds (arithmetic portable)
@@ -38,7 +39,11 @@ MeshCore is a PlatformIO dependency. Its `library.json` runs `build_as_lib.py`, 
 defines to decide which of its own sources to compile; `-D BUILD_EXAMPLE=simple_repeater` compiles
 `examples/simple_repeater/*.cpp`, and `-D EXCLUDE_FROM_EXAMPLE=main.cpp` leaves one of them out.
 That is the whole mechanism: **upstream's `MyMesh.cpp` is compiled from the pin, byte for byte, and
-only its `main.cpp` is replaced by ours.**
+only its `main.cpp` is replaced by ours.** Two details of it, from the script at the pin: the
+defines are read in order and `EXCLUDE_FROM_EXAMPLE` must come after `BUILD_EXAMPLE` (the script
+indexes the example's name when it sees the exclude); and `UITask.cpp`, the example's display task,
+is still compiled - a second `EXCLUDE_FROM_EXAMPLE` would be a macro redefinition - but without
+`DISPLAY_CLASS` nothing references it and the linker leaves it out (section 11).
 
 `MyMesh` (`examples/simple_repeater/MyMesh.h`) is `class MyMesh : public mesh::Mesh, public
 CommonCLICallbacks`. Most of its state is private — the ACL, the preferences, the neighbour table.
@@ -59,6 +64,9 @@ We need none of it, because what we add hangs on three kinds of thing that are *
 
 `TwinOakMesh : public MyMesh` overrides the protected virtuals, calls the base for everything that
 is not ours, and adds the link. `main.cpp` constructs it where upstream's constructs `MyMesh`.
+Nothing of upstream's names `the_mesh` but its own `main.cpp`, so the type of ours is nobody's
+business but ours. One of the eight, `onAdvertRecv`, is declared in `MyMesh.h` without the
+`override` keyword; it is virtual all the same, through `mesh::Mesh`, and ours says `override`.
 
 ### The one piece of cleverness: an extra peer in front
 
@@ -109,9 +117,12 @@ comment above the override, and listed among the places a bump re-reads.
 base — a GPS on `Serial1`, a display, a battery divider on an ADC pin. On our adapter `Serial1` is
 the link, there is no display or GPS, and the battery is read by the INA3221.
 
-- `board` — a subclass of upstream's `RAK4631Board` (the SX1262 wiring inside the RAK4630 stamp is
-  the stamp's, so the radio pins and the DC/DC setup are upstream's unchanged) with
-  `getBattMilliVolts()` returning channel 2's bus voltage.
+- `board` — `TwinOakBoard`, a subclass of upstream's `RAK4631Board` (the SX1262 wiring inside the
+  RAK4630 stamp is the stamp's, so the radio pins and the DC/DC setup are upstream's unchanged),
+  with `getBattMilliVolts()` returning channel 2's bus voltage from task 06 on - until then it is
+  upstream's ADC reading of a pin that is not wired. `NRF52Board` is a *virtual* base of
+  `RAK4631Board` (through `NRF52BoardDCDC`), so the most-derived class is the one that constructs
+  it, with the OTA name upstream passes; a board added in phase 3 does the same.
 - `radio_driver`, `radio_init()`, `radio_new_identity()` — as upstream's.
 - `rtc_clock` — upstream's `AutoDiscoverRTCClock` over a volatile clock, so a hand-fitted RV-3028
   is found by itself; the clock keeper (§5) sits above it.
@@ -119,12 +130,24 @@ the link, there is no display or GPS, and the battery is read by the INA3221.
   `0x76` by itself (`ENV_INCLUDE_BME280`); **its INA3221 support is left out of the build**
   (`ENV_INCLUDE_INA3221` undefined) because it applies one shunt value to all three channels, and
   ours are 100 mΩ, 20 mΩ and 50 mΩ. Ours reads the INA3221 itself (§6) and adds the settings seam
-  (§4).
+  (§4): our keys follow upstream's own (none on this board, since there is no GPS) in
+  `sensor list`, `sensor get` and `sensor set`; `fw.version` is the first and is read-only.
 
 Upstream's variant sources we still need (`RAK4631Board.cpp`, the Arduino `variant.cpp`) are
-compiled from the pin by a small PlatformIO script, the way the agent firmware compiles
-`lib/ed25519` — not copied. `boards/rak4631.json` is the one file that has to be vendored, for the
-reason `boards/README.md` gives: PlatformIO reads `boards_dir` before it clones a dependency.
+compiled from the pin by a small PlatformIO script (`tools/pio/meshcore_variant.py`), the way the
+agent firmware compiles `lib/ed25519` — not copied. `variant.cpp` is not a duplicate of the core's:
+the Adafruit core at the pin has **no** `WisCore_RAK4631_Board` variant directory (PlatformIO
+builds an empty "variant library" from the missing path without complaint), so the pin map comes
+from MeshCore's tree in upstream's build and in ours. `boards/rak4631.json` is the one file that
+has to be vendored, for the reason `boards/README.md` gives: PlatformIO reads `boards_dir` before
+it clones a dependency. And `MC_VARIANT` is *not* set: with it, `build_as_lib.py` compiles all of
+`variants/rak4631/` — upstream's `target.cpp` included — and the script refuses to run.
+
+Upstream's `MyMesh.h` includes `<target.h>` unqualified, so ours replaces theirs by include order:
+`src/board` is first on the path, `variants/rak4631` (still needed for `variant.h`'s LoRa pins and
+`RAK4631Board.h`) after it. The MeshCore library's own files that include `target.h` —
+`MyMesh.cpp`, `UITask.cpp`, `helpers/NRF52Board.cpp` — get ours too, which is why its globals keep
+upstream's names and base types.
 
 I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhead filter
 (`INTERCONNECT.md`).
@@ -264,3 +287,38 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | job state, reply matching | ✔ | the overrides, the sends | a login to a real repeater |
 | observation ring | ✔ | advert capture | adverts heard on the roof |
 | descriptor, manifest | ✔ against the fixtures | placement in the image | the Walter reads it |
+
+## 11. Proved by task p1-01
+
+What §2 and §3 rest on, checked against the pinned checkout (`d9296435`, `repeater-v1.17.1`) and
+against the build, by the task that first compiled our application onto upstream's repeater
+(`tasks/phase-1/reports/01.md`). Line numbers are the pin's.
+
+| Claim | Evidence |
+|---|---|
+| `build_as_lib.py` compiles `examples/<name>/*.cpp` for `BUILD_EXAMPLE` and leaves one file out for `EXCLUDE_FROM_EXAMPLE` | `build_as_lib.py` lines 42–53: `+<../examples/{example_name}/*.cpp>` then `-<../examples/{example_name}/{exclude_name}>`; the exclude needs `example_name` already set, so the define order matters. The linker map (`out/build/<env>/firmware.map`) has `libMeshCore.a(MyMesh.cpp.o)` and no `main.cpp.o` member of that archive; `setup` and `loop` are in `src/main.cpp.o` |
+| `MC_VARIANT` compiles the whole variant directory, `target.cpp` included | `build_as_lib.py` lines 37–40: `+<../variants/{variant_name}>`. Without the define the map has exactly one `target.cpp.o`, ours, and `RAK4631Board.cpp.o` / `variant.cpp.o` in `libmeshcore_variant.a` |
+| `MyMesh : public mesh::Mesh, public CommonCLICallbacks`, most state private | `MyMesh.h`: the members from `FILESYSTEM* _fs` to `matching_peer_indexes[MAX_CLIENTS]` precede the first access specifier |
+| `handleCommand(0, command, reply)` is public | `MyMesh.h`, under `public:`: `void handleCommand(uint32_t sender_timestamp, char* command, char* reply);`. `sender_timestamp == 0` is the console's privilege (`MyMesh.cpp:1262`, `get acl`) |
+| `getNodePrefs()`, `savePrefs()` are public | `MyMesh.h`, under `public:`; `savePrefs()` calls `_cli.savePrefs(_fs)`, which rewrites `/prefs.json` (`CommonCLI.cpp:143`) |
+| the settings seam is virtual and the CLI uses it | `SensorManager.h:21–24`: `getNumSettings`, `getSettingName`, `getSettingValue`, `setSettingValue`, all `virtual`; `CommonCLI.cpp:276–316`: `sensor get` (`getSettingByKey`), `sensor set` (`setSettingValue`), `sensor list` (the three by index). `TwinOakSensors` overrides the four with `override` and the build accepts it |
+| telemetry goes through `sensors.querySensors(perm, lpp)` | `MyMesh.cpp:250`, in `handleRequest` for `REQ_TYPE_GET_TELEMETRY_DATA`; `querySensors` is `virtual` (`SensorManager.h:19`) |
+| `getBattMilliVolts()` is virtual on the board | `MeshCore.h:47`: `virtual uint16_t getBattMilliVolts() = 0;` on `mesh::MainBoard`; `RAK4631Board.h` overrides it with the ADC reading; `MyMesh.cpp:218` and `:244` call it for `status` and the telemetry base channel |
+| the eight overrides are virtual and reachable | `MyMesh.h`, under `protected:`: `searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, `onPeerPathRecv` (`override`), `onAdvertRecv` (no keyword; virtual via `Mesh.h:122`), `logRx`, `logTx` (`override`); `onTraceRecv` is not in `MyMesh.h` at all — the base is `Mesh.h:107`'s empty virtual. `src/app/TwinOakMesh.h` declares all eight with `override` and the build is green; `nm` shows all eight `TwinOakMesh::` symbols beside the `MyMesh::` ones |
+| `Mesh::onRecvPacket` tries matched peers in index order and the first MAC that verifies wins | `Mesh.cpp:147–186`: `searchPeersByHash(&src_hash)`, then `for (int j = 0; j < num; j++) { getPeerSharedSecret(secret, j); … MACThenDecrypt … if (len > 0) { … onPeerPathRecv(pkt, j, …) or onPeerDataRecv(pkt, type, j, …); found = true; break; } }`. Upstream's match array is `matching_peer_indexes[MAX_CLIENTS]` (32), filled at `MyMesh.cpp:623` |
+| `onTraceRecv` is called for a direct TRACE at the end of its path | `Mesh.cpp:56–57`: `if (offset >= len) onTraceRecv(pkt, trace_tag, auth_code, flags, pkt->path, &pkt->payload[i], len)` |
+| `logRx` sees the packet while its RSSI is still the radio's last | `Dispatcher.cpp:238`: `logRx(pkt, pkt->getRawLength(), score)` in the receive path, after `_radio->getLastSNR()`/`getLastRSSI()` were read for the score and before the packet is queued inbound; `logTx` at `Dispatcher.cpp:109`, when the outbound packet has been handed to the radio |
+| `createAnonDatagram`, `createDatagram`, `createTrace`, `sendDirect`, `sendFlood` are public on `Mesh` | `Mesh.h:185–224`, under `public:` |
+| "no saved preferences" is readable | `CommonCLI.cpp:30–47`, `loadPrefs`: `/prefs.json` is loaded if it exists, else `/com_prefs` is converted if it exists, else nothing is loaded and the constructor's defaults stand. `src/app/FirstBoot.cpp` tests exactly those two files, before `begin()` runs `loadPrefs` |
+| the admin password's field is 16 bytes | `CommonCLI.h:29`: `char password[16];` — fifteen characters and the NUL, which is what `StrHelper::strncpy` leaves (`TxtDataHelpers.cpp:3`) and what the login compares with `strcmp` (`MyMesh.cpp:102`). A sixteen-character password cannot exist at this pin; ours is fifteen |
+| upstream's default password is the constructor's and only the constructor's | `MyMesh.cpp:32–34` defaults `ADMIN_PASSWORD` to the word every stock repeater ships with when the define is absent; `MyMesh.cpp:897` copies the define into `_prefs.password`. Our build defines it as `not-a-password` and `FirstBoot.cpp` overwrites it in `setup()`, before `loop()` runs |
+| the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
+| `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
+| upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Corrections made above by that task: §1 (the wrapper headers), §2 (the define order, `UITask.cpp`,
+`the_mesh`, `onAdvertRecv`'s missing keyword), §3 (`TwinOakBoard` and the virtual base; the
+battery reading stays upstream's until task 06; `variant.cpp` is the only pin map, not one of
+two; `MC_VARIANT` refused; how `<target.h>` resolves). Phase 0's report said the core compiled its
+own `WisCore_RAK4631_Board/variant.cpp` beside MeshCore's; it does not, there is no such
+directory at the pin.
