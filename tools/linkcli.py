@@ -18,12 +18,14 @@ cannot drift from the specification without the specification moving. It identif
     python3 tools/linkcli.py --port COM7 time set
     python3 tools/linkcli.py --port COM7 identity
     python3 tools/linkcli.py --port COM7 reboot 0
+    python3 tools/linkcli.py --port COM7 cli "get radio"
+    python3 tools/linkcli.py --port COM7 sleep 600
     python3 tools/linkcli.py --port COM7 listen
 
 `--pipe <program>` puts a program's stdin and stdout where the serial port would be, which is how
 the tool is exercised with no board: `tools/linkloop/` is the firmware's own session behind a pipe.
 
-Later tasks add their own sub-commands here (05 the console, 06 telemetry).
+Later tasks add their own sub-commands here (06 telemetry).
 Requires `pyserial` for `--port` and nothing at all for `--pipe` or `--help`.
 """
 
@@ -70,6 +72,18 @@ STATUS_FLAG_NAMES = [
     (0x0008, "adverts held"), (0x0010, "radio up"),
 ]
 TIME_SOURCE_NAMES = {1: "the cellular network", 2: "the server", 3: "a person at a console"}
+# EV_ATTENTION's reason, in words, with what its `detail` then means (LINK-PROTOCOL.md 8).
+ATTENTION_REASON_NAMES = {
+    1: ("the node restarted", "the reset reason"),
+    2: ("battery low", "battery millivolts"),
+    3: ("battery critical", "battery millivolts"),
+    4: ("a person asked for the Walter", "nothing"),
+    5: ("the observation ring is nearly full", "records waiting"),
+    6: ("a fault the node wants reported", "a code of the firmware's own"),
+}
+# The console commands that restart the node and never answer (src/helpers/CommonCLI.cpp at the
+# pin): silence after one of them is the expected outcome and not a dead link (section 5.7).
+CLI_NO_ANSWER = ("reboot", "poweroff", "shutdown", "clkreboot")
 TIME_FORCE = 0x01  # TIME_SET's flags, bit 0 (LINK-PROTOCOL.md 5.4)
 REBOOT_MODE_NAMES = {
     0: "restart the application", 1: "UF2 bootloader", 2: "serial DFU", 3: "over-the-air DFU",
@@ -349,10 +363,20 @@ def print_fields(msg_type, f, indent=""):
         print("%sreset_reason  %d (%s)"
               % (indent, f["reset_reason"], RESET_NAMES.get(f["reset_reason"], "?")))
         print_hello_body(f, indent)
+    elif msg_type == ref.CLI:
+        # The reply text as the console would have printed it, newlines and all - and nothing
+        # added to it, because upstream's own replies already begin with their own "> ".
+        text = f["text"]
+        if text == "":
+            print("%s(no reply)" % indent)
+        else:
+            for piece in text.split("\n"):
+                print("%s%s" % (indent, piece))
     elif msg_type == ref.EV_ATTENTION:
-        print("%sreason        %d" % (indent, f["reason"]))
-        print("%sdetail        %d" % (indent, f["detail"]))
-        print("%srepeat        %d" % (indent, f["repeat"]))
+        reason, detail = ATTENTION_REASON_NAMES.get(f["reason"], ("?", "?"))
+        print("%sreason        %d (%s)" % (indent, f["reason"], reason))
+        print("%sdetail        %d (%s)" % (indent, f["detail"], detail))
+        print("%srepeat        %d of %d" % (indent, f["repeat"], 10))
     else:
         for key in sorted(f):
             print("%s%-13s %s" % (indent, key, f[key]))
@@ -473,6 +497,53 @@ def cmd_reboot(link, args):
     return 0
 
 
+def cmd_cli(link, args):
+    """One console command line, run on the node with console privileges (5.7)."""
+    line = " ".join(args.words).strip()
+    if not line:
+        print('usage: cli "<command line>"   (1 to 160 bytes of UTF-8)', file=sys.stderr)
+        return 2
+    encoded = line.encode("utf-8")
+    if len(encoded) > 160:
+        print("that line is %d bytes; the protocol takes 160" % len(encoded), file=sys.stderr)
+        return 2
+
+    # Upstream tests those four words with memcmp against the start of the line, so anything
+    # beginning with one of them restarts the node (`reboot now` does).
+    restarts = any(line.startswith(word) for word in CLI_NO_ANSWER)
+    print("CLI %s" % line)
+    try:
+        f = link.request(ref.CLI, {"text": line})
+    except (SystemExit, OSError, ValueError):
+        # "Some commands restart the node and never answer; the Walter treats silence after such
+        # a line as the expected outcome, not as a dead link" (5.7). On a real link that is
+        # silence and three attempts (SystemExit); through a pipe the program is gone and the
+        # pipe breaks under the retry, which means the same thing.
+        if restarts:
+            print("  (no answer, which is what `%s` means: the node restarted)" % line)
+            return 0
+        raise
+    print_fields(ref.CLI, f, indent="  ")
+    if f.get("status") == ref.ERR_MALFORMED:
+        print("a line is 1 to 160 bytes of UTF-8 text with no control characters in it",
+              file=sys.stderr)
+    return 0 if f.get("status") == ref.OK else 1
+
+
+def cmd_sleep(link, args):
+    """Tell the node this end is going to sleep (8): it then sends no events but EV_BOOT and
+    EV_ATTENTION, and says so in STATUS's flag bit 2, until the next request."""
+    f = link.request(ref.SLEEP_NOTICE, {"expect_back_s": args.seconds})
+    print("SLEEP_NOTICE, back in %s"
+          % ("%d s" % args.seconds if args.seconds else "an unknown time (0)"))
+    print_fields(ref.SLEEP_NOTICE, f, indent="  ")
+    if f.get("status") != ref.OK:
+        return 1
+    print("the node believes this end is asleep until the next request; `listen` now shows")
+    print("only EV_BOOT and EV_ATTENTION, and any request at all wakes it again")
+    return 0
+
+
 def cmd_listen(link, args):
     if args.seconds:
         print("listening for %d s" % args.seconds)
@@ -532,6 +603,16 @@ def build_parser():
                         help="0 application, 1 UF2 bootloader, 2 serial DFU, 3 over-the-air DFU")
     reboot.add_argument("--delay-ms", type=int, default=500, dest="delay_ms")
     reboot.set_defaults(run=cmd_reboot)
+    c = subs.add_parser("cli", help="run one console command line on the node (5.7)")
+    # REMAINDER, for the same reason `time` uses it and so that a line with its own options -
+    # `cli "set repeat off"` - needs no quoting games on every shell.
+    c.add_argument("words", nargs=argparse.REMAINDER, metavar='"<command line>"',
+                   help="the line, exactly as it would be typed on the USB console")
+    c.set_defaults(run=cmd_cli)
+    sleep = subs.add_parser("sleep", help="say this end is going to sleep (8)")
+    sleep.add_argument("seconds", type=int, nargs="?", default=0,
+                       help="how long, for the node's information; 0 (the default) is unknown")
+    sleep.set_defaults(run=cmd_sleep)
     listen = subs.add_parser("listen", help="print the events the node sends")
     listen.add_argument("seconds", type=int, nargs="?", default=0,
                         help="how long; 0 (the default) is for ever")

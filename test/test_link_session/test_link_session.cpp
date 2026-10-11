@@ -206,22 +206,76 @@ class FakeClock : public ClockAccess {
   }
 };
 
+// A command interpreter that is not upstream's: it records the line it was given and answers
+// whatever the test told it to. What upstream's own interpreter does with a line is upstream's
+// business and is on the bench list; what this suite checks is the handler around it.
 class FakeCli : public CliAccess {
  public:
-  size_t runCommand(const char* line, char* reply, size_t reply_cap) override {
-    (void)line;
-    if (reply_cap > 0) reply[0] = 0;
-    return 0;  // task 05 owns the console over the link; this fake is here for the caps bit
+  std::string answer;      // what the interpreter writes back
+  std::string last_line;   // what it was given, NUL-terminated by the session
+  size_t last_cap = 0;     // the window it was given: upstream's console gives 160
+  int calls = 0;
+  // A command that writes one byte past the window it was given, which is what two of upstream's
+  // own commands can do on a console that has nothing behind it (reports/05.md).
+  bool write_past_window = false;
+
+  size_t runCommand(char* line, char* reply, size_t reply_cap) override {
+    calls++;
+    last_line = line;
+    last_cap = reply_cap;
+    if (reply_cap == 0) return 0;
+    const size_t n = answer.size() > reply_cap - 1 ? reply_cap - 1 : answer.size();
+    memcpy(reply, answer.data(), n);
+    reply[n] = 0;
+    if (write_past_window) reply[reply_cap] = 'X';
+    return n;
   }
 };
 
+// The machine itself is test/test_attention's, with a fake clock and a real session. Here it is a
+// fake that answers what the test sets and counts what the session tells it, so that the
+// session's half of section 8 - the order of the calls, and which request clears what - is
+// visible on its own.
 class FakeAttention : public AttentionAccess {
  public:
   uint8_t reason = kAttentionNone;
   bool asleep = false;
+  uint8_t due = kAttentionDueNothing;
+  Attention event;
+
+  int requests = 0;
+  int answers = 0;
+  int wakes = 0;
+  int events = 0;
+  int sleeps = 0;
+  uint8_t last_request_type = 0;
+  uint32_t last_expect_back = 0;
 
   uint8_t pendingReason() const override { return reason; }
   bool walterAsleep() const override { return asleep; }
+
+  uint8_t dueNow(uint32_t) const override { return due; }
+  Attention pendingEvent() const override { return event; }
+  void wakeSent(uint32_t) override {
+    wakes++;
+    due = kAttentionDueNothing;
+  }
+  void eventSent(uint32_t) override {
+    events++;
+    due = kAttentionDueNothing;
+  }
+
+  void noteRequest(uint8_t request_type, uint32_t) override {
+    requests++;
+    last_request_type = request_type;
+    if (request_type != kMsgSleepNotice) asleep = false;
+  }
+  void requestAnswered(uint32_t) override { answers++; }
+  void sleepNotice(uint32_t expect_back_s, uint32_t) override {
+    sleeps++;
+    last_expect_back = expect_back_s;
+    asleep = true;
+  }
 };
 
 class FakePower : public PowerAccess {
@@ -426,16 +480,22 @@ void arrange(Harness& h, const Case& response) {
     }
     case kMsgReboot:
       break;  // the fixture's mode 1 is one this board can do, which is the default
+    case kMsgCli:
+      h.cli.answer = f["text"].as<std::string>();
+      break;
+    case kMsgSleepNotice:
+      break;  // its response is a status byte and nothing else
     default:
       ADD_FAILURE() << response.name << ": nothing here arranges this type";
       break;
   }
 }
 
-// The request types this firmware answers: task 03's five, and task 04's two.
+// The request types this firmware answers: task 03's five, task 04's two, task 05's two.
 bool handledHere(uint8_t type) {
   return type == kMsgHello || type == kMsgPing || type == kMsgStatus || type == kMsgIdentity ||
-         type == kMsgReboot || type == kMsgTimeSet || type == kMsgTimeGet;
+         type == kMsgReboot || type == kMsgTimeSet || type == kMsgTimeGet || type == kMsgCli ||
+         type == kMsgSleepNotice;
 }
 
 }  // namespace
@@ -461,7 +521,7 @@ TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
     EXPECT_EQ(1u, h.session.executed()) << c.name << ": one handler call";
     n++;
   }
-  EXPECT_EQ(7, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET and TIME_GET";
+  EXPECT_EQ(9, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET, CLI, SLEEP_NOTICE";
 }
 
 TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
@@ -968,6 +1028,380 @@ TEST(TheClock, AMalformedTimeSetIsMalformedAndTheClockIsNotAsked) {
   ASSERT_EQ(1u, h.sent.size());
   EXPECT_EQ(toHex(frameOf(responseType(kMsgTimeSet), 13, {kErrMalformed})), h.lastFrame());
   EXPECT_EQ(0, h.clock.sets);
+}
+
+// ----------------------------------------------------------------------------- the console
+
+namespace {
+
+// The status byte of the last answer, and its type and seq, read back through the codec.
+uint8_t answeredStatus(Harness& h, uint8_t& type, uint8_t& seq) {
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(h.lastFrame())) rx.feedByte(b);
+  EXPECT_TRUE(rx.hasPacket());
+  type = rx.packet().type;
+  seq = rx.packet().seq;
+  EXPECT_GE(rx.packet().body.len, 1);
+  return rx.packet().body.len >= 1 ? rx.packet().body.ptr[0] : 0xFF;
+}
+
+// The reply text of the last CLI answer.
+std::string answeredCliText(Harness& h) {
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(h.lastFrame())) rx.feedByte(b);
+  EXPECT_TRUE(rx.hasPacket());
+  Reader r(rx.packet().body);
+  EXPECT_EQ(kOk, r.u8());
+  const Bytes text = r.rest();
+  return std::string(reinterpret_cast<const char*>(text.ptr), text.len);
+}
+
+std::vector<uint8_t> cliFrame(uint8_t seq, const std::string& line) {
+  return frameOf(kMsgCli, seq, std::vector<uint8_t>(line.begin(), line.end()));
+}
+
+}  // namespace
+
+TEST(TheConsole, TheLineIsRunAsTypedAndTheWindowIsUpstreamsOwn) {
+  Harness h;
+  h.cli.answer = "> 869.618,62.5,8,8";
+  h.feed(cliFrame(11, "get radio"));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(1, h.cli.calls);
+  EXPECT_EQ("get radio", h.cli.last_line) << "the line, NUL-terminated and nothing more";
+  EXPECT_EQ(size_t(kCliReplyMax), h.cli.last_cap)
+      << "the 160 bytes upstream's own console loop gives its interpreter";
+  EXPECT_EQ("> 869.618,62.5,8,8", answeredCliText(h));
+  EXPECT_EQ(0u, h.session.cliOverruns());
+}
+
+TEST(TheConsole, AnEmptyReplyIsTheFixturesZeroLengthResponse) {
+  const Case* want = findCaseNamed("cli response with a zero-length reply");
+  ASSERT_NE(nullptr, want);
+
+  Harness h;
+  h.cli.answer = "";  // `get acl` prints to the console and answers nothing
+  h.feed(cliFrame(want->seq, "get acl"));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << "status OK and no text at all";
+  EXPECT_EQ(1, h.cli.calls);
+}
+
+TEST(TheConsole, AReplyAtTheWindowsLimitComesBackWhole) {
+  Harness h;
+  h.cli.answer = std::string(kCliReplyMax - 1, 'x');  // 159 bytes and its NUL
+  h.feed(cliFrame(1, "neighbors"));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(h.cli.answer, answeredCliText(h));
+  EXPECT_EQ(size_t(kCliReplyMax - 1), answeredCliText(h).size())
+      << "159 bytes is the most a console reply can be, and it fits the protocol's 160";
+  EXPECT_EQ(1u, h.session.cliTruncations()) << "it filled the window, which is worth counting";
+  EXPECT_EQ(0u, h.session.cliOverruns()) << "but it did not write past it";
+}
+
+TEST(TheConsole, AReplyWrittenPastTheWindowIsAbsorbedCountedAndCutBack) {
+  Harness h;
+  h.cli.answer = std::string(kCliReplyMax - 1, 'y');
+  h.cli.write_past_window = true;  // one byte into the guard
+  h.feed(cliFrame(2, "sensor list"));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(h.cli.answer, answeredCliText(h)) << "what the console itself would have printed";
+  EXPECT_EQ(1u, h.session.cliOverruns());
+
+  // And the session is unharmed: the next request is answered as usual.
+  h.cli.write_past_window = false;
+  h.cli.answer = "ok";
+  h.feed(cliFrame(3, "sensor list 4"));
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  EXPECT_EQ("ok", answeredCliText(h));
+}
+
+TEST(TheConsole, ALineThatIsNotALegalValueIsMalformedAndIsNeverRun) {
+  struct Bad {
+    const char* what;
+    std::string line;
+  };
+  const Bad bad[] = {
+      {"empty", ""},
+      {"161 bytes", std::string(kCliLineMax + 1, 'a')},
+      {"a newline in it", std::string("get radio\n")},
+      {"a tab in it", std::string("get\tradio")},
+      {"a NUL in it", std::string("get\0radio", 9)},
+      {"DEL", std::string("get radio\x7F")},
+      {"a C1 control, as UTF-8", std::string("get \xC2\x85 radio")},
+      {"a truncated UTF-8 sequence", std::string("get \xC3")},
+      {"a continuation byte on its own", std::string("get \x80 radio")},
+      {"an overlong encoding of '/'", std::string("get \xC0\xAF")},
+      {"a surrogate half", std::string("get \xED\xA0\x80")},
+  };
+  for (const Bad& b : bad) {
+    Harness h;
+    h.feed(cliFrame(7, b.line));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size()) << b.what;
+    uint8_t type = 0, seq = 0;
+    EXPECT_EQ(kErrMalformed, answeredStatus(h, type, seq)) << b.what;
+    EXPECT_EQ(responseType(kMsgCli), type) << b.what;
+    EXPECT_EQ(7, seq) << b.what;
+    EXPECT_EQ(0, h.cli.calls) << b.what << ": the interpreter was never asked";
+  }
+
+  // And the two that are legal and nearly were not: 160 bytes, and UTF-8 above ASCII.
+  Harness h;
+  h.cli.answer = "ok";
+  const std::string longest(kCliLineMax, 'b');
+  h.feed(cliFrame(8, longest));
+  h.run();
+  EXPECT_EQ(1, h.cli.calls);
+  EXPECT_EQ(longest, h.cli.last_line);
+  h.feed(cliFrame(9, "set name Bænk \xE2\x9C\x93"));
+  h.run();
+  EXPECT_EQ(2, h.cli.calls);
+  EXPECT_EQ("set name Bænk \xE2\x9C\x93", h.cli.last_line);
+}
+
+TEST(TheConsole, WithNoCliInterfaceItIsUnsupported) {
+  Harness h;
+  h.services.cli = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapCli);
+
+  h.feed(cliFrame(4, "get radio"));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(kErrUnsupported, answeredStatus(h, type, seq));
+  EXPECT_EQ(responseType(kMsgCli), type);
+  EXPECT_EQ(0, h.cli.calls);
+}
+
+TEST(TheConsole, ARetriedLineIsNotRunTwice) {
+  Harness h;
+  h.cli.answer = "OK - stats reset";
+  const std::vector<uint8_t> frame = cliFrame(5, "clear stats");
+  h.feed(frame);
+  h.run();
+  const std::string first = h.lastFrame();
+  EXPECT_EQ(1, h.cli.calls);
+
+  h.cli.answer = "something else entirely";
+  h.feed(frame);
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  EXPECT_EQ(first, h.lastFrame()) << "the remembered response";
+  EXPECT_EQ(1, h.cli.calls) << "and the command was run once - it is not idempotent";
+}
+
+// ----------------------------------------------------------------------------- a sleeping Walter
+
+TEST(TheSleepingWalter, SleepNoticeSetsTheBeliefAndTheNextRequestClearsIt) {
+  Harness h;
+  const Case* want = findCase("response", kMsgSleepNotice, 10);
+  const Case* req = findCase("request", kMsgSleepNotice, 10);
+  ASSERT_NE(nullptr, want);
+  ASSERT_NE(nullptr, req);
+
+  h.feed(req->frame);
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame());
+  EXPECT_EQ(1, h.attention.sleeps);
+  EXPECT_EQ(900u, h.attention.last_expect_back) << "the fixture's expect_back_s";
+  EXPECT_TRUE(h.attention.asleep);
+  EXPECT_EQ(kMsgSleepNotice, h.attention.last_request_type)
+      << "the machine is told which request it was, because this one does not wake it";
+
+  // STATUS then carries flag bit 2.
+  h.feed(frameOf(kMsgStatus, 11, {}));
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(h.lastFrame())) rx.feedByte(b);
+  ASSERT_TRUE(rx.hasPacket());
+  Reader r(rx.packet().body);
+  r.u8();
+  r.u32();
+  r.u8();
+  r.u8();
+  r.u32();
+  EXPECT_EQ(0u, uint32_t(r.u16() & kFlagWalterAsleep))
+      << "that request itself woke it, so its own answer already says awake";
+  EXPECT_FALSE(h.attention.asleep);
+  EXPECT_EQ(2, h.attention.requests);
+}
+
+TEST(TheSleepingWalter, OnlyEvBootAndEvAttentionLeaveWhileItSleeps) {
+  Harness h;
+  EXPECT_TRUE(h.session.eventAllowed(kMsgEvBoot));
+  EXPECT_TRUE(h.session.eventAllowed(kMsgEvAttention));
+  EXPECT_TRUE(h.session.eventAllowed(kMsgEvMeshReply)) << "awake, everything leaves";
+
+  h.attention.asleep = true;
+  EXPECT_TRUE(h.session.eventAllowed(kMsgEvBoot)) << "section 8 lets this one through";
+  EXPECT_TRUE(h.session.eventAllowed(kMsgEvAttention)) << "and this one";
+  EXPECT_FALSE(h.session.eventAllowed(kMsgEvMeshReply))
+      << "phase 2's event waits for the Walter to ask";
+
+  // EV_BOOT really does leave: the link coming up while the belief is set still says so.
+  h.session.begin(h.now);
+  ASSERT_TRUE(h.takeOutgoing());
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(h.lastFrame())) rx.feedByte(b);
+  ASSERT_TRUE(rx.hasPacket());
+  EXPECT_EQ(kMsgEvBoot, rx.packet().type);
+
+  // With no machine at all there is no belief to hold, and nothing is ever held.
+  h.services.attention = nullptr;
+  EXPECT_TRUE(h.session.eventAllowed(kMsgEvMeshReply));
+}
+
+TEST(TheSleepingWalter, WithNoAttentionInterfaceSleepNoticeIsUnsupported) {
+  Harness h;
+  h.services.attention = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapAttention);
+
+  h.feed(frameOf(kMsgSleepNotice, 1, {0x84, 0x03, 0x00, 0x00}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(kErrUnsupported, answeredStatus(h, type, seq));
+  EXPECT_EQ(responseType(kMsgSleepNotice), type);
+  EXPECT_EQ(0, h.attention.sleeps);
+}
+
+TEST(TheSleepingWalter, AMalformedSleepNoticeIsMalformedAndNothingIsBelieved) {
+  Harness h;
+  h.feed(frameOf(kMsgSleepNotice, 2, {0x01, 0x02, 0x03}));  // three bytes of a u32
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(kErrMalformed, answeredStatus(h, type, seq));
+  EXPECT_EQ(0, h.attention.sleeps);
+  EXPECT_FALSE(h.attention.asleep);
+}
+
+// ----------------------------------------------------------------------------- attention, on the
+// wire. The machine's own rules are test/test_attention's; this is the session's half: what it
+// puts on the wire when the machine says so, and in which order.
+
+TEST(Attention, TheWakeBytesThenTheEventTheMachineAsksFor) {
+  Harness h;
+  h.deliver_writes = false;
+  h.attention.due = kAttentionDueWake;
+
+  h.session.poll(h.now);
+  ASSERT_TRUE(h.session.hasOutgoing());
+  ASSERT_EQ(2u, h.session.outgoingSize()) << "0x00 0x00 is not a frame";
+  EXPECT_EQ(0, h.session.outgoing()[0]);
+  EXPECT_EQ(0, h.session.outgoing()[1]);
+  h.session.outgoingSent(h.now);
+  EXPECT_EQ(1, h.attention.wakes) << "and the machine starts its 300 ms from here";
+  EXPECT_EQ(0, h.attention.events);
+
+  // 300 ms later the machine asks for the event, and the session frames it.
+  h.now += kAttentionWakeGapMs;
+  h.attention.due = kAttentionDueEvent;
+  h.attention.event.reason = kAttentionPersonAsked;
+  h.attention.event.detail = 0;
+  h.attention.event.repeat = 0;
+  h.session.poll(h.now);
+  ASSERT_TRUE(h.session.hasOutgoing());
+  const std::string frame = toHex(h.session.outgoing(), h.session.outgoingSize());
+  h.session.outgoingSent(h.now);
+  EXPECT_EQ(1, h.attention.events) << "counted when the bytes went, not when they were built";
+  EXPECT_EQ(0, h.attention.answers) << "an event is not a response";
+
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(frame)) rx.feedByte(b);
+  ASSERT_TRUE(rx.hasPacket());
+  EXPECT_EQ(kMsgEvAttention, rx.packet().type);
+  EXPECT_EQ(0, rx.packet().seq) << "events are counted from 0";
+  Reader r(rx.packet().body);
+  EXPECT_EQ(kAttentionPersonAsked, r.u8());
+  EXPECT_EQ(0u, r.u16());
+  EXPECT_EQ(0, r.u8());
+  EXPECT_TRUE(r.ok());
+}
+
+TEST(Attention, TheFixturesTwoEventsByteForByte) {
+  struct Want {
+    const char* name;
+  };
+  const Want wants[] = {{"attention: the battery is low"},
+                        {"attention: an admin asked for the walter, third time"}};
+  for (const Want& w : wants) {
+    const Case* want = findCaseNamed(w.name);
+    ASSERT_NE(nullptr, want) << w.name;
+    JsonObject f = want->fields;
+
+    Harness h;
+    h.deliver_writes = false;
+    // The fixture's events carry a seq of their own, and the session counts its own from 0, so
+    // the frames are compared without it: the payload is what the machine decides.
+    h.attention.due = kAttentionDueEvent;
+    h.attention.event.reason = f["reason"].as<uint8_t>();
+    h.attention.event.detail = f["detail"].as<uint16_t>();
+    h.attention.event.repeat = f["repeat"].as<uint8_t>();
+
+    h.session.poll(h.now);
+    ASSERT_TRUE(h.session.hasOutgoing()) << w.name;
+    FrameReceiver rx;
+    for (size_t i = 0; i < h.session.outgoingSize(); i++) rx.feedByte(h.session.outgoing()[i]);
+    ASSERT_TRUE(rx.hasPacket()) << w.name;
+    EXPECT_EQ(kMsgEvAttention, rx.packet().type);
+    EXPECT_EQ(toHex(want->payload), toHex(rx.packet().body.ptr, rx.packet().body.len)) << w.name;
+  }
+}
+
+TEST(Attention, AnAnsweredRequestIsWhatTellsTheMachineTheReasonWasDelivered) {
+  Harness h;
+  h.deliver_writes = false;
+  h.attention.reason = kAttentionPersonAsked;
+
+  h.feed(frameOf(kMsgStatus, 3, {}));
+  h.pass();
+  EXPECT_EQ(1, h.attention.requests) << "the request stops the repeats at once";
+  EXPECT_EQ(0, h.attention.answers) << "but its answer has not gone yet";
+
+  // The answer still carries the reason, which is the whole point of the order
+  // (section 8: "a Walter that woke for its own reasons sees it too").
+  FrameReceiver rx;
+  for (size_t i = 0; i < h.session.outgoingSize(); i++) rx.feedByte(h.session.outgoing()[i]);
+  ASSERT_TRUE(rx.hasPacket());
+  Reader r(rx.packet().body);
+  r.u8();
+  r.u32();
+  r.u8();
+  r.u8();
+  r.u32();
+  r.u16();
+  r.u8();
+  r.u16();
+  r.u16();
+  EXPECT_EQ(kAttentionPersonAsked, r.u8()) << "STATUS's attention field";
+
+  ASSERT_TRUE(h.takeOutgoing());
+  EXPECT_EQ(1, h.attention.answers) << "and now the machine may forget it";
+}
+
+TEST(Attention, NothingIsSentWhileTheWireIsBusyOrARequestIsWaiting) {
+  Harness h;
+  h.deliver_writes = false;
+  h.attention.due = kAttentionDueWake;
+
+  // A request waiting beats an attention: the Walter is talking.
+  h.feed(frameOf(kMsgStatus, 1, {}));
+  h.pass();
+  EXPECT_EQ(0, h.attention.wakes);
+  EXPECT_TRUE(h.session.hasOutgoing()) << "what is on hand is the response";
+
+  // And with something unsent, nothing else is built.
+  h.session.poll(h.now);
+  EXPECT_EQ(0, h.attention.wakes);
 }
 
 // ----------------------------------------------------------------------------- the reset reason

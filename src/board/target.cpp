@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app/Settings.h"
 #include "app/Version.h"
 #include "clock/BoardClock.h"
 #include "link/BoardLink.h"
@@ -53,67 +54,54 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 namespace {
 
-struct Setting {
-  const char* name;
-  const char* (*get)();
+// The five keys of docs/ARCHITECTURE.md section 4 are a portable table with native tests
+// (src/app/Settings.{h,cpp}); this is the board's half of it - the six things that table reads
+// and the one thing it writes, each one line. They are on upstream's CLI and not only on the box
+// link so that they can be read from the USB console and, over the mesh, by an admin: that is how
+// a unit whose Walter is silent is diagnosed without opening the box, and `walter.wake` is how
+// such a unit's uplink is woken from a phone.
+class BoardSettingsHost : public twinoak::SettingsHost {
+ public:
+  const char* fwVersion() const override { return twinoak::versionString(); }
+  uint16_t linkErrors() const override { return twinoak::link::linkErrors(); }
+  bool walterEverSeen() const override { return twinoak::link::walterEverSeen(); }
+  uint32_t walterSeenSecondsAgo() const override {
+    return twinoak::link::walterSeenSecondsAgo();
+  }
+  const char* clockStateName() const override { return twinoak::clock::stateName(); }
+  bool attentionPending() const override { return twinoak::link::attentionPending(); }
+  bool raiseWalterWake() override { return twinoak::link::raiseWalterWake(); }
 };
 
-const char* fwVersion() { return twinoak::versionString(); }
-
-// The read-only keys of docs/ARCHITECTURE.md section 4. They are here and not only on the link so
-// that they can be read from the USB console and, over the mesh, by an admin - which is how a
-// unit whose Walter is silent is diagnosed without opening the box.
-const char* linkErrorsValue() {
-  static char buf[8];
-  snprintf(buf, sizeof(buf), "%u", unsigned(twinoak::link::linkErrors()));
-  return buf;
-}
-
-const char* walterSeenValue() {
-  static char buf[16];
-  if (!twinoak::link::walterEverSeen()) return "never";
-  snprintf(buf, sizeof(buf), "%lu", (unsigned long)twinoak::link::walterSeenSecondsAgo());
-  return buf;
-}
-
-// Where the clock came from: `unset`, `restored`, `set` or `rtc` (spec/LINK-PROTOCOL.md section
-// 5.4's time_state, by name). The one key of the four here that a bench or a mesh admin reads to
-// tell "the Walter set my clock" from "I am an hour ahead of the truth".
-const char* clockStateValue() { return twinoak::clock::stateName(); }
-
-// Ours, after upstream's own (which on this board are none unless a GPS is detected - and there is
-// no GPS). Read-only for now; a `set` of one of these is refused.
-const Setting kSettings[] = {
-    {"fw.version", fwVersion},
-    {"link.errors", linkErrorsValue},
-    {"walter.seen", walterSeenValue},
-    {"clock.state", clockStateValue},
-};
-const int kNumSettings = sizeof(kSettings) / sizeof(kSettings[0]);
+BoardSettingsHost g_settings_host;
+twinoak::Settings g_settings(g_settings_host);
 
 }  // namespace
 
+// Ours follow upstream's own, which on this board are none - EnvironmentSensorManager lists a
+// setting only for a detected GPS (src/helpers/sensors/EnvironmentSensorManager.cpp:685 at the
+// pin d9296435) and this adapter has none. They are added and not substituted all the same: every
+// call below asks upstream first, so a board or a bump that gives the manager settings of its own
+// keeps them, at the indices it chose, with ours after them.
 int TwinOakSensors::getNumSettings() const {
-  return EnvironmentSensorManager::getNumSettings() + kNumSettings;
+  return EnvironmentSensorManager::getNumSettings() + twinoak::Settings::count();
 }
 
 const char* TwinOakSensors::getSettingName(int i) const {
   const int upstream = EnvironmentSensorManager::getNumSettings();
   if (i < upstream) return EnvironmentSensorManager::getSettingName(i);
-  i -= upstream;
-  return (i >= 0 && i < kNumSettings) ? kSettings[i].name : NULL;
+  return twinoak::Settings::name(i - upstream);
 }
 
 const char* TwinOakSensors::getSettingValue(int i) const {
   const int upstream = EnvironmentSensorManager::getNumSettings();
   if (i < upstream) return EnvironmentSensorManager::getSettingValue(i);
-  i -= upstream;
-  return (i >= 0 && i < kNumSettings) ? kSettings[i].get() : NULL;
+  return g_settings.value(i - upstream);
 }
 
 bool TwinOakSensors::setSettingValue(const char* name, const char* value) {
   if (EnvironmentSensorManager::setSettingValue(name, value)) return true;
-  return false;  // ours are read-only in this task; upstream's CLI then answers "can't find custom var"
+  return g_settings.set(name, value);  // `walter.wake 1`; the other four refuse every value
 }
 
 TwinOakSensors sensors;

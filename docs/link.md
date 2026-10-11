@@ -5,13 +5,13 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-What the firmware answers today (phase 1's tasks 03 and 04): `HELLO`, `PING`,
-`STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`, and `EV_BOOT` once when
-it comes up. Everything else of the protocol answers `ERR_UNSUPPORTED` until the
-task that owns it lands — 05 the console and attention, 06 telemetry, phase 2
-the mesh client — and `HELLO`'s `caps` is `0x40` (`TIME_PERSIST`) and nothing
-else for exactly the same reason: a capability is an interface that is there
-(`src/link/session/Interfaces.h`).
+What the firmware answers today (phase 1's tasks 03 to 05): `HELLO`, `PING`,
+`STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`, `CLI`, `SLEEP_NOTICE`,
+and `EV_BOOT` and `EV_ATTENTION` as events. Everything else of the protocol
+answers `ERR_UNSUPPORTED` until the task that owns it lands — 06 telemetry,
+phase 2 the mesh client — and `HELLO`'s `caps` is `0x61` (`CLI`, `ATTENTION`,
+`TIME_PERSIST`) and nothing else for exactly the same reason: a capability is an
+interface that is there (`src/link/session/Interfaces.h`).
 
 ## 1. Wiring the dongle
 
@@ -49,6 +49,8 @@ python3 tools/linkcli.py --port COM7 status
 python3 tools/linkcli.py --port COM7 time         # read the clock
 python3 tools/linkcli.py --port COM7 time set     # set it to this laptop's
 python3 tools/linkcli.py --port COM7 identity
+python3 tools/linkcli.py --port COM7 cli "get radio"   # a console command line
+python3 tools/linkcli.py --port COM7 sleep 600    # "this end is asleep for 10 min"
 python3 tools/linkcli.py --port COM7 listen 30    # the events, for 30 s
 python3 tools/linkcli.py --port COM7 reboot 0     # and then `listen` for EV_BOOT
 ```
@@ -62,7 +64,7 @@ HELLO
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0x40 (TIME_PERSIST)
+  caps          0x61 (CLI, ATTENTION, TIME_PERSIST)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -75,7 +77,7 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` grows as the later tasks land: `0x40` today. Nothing else of this page changes with
+- `caps` grows as the later tasks land: `0x61` today. Nothing else of this page changes with
   it.
 
 `ping` proves the main loop is turning, which a reset line cannot: it echoes
@@ -141,6 +143,145 @@ TIME_SET 1791736955 (2026-10-11 16:42:35 UTC), source 3 (a person at a console)
   `tasks/phase-1/reports/04.md` says why, and the consequence is that every
   reset costs up to an hour of being ahead until something sets the clock.
 
+## 2b. The console, over the link
+
+`cli "<line>"` runs one command line on the node **as if it had been typed on
+the USB console** — with console privileges, which is more than a mesh admin
+gets: `stats-core`, `get prv.key`, `set freq` and `erase` all work. The Walter
+is trusted with that; it already holds the SWD lines.
+
+```
+$ python3 tools/linkcli.py --port COM7 cli "get radio"
+CLI get radio
+  > 869.618,62.5,8,8
+
+$ python3 tools/linkcli.py --port COM7 cli "sensor list"
+CLI sensor list
+  5 vars
+  fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)
+  walter.wake=0
+  link.errors=0
+  walter.seen=0
+  clock.state=set
+```
+
+- **A line is 1 to 160 bytes of UTF-8 text with no control characters in it.**
+  Nothing else is run: an empty line, a longer one, a tab or a newline in it, a
+  byte that cannot be UTF-8 — each is `ERR_MALFORMED`, and the interpreter is
+  never asked.
+- **The reply is at most 159 characters**, because that is the buffer upstream's
+  own console gives its interpreter and several of its commands assume exactly
+  that number. A reply that would be longer is cut, not spilled: `sensor list`
+  pages with `... next:<n>` by itself (so on a node that has been up a long
+  time, `sensor list 4` is how the last key is read), and `neighbors` stops
+  adding records near the limit.
+- **Four commands never answer**, because they restart the node: `reboot`,
+  `clkreboot`, `poweroff` and `shutdown`. Silence after one of those is the
+  expected outcome, and `linkcli.py` says so rather than calling the link down.
+  `listen` afterwards shows the `EV_BOOT`.
+- **`region load` is the one line not to send from here.** It puts upstream's
+  interpreter into a mode where every following line is a region definition
+  until a *blank* one ends it — and a blank line is not a legal `CLI` request.
+  The way out is one space (`cli " "`), which upstream reads as blank, or a
+  `reboot`.
+- Nothing about a `CLI` line or its reply is ever printed by the firmware: a
+  line can be `password <new>`, and upstream's reply to that one echoes the
+  password back. A test walks `src/link/` and fails on any print-like call
+  (`test/test_rails`).
+
+### Our settings, from here, from the console and from the mesh
+
+The five keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
+which means three ways to reach them: `cli "sensor get <key>"` over this link,
+the same line typed on the USB console, and — for a **mesh admin**, logged in
+with the admin password from a phone — the same line as a message. Upstream's
+permission check is the whole gate (`MyMesh::onPeerDataRecv` runs a text message
+through the interpreter only for a client whose ACL entry is admin).
+
+| Key | `get` | `set` |
+|---|---|---|
+| `fw.version` | this firmware and the MeshCore it is built on, in one sentence | — |
+| `walter.wake` | `0`, or `1` while an attention is pending | **`1` asks for the Walter's attention** (reason 4) |
+| `link.errors` | frames this node's receiver dropped since boot | — |
+| `walter.seen` | seconds since the last valid request on the link, or `never` | — |
+| `clock.state` | `unset`, `restored`, `set` or `rtc` | — |
+
+A `set` of any other key — or of `walter.wake` with any value but `1` — is
+answered `can't find custom var`, which is upstream's wording and its only other
+word.
+
+## 2c. Attention, and a Walter that sleeps
+
+The Walter is powered from the same battery and spends most of its life asleep.
+`sleep [seconds]` is what it sends last before it goes, and this end can send it
+too to watch what follows:
+
+```
+$ python3 tools/linkcli.py --port COM7 sleep 600
+SLEEP_NOTICE, back in 600 s
+  status        0 (OK)
+```
+
+From then until **any** valid request arrives, the node believes this end is
+asleep (`status` flag bit 2) and sends no events but `EV_BOOT` and
+`EV_ATTENTION`. Any request at all wakes it again; nothing else does.
+
+An attention is how the node asks for the box when something happened that
+should not wait for its next wake. It sends `0x00 0x00` — two bytes to wake a
+UART, which `linkcli.py` reads as an empty frame and ignores — waits 300 ms, and
+then sends `EV_ATTENTION` every second with `repeat` counting from 0, **ten
+times at most**, stopping at the first valid request:
+
+```
+$ python3 tools/linkcli.py --port COM7 listen
+listening (control-C to stop)
+EV_ATTENTION seq 7
+  reason        4 (a person asked for the Walter)
+  detail        0 (nothing)
+  repeat        0 of 10
+EV_ATTENTION seq 8
+  ...
+  repeat        1 of 10
+```
+
+| `reason` | | `detail` |
+|---:|---|---|
+| 1 | the node restarted | the reset reason |
+| 2 | battery low | battery millivolts |
+| 3 | battery critical | battery millivolts |
+| 4 | a person asked for the Walter | 0 |
+| 5 | the observation ring is nearly full | records waiting |
+| 6 | a fault the node wants reported | a code of the firmware's own |
+
+- **One at a time, with a queue behind it**, and the same reason is never
+  queued twice: the second battery-low of one discharge is the same news as the
+  first.
+- **One new attention per reason per hour**, counted from when it was raised and
+  kept in RAM, because each one costs the box an LTE attach. A second
+  `sensor set walter.wake 1` inside the hour raises nothing — `sensor get
+  walter.wake` still reads `1` while the first is pending.
+- **The reason stays in `status`'s `attention` field** until a request has been
+  answered, used up or not; the answer to the request that ends it still carries
+  it, so a Walter that woke for its own reasons still learns why it was wanted.
+- **Reason 1 is not sent on this board.** It is owed only to a Walter that was
+  asleep when the node restarted, and nothing in this board's RAM survives a
+  reset to say whether it was (`tasks/phase-1/reports/04.md`). `EV_BOOT` tells
+  an awake Walter everything that event would.
+- Reasons 2, 3, 5 and 6 arrive with tasks 06 and phase 2; the machine they go
+  through is this one.
+
+**The out-of-band way in.** A unit whose Walter is asleep can be woken by
+anything that can reach the repeater on the mesh:
+
+```
+(from a phone, logged in as admin, to this repeater)
+  sensor set walter.wake 1
+  -> ok
+
+(on the link, a second later)
+EV_ATTENTION reason 4 (a person asked for the Walter), repeat 0 of 10
+```
+
 ## 3. When it says nothing
 
 - `linkcli.py` retries exactly as the protocol says: the same frame, the same
@@ -178,10 +319,17 @@ bash tools/linkloop/check.sh
 docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 ```
 
-That builds the loopback, runs `hello`, `ping`, `status`, `identity` and
-`reboot` against it, and times one pass of the link. It is not part of
-`tools/verify.ps1`: it needs a host compiler, and what it proves about the
-session itself is already a native test (`test/test_link_session`).
+That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
+`time set`, `cli`, `sleep`, an attention and `reboot` against it, and times one
+pass of the link. It is not part of `tools/verify.ps1`: it needs a host
+compiler, and what it proves about the session itself is already a native test
+(`test/test_link_session`).
+
+Three things in that program are the firmware's own code and not a stub - the
+clock keeper, the attention machine and the settings table - so `cli
+"sensor set walter.wake 1"` through the pipe really does raise an attention, and
+`--wake` raises one at startup so that `listen` shows the whole sequence with
+nothing but a laptop.
 
 ## 5. Inside the firmware
 
@@ -191,8 +339,9 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 |---|---|---|
 | codec | `src/link/codec/` | CRC-16/CCITT-FALSE, COBS, packets, frames, one function per message. Portable. |
 | session | `src/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
+| attention | `src/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
 | transport | `src/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
-| the board's half | `src/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity — and the one call in `setup()` and one in `loop()`. |
+| the board's half | `src/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
 
 One pass of `loop()` reads what the UART has (bounded), handles **at most one**
 request, and writes what fits without blocking. A request that completes while

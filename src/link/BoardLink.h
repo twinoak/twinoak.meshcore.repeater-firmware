@@ -22,6 +22,22 @@ void linkBegin(MyMesh& mesh);
 // One bounded pass of the link. Once per loop().
 void linkLoop();
 
+// --- attention (spec/LINK-PROTOCOL.md section 8) -----------------------------------------------
+
+// Ask for the Walter's attention. `reason` is one of Numbers.h's AttentionReason values and
+// `detail` is that reason's own number. False when the machine refused it: this reason is already
+// pending or queued, or it was raised less than an hour ago. Task 06 (the battery) and phase 2
+// (the observation ring, a fault) raise theirs through this one call.
+bool raiseAttention(uint8_t reason, uint16_t detail);
+// `sensor set walter.wake 1`, from the USB console or from a mesh admin: attention reason 4,
+// "a person asked for the Walter".
+bool raiseWalterWake();
+// Whether an attention is pending, which is what `sensor get walter.wake` and STATUS's
+// `attention` field answer.
+bool attentionPending();
+// Whether the Walter is believed asleep (SLEEP_NOTICE, STATUS flag bit 2).
+bool walterAsleep();
+
 // --- what src/board/target.cpp reads for the settings -----------------------------------------
 
 // Frames the link's receiver dropped since boot, saturating (`link.errors`).

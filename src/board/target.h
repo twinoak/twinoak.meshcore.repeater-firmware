@@ -44,8 +44,9 @@ class TwinOakBoard : public RAK4631Board {
 // Upstream's EnvironmentSensorManager - which finds the BME280 at 0x76 by itself - with the
 // settings seam (SensorManager::getNumSettings/getSettingName/getSettingValue/setSettingValue,
 // src/helpers/SensorManager.h) overridden so that our keys follow upstream's in `sensor list`,
-// `sensor get` and `sensor set` (src/helpers/CommonCLI.cpp). Read-only so far: fw.version, the
-// box link's two counters, and the clock's state. Tasks 05 and 06 add theirs here.
+// `sensor get` and `sensor set` (src/helpers/CommonCLI.cpp). The keys and what each one does are
+// src/app/Settings.{h,cpp}, which is portable and tested; this class is the seam alone. Task 06
+// adds the power and environment keys there.
 class TwinOakSensors : public EnvironmentSensorManager {
  public:
   int getNumSettings() const override;

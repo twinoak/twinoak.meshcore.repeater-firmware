@@ -35,6 +35,18 @@ Bytes bytesOfText(const char* text);
 // A view over a run of bytes, truncated to what a payload field can hold.
 Bytes bytesOf(const void* data, size_t len);
 
+// Whether a view is text a person could have typed: well-formed UTF-8 with no control character
+// in it. It is what makes a CLI line a legal value and not merely a length
+// (LINK-PROTOCOL.md 5.7, "one command line, 1 to 160 bytes of UTF-8"; a line that is not is
+// kErrMalformed, like any other field that is not a legal value).
+//
+// Refused: the C0 controls (0x00-0x1F, the tab and the newline among them - a line carries no
+// terminator and a console reads one line), DEL (0x7F), the C1 controls (U+0080-U+009F),
+// an overlong encoding, a byte that cannot begin or continue a sequence, a truncated sequence,
+// a surrogate (U+D800-U+DFFF) and anything above U+10FFFF. An empty view is text; the length
+// rules are the decoder's.
+bool isPlainText(Bytes b);
+
 class Reader {
  public:
   Reader(const uint8_t* data, size_t len) : d_(data), n_(len) {}

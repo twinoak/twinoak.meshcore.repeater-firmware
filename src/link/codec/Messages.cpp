@@ -144,9 +144,11 @@ bool decodeSleepNotice(Bytes payload, SleepNotice& out) {
 bool decodeCli(Bytes payload, Cli& out) {
   Reader r(payload);
   out.text = r.rest();
-  // One command line, 1 to 160 bytes (section 5.7). Neither an empty line nor a longer one is a
-  // legal value, so both are malformed rather than run.
+  // One command line, 1 to 160 bytes of UTF-8 (section 5.7). Neither an empty line nor a longer
+  // one is a legal value, and neither is a line that is not text a person could have typed, so
+  // all three are malformed rather than run.
   if (!r.ok() || out.text.len < 1 || out.text.len > kCliLineMax) return false;
+  if (!isPlainText(out.text)) return false;
   return true;
 }
 

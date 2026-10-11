@@ -24,6 +24,50 @@ Bytes bytesOf(const void* data, size_t len) {
   return b;
 }
 
+bool isPlainText(Bytes b) {
+  size_t i = 0;
+  while (i < b.len) {
+    const uint8_t c = b.ptr[i];
+    if (c < 0x20 || c == 0x7F) return false;  // a C0 control, or DEL
+    if (c < 0x80) {                           // plain ASCII
+      i++;
+      continue;
+    }
+    // A multi-byte sequence: how many continuation bytes, and the smallest code point this many
+    // bytes is allowed to encode (which is what rejects an overlong encoding).
+    size_t extra = 0;
+    uint32_t code = 0;
+    uint32_t least = 0;
+    if ((c & 0xE0) == 0xC0) {
+      extra = 1;
+      code = c & 0x1Fu;
+      least = 0x80;
+    } else if ((c & 0xF0) == 0xE0) {
+      extra = 2;
+      code = c & 0x0Fu;
+      least = 0x800;
+    } else if ((c & 0xF8) == 0xF0) {
+      extra = 3;
+      code = c & 0x07u;
+      least = 0x10000;
+    } else {
+      return false;  // 0x80-0xBF cannot begin a sequence, and 0xF8-0xFF cannot at all
+    }
+    if (extra > size_t(b.len) - i - 1) return false;  // truncated: too few bytes left
+    for (size_t k = 1; k <= extra; k++) {
+      const uint8_t cont = b.ptr[i + k];
+      if ((cont & 0xC0) != 0x80) return false;
+      code = (code << 6) | (cont & 0x3Fu);
+    }
+    if (code < least) return false;                            // overlong
+    if (code > 0x10FFFF) return false;                         // above Unicode
+    if (code >= 0xD800 && code <= 0xDFFF) return false;        // a surrogate half
+    if (code >= 0x80 && code <= 0x9F) return false;            // a C1 control
+    i += extra + 1;
+  }
+  return true;
+}
+
 uint8_t Reader::u8() {
   if (failed_ || i_ + 1 > n_) {
     failed_ = true;

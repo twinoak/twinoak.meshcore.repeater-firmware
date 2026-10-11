@@ -4,6 +4,15 @@
 
 namespace twinoak {
 namespace link {
+namespace {
+
+// The two bytes that wake a sleeping Walter: "the RAK sends 0x00 0x00, waits 300 ms, and sends
+// the event" (section 8). They are not a frame - the far end reads them as two empty frames and
+// drops them - and they are the only thing this session puts on the wire that is not one. What
+// they are for is the start bit on the Walter's GPIO8.
+const uint8_t kWakeBytes[2] = {0x00, 0x00};
+
+}  // namespace
 
 // ----------------------------------------------------------------------------- the frame in
 
@@ -27,7 +36,11 @@ void Session::poll(uint32_t now_ms) {
     s_.system->restartNow(restart_mode_);
   }
   if (has_outgoing_) return;  // the writer still holds something unsent
-  if (!request_waiting_) return;
+  if (!request_waiting_) {
+    // Nothing to answer: section 8's sequence may have the wire.
+    pumpAttention(now_ms);
+    return;
+  }
 
   const ParsedPacket& pkt = rx_.packet();
   request_waiting_ = false;
@@ -41,6 +54,10 @@ void Session::poll(uint32_t now_ms) {
 
   saw_request_ = true;
   last_request_ms_ = now_ms;
+  // A valid request is the Walter speaking: it is awake, and it ends a pending attention's
+  // repeats (section 8). A retry counts - it is the same Walter saying the same thing - which is
+  // why this is here and not inside execute().
+  if (s_.attention != nullptr) s_.attention->noteRequest(pkt.type, now_ms);
 
   // Section 3: the same (type, seq) is not executed again; the remembered response is sent again.
   if (have_memory_ && mem_type_ == pkt.type && mem_seq_ == pkt.seq) {
@@ -54,6 +71,17 @@ void Session::outgoingSent(uint32_t now_ms) {
   has_outgoing_ = false;
   ever_sent_ = true;
   last_tx_ms_ = now_ms;
+  if (s_.attention != nullptr) {
+    if (out_is_response_) {
+      // The response that ends an attention still carried its reason in STATUS; now it is told.
+      s_.attention->requestAnswered(now_ms);
+    } else if (out_len_ == sizeof(kWakeBytes) && out_ptr_ == kWakeBytes) {
+      s_.attention->wakeSent(now_ms);
+    } else if (wrote_attention_event_) {
+      wrote_attention_event_ = false;
+      s_.attention->eventSent(now_ms);
+    }
+  }
   // "The response is sent first; the restart follows after the delay, which leaves time for the
   // response to leave the UART" (section 5.5). The delay starts here, when the bytes have been
   // handed to the UART; the board's restartNow() flushes whatever is still in flight.
@@ -222,6 +250,48 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       break;
     }
 
+    case kMsgCli: {
+      // Section 5.7: one command line, run by the firmware's own interpreter as a command typed
+      // on its serial console - everything the console can do, including the commands the
+      // firmware refuses over the mesh. The Walter is trusted with that: it already holds the
+      // SWD lines.
+      if (s_.cli == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      Cli m;
+      if (!decodeCli(pkt.body, m)) {
+        // An empty line, a line over 160 bytes, or one that is not UTF-8 text without control
+        // characters (Messages.cpp's decodeCli, Bytes.h's isPlainText).
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      n = cliHandler(m);
+      break;
+    }
+
+    case kMsgSleepNotice: {
+      // Section 8: the Walter's last request before it sleeps. From here until the next valid
+      // request this node sends no events but EV_BOOT and EV_ATTENTION (eventAllowed), and
+      // STATUS's flag bit 2 says so. The machine is where that belief lives, so a build without
+      // it cannot hold the belief and answers kErrUnsupported - which is how every other
+      // capability of this session behaves and what HELLO's caps already told the Walter.
+      if (s_.attention == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      SleepNotice m;
+      if (!decodeSleepNotice(pkt.body, m)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      // poll() has already called noteRequest(), which leaves this one request's flag alone for
+      // exactly this moment (src/link/attention/Attention.cpp).
+      s_.attention->sleepNotice(m.expect_back_s, now_ms);
+      n = encodeStatus(kOk, resp_, sizeof(resp_));
+      break;
+    }
+
     default:
       // "A request of an unknown type is answered ERR_UNSUPPORTED with that type's response code.
       // That is how a newer Walter discovers what an older RAK cannot do" (section 3). The types
@@ -239,6 +309,64 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
   sendResponse(pkt.type, pkt.seq, n, now_ms);
 }
 
+// ----------------------------------------------------------------------------- the console
+
+size_t Session::cliHandler(const Cli& m) {
+  // A copy of the line, NUL-terminated: the interpreter takes a char* and writes into it
+  // (CliAccess, Interfaces.h). decodeCli has already held the length to 1..kCliLineMax.
+  memcpy(line_, m.text.ptr, m.text.len);
+  line_[m.text.len] = 0;
+
+  // The window upstream's own console loop gives its interpreter, and the guard behind it, both
+  // cleared first: the guard so that a byte written past the window is seen afterwards, the
+  // window so that a command which answers nothing answers nothing (upstream's console reads
+  // reply[0] the same way).
+  memset(reply_, 0, sizeof(reply_));
+  s_.cli->runCommand(line_, reply_, kCliReplyMax);
+
+  // The bytes decide, not the length the interpreter reports: one that returns a count it did not
+  // write - or writes a reply it does not count - cannot make this read past the window.
+  size_t text = 0;
+  while (text < kCliReplyMax && reply_[text] != 0) text++;
+  if (text >= kCliReplyMax - 1) cli_truncations_++;
+  for (size_t i = kCliReplyMax; i < sizeof(reply_); i++) {
+    if (reply_[i] != 0) {
+      // A command wrote past the 160 bytes a console would have given it. The guard absorbed it;
+      // what goes out is the window, which is what the console itself would have printed.
+      cli_overruns_++;
+      break;
+    }
+  }
+
+  CliResponse out;
+  out.text = bytesOf(reply_, text);
+  return encodeCliResponse(out, resp_, sizeof(resp_));
+}
+
+// ----------------------------------------------------------------------------- attention
+
+void Session::pumpAttention(uint32_t now_ms) {
+  if (s_.attention == nullptr) return;
+  const uint8_t due = s_.attention->dueNow(now_ms);
+  if (due == kAttentionDueWake) {
+    out_ptr_ = kWakeBytes;
+    out_len_ = sizeof(kWakeBytes);
+    out_is_response_ = false;
+    wrote_attention_event_ = false;
+    has_outgoing_ = true;
+    return;
+  }
+  if (due != kAttentionDueEvent) return;
+
+  uint8_t body[8];
+  const size_t n = encodeEvAttention(s_.attention->pendingEvent(), body, sizeof(body));
+  if (n == 0) return;  // four bytes into eight: unreachable, and silence is the safe answer
+  sendEvent(kMsgEvAttention, body, n, now_ms);
+  // The machine counts the send when the bytes have gone and not when they were built
+  // (outgoingSent), so a frame the UART could not take this pass is not counted twice.
+  if (has_outgoing_) wrote_attention_event_ = true;
+}
+
 // ----------------------------------------------------------------------------- the frame out
 
 void Session::sendResponse(uint8_t request_type, uint8_t seq, size_t len, uint32_t now_ms) {
@@ -248,10 +376,21 @@ void Session::sendResponse(uint8_t request_type, uint8_t seq, size_t len, uint32
   have_memory_ = true;
   has_outgoing_ =
       writer_.build(responseType(request_type), seq, resp_, resp_len_, lineIdle(now_ms));
+  out_ptr_ = writer_.bytes();
+  out_len_ = writer_.size();
+  out_is_response_ = has_outgoing_;
+  wrote_attention_event_ = false;
 }
 
 void Session::sendEvent(uint8_t type, const uint8_t* body, size_t len, uint32_t now_ms) {
+  // Section 8: while the Walter is believed asleep nothing leaves but EV_BOOT and EV_ATTENTION.
+  // An event that is held back is not lost - "an event is never the only way to learn
+  // something" (section 3), so the Walter asks with a request when it wakes.
+  if (!eventAllowed(type)) return;
   has_outgoing_ = writer_.build(type, event_seq_, body, len, lineIdle(now_ms));
+  out_ptr_ = writer_.bytes();
+  out_len_ = writer_.size();
+  out_is_response_ = false;
   if (has_outgoing_) event_seq_++;  // counted from 0 and wrapping (section 3)
 }
 

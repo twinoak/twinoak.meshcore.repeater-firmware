@@ -13,10 +13,12 @@ platformio.ini          the pin, the libraries, one environment per role and boa
 boards/                 board definitions PlatformIO must see before it clones a dependency
 src/
   main.cpp              ours: setup() and loop(), replacing upstream's example main
-  app/                  TwinOakMesh (the subclass), first-boot provisioning, the version string
+  app/                  TwinOakMesh (the subclass), first-boot provisioning, the version string,
+                        Settings (our keys on upstream's CLI, portable)
   board/                target.h / target.cpp for our adapter: the board object, the radio, the clock, the sensors;
                         UpstreamHeaders.h, the one place upstream's headers are included from (section 11)
-  link/                 the box link: codec (portable), session and dispatcher (portable), UART transport
+  link/                 the box link: codec (portable), session and dispatcher (portable),
+                        attention (the machine of section 8, portable), UART transport
   clock/                ClockKeeper (the rules, portable), BoardClock (the board's ports and
                         its flash file), LinkClock (the keeper as the link's ClockAccess)
   power/                INA3221 with per-channel shunts, BME280, thresholds (arithmetic portable)
@@ -194,18 +196,43 @@ nothing blocks. `Serial1`'s receive ring and transmit buffer are raised to 256 b
 core's 64 (`platformio.ini`), which is what makes a 246-byte frame fit in one read and leave in
 one write that cannot block; p1-03's report has the measurement of what one pass costs.
 
-Two more ways in, both through `TwinOakSensors`' settings, so they work from the USB console and
-from a mesh admin's `sensor get/set`:
+**`CLI` is upstream's own interpreter** (§5.7, p1-05). The handler hands
+`the_mesh.handleCommand(0, line, reply)` a copy of the line — timestamp 0 is what makes it a
+command typed on the console, and the copy is because the interpreter writes into it — and sends
+back what it wrote. The reply window is the 160 bytes upstream's own console loop gives it, with
+64 bytes of guard behind it that the session checks after every line, because upstream's
+`sensor list` can write past 160 on a console that has nothing behind it at all. Four console
+commands never return (`reboot`, `clkreboot`, `poweroff`, `shutdown`); the response to those is
+not owed and the handler does not try to out-run the restart. **Nothing under `src/link/` prints**,
+and a rails test holds that: a `CLI` line can be `password <new>`, whose reply echoes it back.
+
+**Attention** (`src/link/attention/`, §8) is one small portable machine: one reason pending with
+a queue behind it, the two `0x00` wake bytes, 300 ms, then `EV_ATTENTION` every 1000 ms with
+`repeat` counting from 0 and at most ten sends, ended by any valid request, and at most one new
+attention per reason per hour. It also holds the belief that the Walter is asleep
+(`SLEEP_NOTICE`): while that is set the session sends no events but `EV_BOOT` and `EV_ATTENTION`.
+The session asks it once a pass what to put on the wire and tells it when the bytes have gone, so
+every rule about *when* is in one file with a fake clock in front of it.
+
+Five more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
+`src/app/Settings.{h,cpp}`, portable and tested; the board's half is six one-line readers. They
+work from the USB console and from a mesh admin's `sensor get/set`, in this order, which is the
+order `sensor list` prints:
 
 | Key | `get` | `set` |
 |---|---|---|
+| `fw.version` | `twinoak-repeater <version> on MeshCore <tag> (<pin8>)` | — |
 | `walter.wake` | `0`, or `1` while an attention is pending | `1` raises attention reason 4 ("a person asked for the Walter") |
-| `walter.seen` | seconds since the last valid request on the link, or `never` | — |
 | `link.errors` | frames dropped by the receiver since boot | — |
+| `walter.seen` | seconds since the last valid request on the link, or `never` | — |
 | `clock.state` | `unset`, `restored`, `set` or `rtc` | — |
 
-That first key is the out-of-band way to reach a unit whose Walter is asleep: any exit node that
-reaches the repeater can ask it to wake its own uplink.
+`walter.wake` is the out-of-band way to reach a unit whose Walter is asleep: any exit node that
+reaches the repeater can ask it to wake its own uplink. Upstream's permission check is the whole
+gate — a text message is run through the interpreter only for a client whose ACL entry is
+`PERM_ACL_ADMIN` (`MyMesh::onPeerDataRecv`, `examples/simple_repeater/MyMesh.cpp:702` at the
+pin) — and `sensor set` carries no `sender_timestamp == 0` condition, so an admin over the mesh
+may run it and nobody else may.
 
 ## 5. The clock keeper
 
@@ -346,6 +373,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | | Native tests | Build only | Bench |
 |---|---|---|---|
 | link codec, session, retry memory | ✔ against the fixtures and fakes | | UART through the bulkheads |
+| the console over the link, our settings, the attention machine | ✔ against fakes, and the `CLI`, `SLEEP_NOTICE` and `EV_ATTENTION` fixtures through the real session | upstream's interpreter behind it | every console command, and a mesh admin waking the box |
 | clock rules, the boot order, the file's rate | ✔ against fakes, and the `TIME_SET` fixture through the real session | the flash file, the RTC probe | a reboot keeps time moving forward |
 | shunt arithmetic, thresholds | ✔ | I2C reads | real currents, sign, calibration |
 | job state, reply matching | ✔ | the overrides, the sends | a login to a real repeater |
@@ -379,6 +407,14 @@ against the build, by the task that first compiled our application onto upstream
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Corrections and additions made above by **p1-05**, local management: §1 (`src/app/Settings.*` and
+`src/link/attention/`), §4 (what `CLI` does and what it costs; the attention machine; the settings
+table gained `fw.version` and the order `sensor list` really prints, and who may run `sensor set`
+over the mesh, from the source at the pin) and §10. What that task read of upstream is cited where
+it is used — `src/link/BoardLink.cpp` for `handleCommand`, the reply window and the four commands
+that never return, `src/app/Settings.{h,cpp}` for the ACL gate and `sensor list`'s 134-byte
+cut-off — and `docs/upstream.md` place 5 lists them.
 
 Corrections made above by **p1-04**, the clock: §1 (what is under `src/clock/`), §2 (two more
 rows of the table - the virtuals the clock keeper needs, which p1-01 did not know about - and "the
