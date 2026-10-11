@@ -1,7 +1,8 @@
 // The numbers of the box link, protocol 1.0: message types, status codes, roles, capability
 // bits, modes and the few limits the protocol fixes. One header that reads like the tables of
-// spec/LINK-PROTOCOL.md sections 2 to 8, so that no other file of the codec carries a magic
-// number and a reviewer can hold this file against that document line by line.
+// spec/LINK-PROTOCOL.md sections 2 to 10, so that no other file of the codec carries a magic
+// number and a reviewer can hold this file against that document line by line. Section 10's
+// timing table is at the bottom.
 //
 // Host-portable: no Arduino, no MeshCore (docs/ARCHITECTURE.md section 4, layer 1). The wire
 // values are the specification's and are never renumbered here; a new minor version of the
@@ -102,6 +103,15 @@ enum PeerKind : uint8_t {
   kPeerWalter = 1,
   kPeerBenchTool = 2,
 };
+
+// "A RAK that speaks the request's major answers with the highest minor both ends know"
+// (section 5.1, "Versions"). Both ends are runtime values here on purpose: with kProtoMinor at 0
+// the answer is always 0, and a comparison against the constant is a tautology the compiler is
+// right to refuse under -Werror=type-limits. This is the rule, and it will still be the rule when
+// 1.1 exists.
+inline uint8_t highestMinorBothKnow(uint8_t theirs, uint8_t ours) {
+  return theirs < ours ? theirs : ours;
+}
 
 // HELLO's role.
 enum Role : uint8_t {
@@ -273,6 +283,18 @@ enum AttentionReason : uint8_t {
   kAttentionRingNearlyFull = 5,  // detail: records waiting
   kAttentionFault = 6,          // detail: a code of the firmware's own
 };
+
+// ----------------------------------------------------------------------------- section 10
+
+// The timing summary, in milliseconds. The two the RAK keeps are the first two; the others are
+// the Walter's side of the same table and are here so that one file holds the whole of it.
+constexpr uint32_t kIdleBeforeLeadingZeroMs = 100;  // idle before a sender prefixes 0x00
+constexpr uint32_t kAnswerWithinMs = 250;           // the RAK answers a request within this
+constexpr uint32_t kResponseTimeoutMs = 1000;       // the Walter waits this, then resends
+constexpr uint8_t kRequestAttempts = 3;             // and gives up after three
+constexpr uint32_t kJobIdleEndMs = 120000;          // a job the RAK ends after link silence
+constexpr uint32_t kAttentionRepeatMs = 1000;       // an attention is repeated every
+constexpr uint8_t kAttentionRepeats = 10;           // this many times
 
 }  // namespace link
 }  // namespace twinoak

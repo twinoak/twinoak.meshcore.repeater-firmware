@@ -7,9 +7,9 @@
 //     text;
 //   - a line of src/ that prints a packet's payload - any line that names `payload` beside a
 //     print-like call;
-//   - a line of src/link/codec/ that allocates or uses a string class: the box link's codec is
-//     fed buffers and fills buffers, on a node that must repeat for months without a heap that
-//     fragments (tasks/phase-1/02-the-link-codec.md);
+//   - a line of src/link/codec/ or src/link/session/ that allocates or uses a string class: the
+//     box link's portable half is fed buffers and fills buffers, on a node that must repeat for
+//     months without a heap that fragments (tasks/phase-1/02-the-link-codec.md, 03);
 //   - a board environment whose resolved build flags define ADMIN_PASSWORD as upstream's default,
 //     or do not define it at all (without the define upstream's MyMesh.cpp defaults it to that
 //     same word, which is how phase 0's stock image came to carry it).
@@ -276,32 +276,38 @@ TEST(Rails, NothingInSrcPrintsAPacketsPayload) {
   }
 }
 
-TEST(Rails, NothingUnderTheLinkCodecAllocatesOrHoldsAString) {
+TEST(Rails, NothingUnderThePortableLinkAllocatesOrHoldsAString) {
   const fs::path root = projectRoot();
-  const fs::path dir = root / "src" / "link" / "codec";
-  const std::vector<fs::path> files = filesUnder(dir);
-  EXPECT_GT(files.size(), 4u) << "almost nothing under src/link/codec - is PROJECT_DIR right?";
+  // The two portable layers of the box link (docs/ARCHITECTURE.md section 4). The transport above
+  // them is not here: it is the file that is allowed to know about Arduino.
+  const char* const kDirs[] = {"codec", "session"};
   // The names, and whether a whole-identifier match is what to look for: `new` must not match
   // `renew`, where `std::string` is not an identifier at all.
   const std::pair<std::string, bool> kForbidden[] = {
       {"new", true},    {"malloc", true},      {"calloc", true}, {"realloc", true},
       {"String", true}, {"std::string", false}};
-  for (const fs::path& file : files) {
-    std::ifstream in(file, std::ios::binary);
-    std::string line;
-    int n = 0;
-    while (std::getline(in, line)) {
-      n++;
-      // A comment may say any of these words; code may not. Nothing under this directory has a
-      // string literal or a block comment, so the first "//" ends the code of a line.
-      const size_t comment = line.find("//");
-      const std::string code = comment == std::string::npos ? line : line.substr(0, comment);
-      for (const auto& forbidden : kForbidden) {
-        const bool hit = forbidden.second ? hasWord(code, forbidden.first)
-                                          : code.find(forbidden.first) != std::string::npos;
-        if (hit) {
-          ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << forbidden.first
-                        << "' - the codec is given its buffers and never allocates";
+  for (const char* name : kDirs) {
+    const fs::path dir = root / "src" / "link" / name;
+    const std::vector<fs::path> files = filesUnder(dir);
+    EXPECT_GT(files.size(), 2u) << "almost nothing under src/link/" << name
+                                << " - is PROJECT_DIR right?";
+    for (const fs::path& file : files) {
+      std::ifstream in(file, std::ios::binary);
+      std::string line;
+      int n = 0;
+      while (std::getline(in, line)) {
+        n++;
+        // A comment may say any of these words; code may not. Nothing under these directories has
+        // a string literal or a block comment, so the first "//" ends the code of a line.
+        const size_t comment = line.find("//");
+        const std::string code = comment == std::string::npos ? line : line.substr(0, comment);
+        for (const auto& forbidden : kForbidden) {
+          const bool hit = forbidden.second ? hasWord(code, forbidden.first)
+                                            : code.find(forbidden.first) != std::string::npos;
+          if (hit) {
+            ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << forbidden.first
+                          << "' - the portable link is given its buffers and never allocates";
+          }
         }
       }
     }

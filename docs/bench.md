@@ -78,7 +78,46 @@ fails goes back to the task's follow-ups.
 
 ## 2. The link from a laptop
 
-(phase 1, task 03)
+`docs/link.md` is the page: the wiring, the commands, and what each answer
+means. Everything below is `tools/linkcli.py` from a laptop, and every one of
+these lines is a native test against fakes already — what no session could do
+is put the bytes on a real UART through real filters.
+
+- [ ] **p1-03** **A 3.3 V USB-UART dongle on the adapter's link pins** (J4/J5
+  on 1–2; dongle TX to P0.15, dongle RX to P0.16, grounds together).
+  `linkcli.py --port <port> hello` prints `protocol 1.0`, `role 1 (repeater)`,
+  `slot 0`, `max_payload 240`, `caps 0x00` (nothing else of the protocol is
+  implemented yet, on purpose), a non-zero `boot_id`, `fw_version 0.0.0-dev`,
+  `board rak4630-single` and `upstream repeater-v1.17.1+d9296435`.
+- [ ] **p1-03** `ping` answers and echoes the nonce; `status` shows the uptime
+  and `reset_reason` — **1 (power-on)** after a power cycle, **2 (reset pin)**
+  after the reset line, **4 (software)** after `reboot 0` — with
+  `flags 0x0010` (the radio up) and `link_errors 0`. A power cycle changes
+  `boot_id`; a `reboot 0` changes it too.
+- [ ] **p1-03** `identity` prints the same 64 hex digits the USB console's
+  `Repeater ID:` line printed, and the node's advert name.
+- [ ] **p1-03** `reboot 0` is answered *before* the node goes, and `listen`
+  then shows `EV_BOOT` with `reset_reason 4` and a new `boot_id`. **`reboot 1`
+  enters the UF2 bootloader and the way back is a power cycle** — worth doing
+  once, deliberately, because it is the mode a person at the field USB port
+  uses; 2 (serial DFU) and 3 (over-the-air DFU) are the same kind of one-way
+  door.
+- [ ] **p1-03** **Through both bulkhead filters** (470 Ω and 2.2 nF on each
+  line, D-sub pins 8/9): the same five commands, and `link.errors` stays 0
+  over an hour of `ping` once a second. `sensor get link.errors` on the USB
+  console is the same counter, and `sensor get walter.seen` says how many
+  seconds ago the last valid request arrived (`never` before the first one).
+- [ ] **p1-03** **Repeating is unaffected while `ping` runs ten times a
+  second**: a message through the repeater from a phone still arrives, and
+  `link.errors` stays 0. The worst pass measured on the host is tens of
+  microseconds (`tasks/phase-1/reports/03.md`); what the board actually spends
+  is `SerialTransport::worstPassMicros()`, which has no console command of its
+  own yet — read it with the debugger, or wait for task 05's `CLI` over the
+  link.
+- [ ] **p1-03** **A frame mangled on purpose is dropped and counted, and
+  nothing is answered**: with `-v`, send a `ping` and pull the TX line for a
+  moment mid-frame, or feed a bad frame from a terminal; `link_errors` goes up
+  by one and the node stays quiet.
 
 ## 3. The clock
 

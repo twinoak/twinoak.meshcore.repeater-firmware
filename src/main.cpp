@@ -9,7 +9,8 @@
 //     as text (spec/SYSTEM.md S-12);
 //   - the first-boot admin password after the_mesh.begin() (src/app/FirstBoot.h, S-13);
 //   - `len` in the console loop a size_t, so that -Werror accepts the comparison with
-//     sizeof(command) that upstream writes with an int.
+//     sizeof(command) that upstream writes with an int;
+//   - the box link on Serial1, one call in each (src/link/BoardLink.h, docs/ARCHITECTURE.md 4).
 // The USB serial console - the read loop, the 160-byte command and reply, handleCommand(0, ...),
 // the "  -> " echo - is upstream's, unchanged. A pin bump re-reads upstream's main.cpp against
 // this file (docs/upstream.md).
@@ -20,6 +21,7 @@
 // (src/board/UpstreamHeaders.h says why).
 #include "app/FirstBoot.h"
 #include "app/TwinOakMesh.h"
+#include "link/BoardLink.h"
 
 StdRNG fast_rng;
 SimpleMeshTables tables;
@@ -77,6 +79,10 @@ void setup() {
     Serial.println("First boot: a random admin password was set (not shown; set yours with 'password <new>')");
   }
 
+  // The box link on Serial1, after the radio (its RNG draws the boot identifier) and after
+  // begin() (the advert name IDENTITY reports comes from the loaded preferences).
+  twinoak::link::linkBegin(the_mesh);
+
   // send out initial zero hop Advertisement to the mesh
 #if ENABLE_ADVERT_ON_BOOT == 1
   the_mesh.sendSelfAdvertisement(16000, false);
@@ -115,6 +121,7 @@ void loop() {
   }
 
   the_mesh.loop();
+  twinoak::link::linkLoop();
   sensors.loop();
   rtc_clock.tick();
 

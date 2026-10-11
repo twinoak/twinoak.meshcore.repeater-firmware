@@ -165,18 +165,31 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
    RAK sends events, and the other half of each pair is the Walter's firmware's. Tested against
    every case of `spec/fixtures/link/link-v1.json` (`test/test_link_codec`), with a test that
    fails when the fixture gains a case nothing exercises.
-2. **Session** (portable): a receiver that turns bytes into packets and counts what it drops; a
-   dispatcher from request type to handler; the one-entry memory of the last request and its
-   response, which is what makes a retried request harmless; the event counter. It talks to the
-   rest of the firmware through interfaces — a clock, a CLI, power, the mesh client — so that the
-   native tests run it against fakes.
-3. **Transport**: `Serial1` at 115200. Read what is there, write what fits, never wait.
+2. **Session** (portable, `src/link/session/`, proved by p1-03): a receiver that turns bytes into
+   packets and counts what it drops; a dispatcher from request type to handler; the one-entry
+   memory of the last request and its response, which is what makes a retried request harmless;
+   the event counter. It talks to the rest of the firmware through the interfaces of
+   `Interfaces.h` — the system, the identity, and one each for the clock, the console,
+   attention, power, the environment, the mesh client and the observation ring — so that the
+   native tests run it whole against fakes (`test/test_link_session`). **A capability is an
+   interface that is there**: `HELLO`'s `caps` is built from which of those pointers are non-null
+   and from nothing else, so a firmware that has not implemented a thing does not advertise it and
+   answers `ERR_UNSUPPORTED` for it. Nothing keeps a second list of what a build can do.
+3. **Transport** (`src/link/SerialTransport.*`): `Serial1` at 115200. Read what is there, write
+   what fits, never wait. `src/link/BoardLink.*` is the board's half of those interfaces —
+   uptime, the reset reason, the per-boot identifier from the radio's RNG, the restart, the
+   identity — and the one call `src/main.cpp` makes in each of `setup()` and `loop()`.
 
 **The link never stalls the mesh.** `loop()` gives it a bounded slice: it drains the UART's receive
 buffer, handles at most one request, and queues its answer. A handler that would take time — a
 mesh exchange — returns at once and reports later (the protocol is built that way). A handler that
 runs a console command inherits that command's cost, which is upstream's (a `set` writes
 preferences to flash); that is the worst case and it is the same as typing the command on USB.
+A request that completes while the previous answer is still unsent waits in the receiver — the
+transport stops reading and the UART's own buffer holds the rest — so neither is lost and
+nothing blocks. `Serial1`'s receive ring and transmit buffer are raised to 256 bytes from the
+core's 64 (`platformio.ini`), which is what makes a 246-byte frame fit in one read and leave in
+one write that cannot block; p1-03's report has the measurement of what one pass costs.
 
 Two more ways in, both through `TwinOakSensors`' settings, so they work from the USB console and
 from a mesh admin's `sensor get/set`:
