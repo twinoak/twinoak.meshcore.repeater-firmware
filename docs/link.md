@@ -5,8 +5,8 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's tasks
-01 to 03): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
+What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's
+four): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
 `REBOOT`, `CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job
 requests `JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, the five sends
 `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY` and `SEND_TRACE`, the
@@ -114,6 +114,37 @@ boot that follows.
 `-v` prints every frame as hex, in both directions, which is the thing to paste
 into a report when a frame is refused.
 
+### Every request this firmware answers, and the bit that carries it
+
+A capability is an interface that is there (`src/link/session/Interfaces.h`), so
+this table is `caps` read the other way round: what each bit buys, and what a
+build without it would answer. `0x7f` is every bit protocol 1.0 defines, which
+is what this role has.
+
+| Request | Capability bit | Where it is walked |
+|---|---|---|
+| `HELLO`, `PING`, `STATUS`, `IDENTITY`, `REBOOT` | — (always) | §2 |
+| `TIME_GET`, `TIME_SET` | `TIME_PERSIST` `0x40` | §2a |
+| `CLI` | `CLI` `0x01` | §2b |
+| `SLEEP_NOTICE` | `ATTENTION` `0x20` | §2c |
+| `POWER_GET` | `POWER` `0x02` | §2d |
+| `ENV_GET` | `ENV` `0x04` | §2d |
+| `LPP_GET` | — (gated on `CLI` by §4) | §2d |
+| `JOB_BEGIN`, `JOB_END`, `PATH_SET`, `PATH_GET` | `MESH_CLIENT` `0x08` | §2e |
+| `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY`, `SEND_TRACE`, `REPLY_GET`, `MESH_COUNTERS` | `MESH_CLIENT` `0x08` | §2f, §2h |
+| `OBS_PULL` | `OBSERVATIONS` `0x10` | §2g |
+
+| Event | Capability bit |
+|---|---|
+| `EV_BOOT` | — (always) |
+| `EV_ATTENTION` | `ATTENTION` `0x20` |
+| `EV_MESH_REPLY` | `MESH_CLIENT` `0x08` |
+
+A request whose bit is absent is answered **`ERR_UNSUPPORTED`** and nothing
+else; a request type this protocol version does not define at all is
+`ERR_UNSUPPORTED` too. Nothing in the firmware keeps a second list of what a
+build can do, so a `caps` of `0x7f` and this table cannot drift apart.
+
 ## 2a. The clock
 
 The first-batch boards have **no RTC fitted**, so a repeater that restarts has
@@ -209,7 +240,7 @@ CLI sensor list
 
 ### Our settings, from here, from the console and from the mesh
 
-The seven keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
+The nine keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
 which means three ways to reach them: `cli "sensor get <key>"` over this link,
 the same line typed on the USB console, and — for a **mesh admin**, logged in
 with the admin password from a phone — the same line as a message. Upstream's
@@ -225,6 +256,8 @@ through the interpreter only for a client whose ACL entry is admin).
 | `clock.state` | `unset`, `restored`, `set` or `rtc` | — |
 | `power.low_mv` | the *battery low* threshold in millivolts (3500 by default) | a decimal number of millivolts |
 | `power.crit_mv` | the *battery critical* threshold (3300 by default) | the same |
+| `obs.wake` | `0`, or `1` when a filling observation ring may wake a sleeping Walter | `0` or `1`; **off at boot and per boot** (§2g) |
+| `client.refused` | mesh-client sends the RAK's ceiling has refused since boot — `0` on a healthy unit | — (§2h says why it is not settable) |
 
 A `set` of any other key — or of `walter.wake` with any value but `1` — is
 answered `can't find custom var`, which is upstream's wording and its only other
@@ -233,11 +266,11 @@ decimal number, when it is outside 2500–4300 mV, or when `low` would not sit
 more than 100 mV above `crit`; a `set` that is accepted is written to a small
 file of this firmware's own (`/power`) and survives a restart.
 
-**Seven keys no longer fit one `sensor list`.** Upstream stops a listing once it
+**Nine keys no longer fit one `sensor list`.** Upstream stops a listing once it
 has written 134 bytes into a 160-byte reply, so a freshly booted node prints the
-first five and `... next:5`, and **`cli "sensor list 5"`** is how the two
-thresholds are read; a node whose counters have grown wide prints four and
-`... next:4`. `sensor get <key>` always works whatever the paging does, and
+first five and `... next:5`, and **`cli "sensor list 5"`** is how the other four
+are read; a node whose counters have grown wide prints four and `... next:4`.
+`sensor get <key>` always works whatever the paging does, and
 `tasks/phase-1/reports/06.md` has the arithmetic.
 
 ## 2c. Attention, and a Walter that sleeps
@@ -493,7 +526,9 @@ REPLY
   While a reply is awaited a second send is **`ERR_BUSY`**; with no job the
   three that need one are **`ERR_STATE`** (a trace needs none). A send that
   cannot be put on the air — a password over 15 bytes, a line over 148 — is
-  **`ERR_RANGE`** or **`ERR_MALFORMED`** and nothing is sent.
+  **`ERR_RANGE`** or **`ERR_MALFORMED`** and nothing is sent. A send over the
+  RAK's own ceiling — 6 in a minute, 2 seconds apart — is **`ERR_BUSY`** as
+  well, and §2h is how the two are told apart.
 - **`reply`** reads the record as it stands (`pending`, `response`, `text`,
   `trace` or `timeout`); the RAK sends one `EV_MESH_REPLY` when the reply
   arrives or the wait times out, and keeps the record until the next send,
@@ -561,6 +596,52 @@ OBS_PULL
   adverts alone and each wake costs an LTE attach; the default is "collect them
   when the Walter is awake anyway". It is a per-boot setting, like the clock: a
   Walter that wants it says so after each `EV_BOOT`.
+
+## 2h. The two ceilings
+
+Two things bound what this unit puts on the air, and they are not the same
+thing.
+
+| | what it counts | the limit | what happens over it |
+|---|---|---|---|
+| **the client's ceiling**, ours (`src/meshclient/SendCeiling.h`) | the sends the Walter asks for, one per `SEND_*` — the same count as `counters`' `client_tx` | **6 in any 60 s**, and **2 s** between two | the send is **`ERR_BUSY`** and nothing leaves; `sensor get client.refused` counts it |
+| **the duty cycle**, upstream's (`mesh::Dispatcher`) | *every* packet the radio transmits, the hundreds it forwards included | an airtime budget of a one-hour window — **half** of it by default, and `cli "set dutycycle <1..100>"` changes it | the radio waits; nothing is refused and nothing is lost |
+
+The first is a backstop on a mistake in the Walter. Its agent paces itself to a
+budget the MeshMaster server sets — `budget 2/min gap 20 s` by default — so a
+healthy unit never comes near 6 a minute; a Walter in a loop, or one being
+written, does, and the RAK refuses rather than becoming a nuisance on a mesh
+other people use. The limits are build constants, because a limit the Walter
+could raise would be no backstop against the Walter.
+
+- **An `ERR_BUSY` has two causes and `status` tells them apart**: flag bit 1
+  (`reply awaited`) is set when the refusal was "one exchange at a time", and
+  clear when it was the ceiling. `counters`' `client_tx` does not move either
+  way — a refused send is not a send.
+- **A refusal costs nothing.** It does not enter the 60-second window and does
+  not restart the 2-second gap, so hammering the link does not push the next
+  legitimate send further away.
+- **`sensor get client.refused`** reads the count, from the USB console or from
+  a mesh admin's phone — deliberately not over the link, because a Walter that
+  is being refused is the one party whose own counters cannot be trusted about
+  it.
+
+The second is the band's, and only upstream can hold it: it is the one
+accounting that sees forwarded traffic. Our sends go through the same outbound
+queue and are decremented from the same budget, so the two do not need to agree
+about anything (`docs/ARCHITECTURE.md` §7 reads the lines). Six of the longest
+packets this client can build is about 13 seconds of transmission a minute,
+which is some 22 % against the default 50 %; the exchange a server actually
+asks for is nearer 2 %. On a unit somebody has set to a **low** duty cycle, a
+run-away Walter could meet upstream's budget as well as the ceiling — at which
+point upstream delays the next transmission and nothing is lost.
+
+**Repeating comes first, and is not slowed by this.** A packet of ours is
+queued at the same priority as a forward of routed traffic and ties go to
+whichever was queued first, so a send can delay a packet being forwarded by its
+own airtime and no more — about 1.7 s for the largest, and six times a minute
+at the very most. §7 of `docs/ARCHITECTURE.md` has the priorities and the lines
+they come from.
 
 ## 3. When it says nothing
 

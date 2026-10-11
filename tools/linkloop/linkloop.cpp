@@ -222,9 +222,11 @@ class LoopSettingsHost : public twinoak::SettingsHost {
   uint16_t batteryCritMv() const override;
   bool setBatteryLowMv(uint16_t mv) override;
   bool setBatteryCritMv(uint16_t mv) override;
-  // Likewise out of line: the observation ring is declared below this class too.
+  // Likewise out of line: the observation ring is declared below this class too, and so is the
+  // mesh client whose ceiling `client.refused` counts.
   bool obsWake() const override;
   void setObsWake(bool on) override;
+  uint32_t clientSendsRefused() const override;
 };
 
 LoopSettingsHost g_settings_host;
@@ -466,6 +468,7 @@ bool LoopSettingsHost::setBatteryCritMv(uint16_t mv) {
 }
 bool LoopSettingsHost::obsWake() const { return g_observations.wakeEnabled(); }
 void LoopSettingsHost::setObsWake(bool on) { g_observations.setWakeEnabled(on); }
+uint32_t LoopSettingsHost::clientSendsRefused() const { return g_mesh_client.refused(); }
 
 Firmware g_firmware;
 Services g_services;

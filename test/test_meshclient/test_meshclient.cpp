@@ -28,7 +28,10 @@
 //     allows, of which exactly one fits;
 //   - the RSSI note table: a pooled packet reused, and a note taken back once;
 //   - attention reason 5: off by default, on with `obs.wake`, and only while the Walter is
-//     believed asleep.
+//     believed asleep;
+//   - the send ceiling (task 04) against a fake clock: six in a minute and the seventh refused,
+//     the two-second gap, the window sliding, a refused send costing nothing, and the millisecond
+//     clock wrapping under it.
 
 #include <gtest/gtest.h>
 
@@ -44,6 +47,7 @@
 #include "meshclient/PeerSlot.h"
 #include "meshclient/Reply.h"
 #include "meshclient/RssiNotes.h"
+#include "meshclient/SendCeiling.h"
 
 namespace {
 
@@ -896,6 +900,118 @@ TEST(TheWakeThreshold, ItIsTheCrossingAndOnlyWhileTheWalterIsBelievedAsleep) {
     EXPECT_FALSE(obs.noteAdvert(advertOf(7, 4000, 0), true));
   }
   EXPECT_TRUE(obs.noteAdvert(advertOf(8, 4001, 0), true)) << "a fresh filling, a fresh ask";
+}
+
+
+// ----------------------------------------------------------------------------- the send ceiling
+
+// The ceiling is a clock and a ring of six timestamps, so every test of it is "sends at these
+// millisecond values" (src/meshclient/SendCeiling.h). The constants are the firmware's own, read
+// from the header rather than written out, so that a build which moves one moves these with it.
+
+TEST(TheCeiling, SixInAMinuteAndTheSeventhIsRefused) {
+  SendCeiling c;
+  uint32_t now = 100000;
+  // Six sends, each as early as the gap allows: that is the whole minute's allowance spent in
+  // twelve seconds, which is what a Walter in a loop would do.
+  for (uint8_t i = 0; i < kCeilingSends; i++) {
+    ASSERT_TRUE(c.admits(now)) << "send " << int(i) << " at " << now;
+    c.noteSent(now);
+    EXPECT_EQ(int(i) + 1, int(c.inWindow(now)));
+    now += kCeilingGapMs;
+  }
+  EXPECT_FALSE(c.admits(now)) << "the seventh inside the window";
+  EXPECT_EQ(0u, c.refused()) << "admits() judges; the client is what counts a refusal";
+
+  // And it stays refused for the rest of the window, however long the gap has been.
+  EXPECT_FALSE(c.admits(100000 + kCeilingWindowMs - 1));
+  EXPECT_EQ(int(kCeilingSends), int(c.inWindow(100000 + kCeilingWindowMs - 1)));
+}
+
+TEST(TheCeiling, TheTwoSecondGap) {
+  SendCeiling c;
+  const uint32_t t = 5000;
+  EXPECT_TRUE(c.admits(t)) << "the first send of a boot is never refused";
+  c.noteSent(t);
+  EXPECT_FALSE(c.admits(t)) << "the same millisecond";
+  EXPECT_FALSE(c.admits(t + 1));
+  EXPECT_FALSE(c.admits(t + kCeilingGapMs - 1)) << "a millisecond short of the gap";
+  EXPECT_TRUE(c.admits(t + kCeilingGapMs)) << "the gap, exactly";
+
+  // The gap is measured from the last send and not from the first: a send at the gap restarts it.
+  c.noteSent(t + kCeilingGapMs);
+  EXPECT_FALSE(c.admits(t + kCeilingGapMs + 1));
+  EXPECT_TRUE(c.admits(t + 2 * kCeilingGapMs));
+}
+
+TEST(TheCeiling, TheWindowSlides) {
+  SendCeiling c;
+  const uint32_t first = 1000;
+  uint32_t now = first;
+  for (uint8_t i = 0; i < kCeilingSends; i++) {
+    c.noteSent(now);
+    now += kCeilingGapMs;
+  }
+  // At the last moment of the oldest send's window the ceiling is still reached; a window after
+  // that send it has left, and exactly one more is allowed.
+  EXPECT_FALSE(c.admits(first + kCeilingWindowMs - 1));
+  EXPECT_TRUE(c.admits(first + kCeilingWindowMs));
+  EXPECT_EQ(int(kCeilingSends) - 1, int(c.inWindow(first + kCeilingWindowMs)));
+
+  // And because the other five leave in the same two-second steps the burst re-forms - which is
+  // what "at most six in **any** sixty seconds" means, rather than "six per fixed minute": six
+  // more go, and then the seventh is refused again.
+  uint32_t t = first + kCeilingWindowMs;
+  for (uint8_t i = 0; i < kCeilingSends; i++) {
+    ASSERT_TRUE(c.admits(t)) << "the re-formed burst, send " << int(i) << " at " << t;
+    c.noteSent(t);
+    t += kCeilingGapMs;
+  }
+  EXPECT_FALSE(c.admits(t)) << "six of the new ones are inside the window now";
+  EXPECT_EQ(int(kCeilingSends), int(c.inWindow(t)));
+
+  // A minute of quiet is a clean sheet: the ring holds six times and none of them is inside the
+  // window any more.
+  EXPECT_EQ(0, int(c.inWindow(t + kCeilingWindowMs)));
+  EXPECT_TRUE(c.admits(t + kCeilingWindowMs));
+}
+
+TEST(TheCeiling, ARefusedSendCostsNothing) {
+  // A refusal is not a send: it does not enter the window and it does not restart the gap, so a
+  // Walter that hammers the link does not push its own next legitimate send further away.
+  SendCeiling c;
+  uint32_t now = 0;
+  for (uint8_t i = 0; i < kCeilingSends; i++) {
+    c.noteSent(now);
+    now += kCeilingGapMs;
+  }
+  const int before = int(c.inWindow(now));
+  for (int i = 0; i < 1000; i++) {
+    EXPECT_FALSE(c.admits(now));
+    c.noteRefused();
+  }
+  EXPECT_EQ(before, int(c.inWindow(now))) << "a thousand refusals changed the window not at all";
+  EXPECT_EQ(1000u, c.refused());
+
+  // And the window opens exactly when it would have without them.
+  EXPECT_TRUE(c.admits(kCeilingWindowMs));
+}
+
+TEST(TheCeiling, TheCountSaturatesAndTheClockMayWrap) {
+  SendCeiling c;
+  for (int i = 0; i < 5; i++) c.noteRefused();
+  EXPECT_EQ(5u, c.refused());
+
+  // millis() wraps every 49 days and a repeater is meant to run for months: a send just before
+  // the wrap and one just after it are two seconds apart, and the ceiling must say so.
+  SendCeiling w;
+  const uint32_t before_wrap = 0xFFFFFFFFu - 500;
+  EXPECT_TRUE(w.admits(before_wrap));
+  w.noteSent(before_wrap);
+  EXPECT_FALSE(w.admits(before_wrap + 1000)) << "500 ms past the wrap is inside the gap";
+  EXPECT_TRUE(w.admits(before_wrap + kCeilingGapMs));
+  EXPECT_EQ(1, int(w.inWindow(before_wrap + kCeilingGapMs)));
+  EXPECT_EQ(0, int(w.inWindow(before_wrap + kCeilingWindowMs)));
 }
 
 }  // namespace

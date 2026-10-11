@@ -26,6 +26,49 @@ pull request that moves the pin, the one command for a bump that needs a
 session, and the seven places a bump re-reads — is
 [`docs/upstream.md`](docs/upstream.md).
 
+## State
+
+Phases 0 to 2 have landed, which is everything but the family of roles and
+first-boot provisioning (phase 3). What the firmware does **today**, on a board
+nobody has flashed yet:
+
+- **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
+  `repeater-v1.17.1` (`d9296435`), compiled unmodified and subclassed — the
+  radio, the routing, the ACL, the console and the preferences are upstream's
+  and behave exactly as a stock node's (`docs/ARCHITECTURE.md` §2).
+- **It speaks the box link** on `Serial1` at 115200: every request and event
+  protocol 1.0 defines outside its two reserved ranges, `caps 0x7f`.
+  `tools/linkcli.py` from a laptop is how a person walks it
+  ([`docs/link.md`](docs/link.md)).
+- **It keeps time without an RTC**: the clock is restored across a restart from
+  a file, adverts are held back until it is trustworthy, and a backwards set is
+  refused once anything of ours has carried a timestamp (`docs/link.md` §2a).
+- **It is managed over the link and from the mesh**: upstream's own
+  interpreter behind `CLI`, nine settings on `sensor get/set`, and an attention
+  machine that can wake a sleeping Walter — which a mesh admin with a phone can
+  ask for (`docs/link.md` §2b and §2c).
+- **It measures itself**: three current-sense channels with the right shunt
+  each, the air inside the box, two battery thresholds that raise attention,
+  and the same numbers in a phone's telemetry view (§2d).
+- **It is the radio half of a MeshMaster exit node**: on the Walter's behalf it
+  begins a job with one peer and makes the five exchanges — a login, a request,
+  a CLI line, a path discovery, a trace — **one packet per send**, as itself,
+  with the reply delivered as an event (§2e, §2f). At most six sends a minute
+  and two seconds apart, whatever the Walter asks for (§2h).
+- **It keeps what it hears**: every advert whose signature verified goes into a
+  ring of 64 records for the Walter to collect, application data copied and
+  never parsed (§2g).
+- **It says what it is and is released signed**: an image descriptor, a
+  manifest, an Ed25519 signature over it, and a weekly pull request that moves
+  the MeshCore pin ([`docs/release.md`](docs/release.md),
+  [`docs/upstream.md`](docs/upstream.md)).
+
+Not done, and deliberately: the bridge role and the dual adapter
+(`docs/ARCHITECTURE.md` §8 has the seams), NoiseScope, and first-boot
+provisioning over the link. Nothing above has been on a bench:
+[`docs/bench.md`](docs/bench.md) is the walk that would prove it, and
+`tools/verify.ps1` is what has been proved without one.
+
 ## Building it
 
 ```powershell
@@ -77,24 +120,41 @@ container provides it. The task piles that build the rest are run with
 
 ## Rails that hold in every task
 
+Nine rules, and the test that fails when one is broken. `test/test_rails` is
+one test per rule, each failing with a sentence that names the rule
+(`tasks/phase-2/reports/04.md` has every one of them broken on purpose once and
+the sentence it printed); where a rule can only be approximated by a grep, that
+test says what it does and does not catch.
+
+| | The rule | The test that holds it |
+|---|---|---|
+| 1 | **Nothing the mesh says is logged as text.** `MESH_PACKET_LOGGING` and `MESH_DEBUG` stay off in every environment. | `Rails.Rule1_*` — the resolved flags of every board environment, and a walk of `src/` |
+| 2 | **No source prints a packet payload, a CLI line or its reply, an advert's application data, or a password.** | `Rails.Rule2_*` — three tests: a payload beside a print, and no print-like call at all under `src/link/` or `src/meshclient/` |
+| 3 | **No default password is ever on the air.** A node that boots with no saved settings draws itself a random admin password that nobody knows (`src/app/FirstBoot.cpp`); the one a person sets at the USB port with `password <new>` is the first anyone can use. | `Rails.Rule3_*` — no environment defines `ADMIN_PASSWORD` as upstream's word or leaves it out, and the first-boot path exists and is called; `test/test_password` holds what the random one looks like |
+| 4 | **Path hashes this firmware chooses are two bytes or more.** | `Rails.Rule4_*` — the constant is 2, every `sendFlood` passes it, no literal 1 |
+| 5 | **One packet per send.** No reciprocal path is returned for the client's peer. | `Rails.Rule5_*` — the branch of `onPeerPathRecv` that takes the job peer's path returns false and nothing else |
+| 6 | **A password is in RAM for the length of a send** and nowhere else. | `Rails.Rule6_*` — no file on the path of a `SEND_LOGIN` or a sensitive `SEND_CLI` names a file-system API; `test_link_session` searches the session, the client and the job for the bytes afterwards |
+| 7 | **Upstream's INA3221 and BME280 support stay out of the build** — one shunt value for three channels, and an I2C conversion on the path of a link request. | `Rails.Rule7_*` |
+| 8 | **`spec/` is a copy and MeshCore is not edited.** | `Rails.Rule8_*` — the SHA-256 and byte count of every file against `spec/MANIFEST.txt`, and no script that names the pinned checkout writes in it |
+| 9 | **No heap allocation** under `src/link/`, `src/meshclient/` or `src/clock/`: a node that repeats for months is given its buffers. | `Rails.Rule9_*` |
+
+Three more, which are a shape rather than a grep:
+
 - **It repeats, whatever else happens.** Nothing added here may stall the mesh
-  loop: not the link, not a sensor that stopped answering, not the Walter.
+  loop: not the link, not a sensor that stopped answering, not the Walter. The
+  link gets a bounded slice of `loop()` and never waits
+  (`docs/ARCHITECTURE.md` §4); a request never performs I2C and answers out of
+  a cache (`Rails.AlsoKept_NoRequestHandlerCanReachAnI2cBus`); and a client
+  send can delay a packet being forwarded by its own airtime and no more, at
+  most six times a minute (§7, and `src/meshclient/SendCeiling.h`).
 - **Upstream is not edited.** Our code subclasses and composes
-  (`docs/ARCHITECTURE.md` §2).
-- **Nothing the mesh says is logged as text.** `MESH_PACKET_LOGGING` and
-  `MESH_DEBUG` stay off; `test/test_rails` reads `platformio.ini` and walks
-  `src/` for them, and for a line that prints a packet's payload.
-- **A password is in RAM for the length of a send** and nowhere else.
-- **One packet per send** for everything the mesh client originates.
-- **Path hashes this firmware chooses are two bytes or more.**
-- **No default password is ever on the air.** A node that boots with no saved
-  settings draws itself a random admin password that nobody knows
-  (`src/app/FirstBoot.cpp`, `test/test_password`); the one a person sets at the
-  USB console with `password <new>` - which the console allows and the mesh
-  does not - is the first anyone can use. `test/test_rails` fails a board
-  environment whose `ADMIN_PASSWORD` is upstream's word, or missing.
+  (`docs/ARCHITECTURE.md` §2); every override carries `override`, so a pin bump
+  that changes one is a compile error and not a method that silently stops
+  being called.
 - **Never a chip erase.** The file system holds the node's identity; an image
-  lives inside its application region and nowhere else.
+  lives inside its application region and nowhere else
+  (`docs/ARCHITECTURE.md` §9, and the release tooling checks the region against
+  the linker script).
 
 ## Licence
 

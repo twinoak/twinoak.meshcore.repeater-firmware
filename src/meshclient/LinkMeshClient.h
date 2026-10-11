@@ -18,10 +18,13 @@
 //   - no reciprocal path is ever sent: one packet per send.
 //
 // And the rules of section 6 the RAK enforces, each a refusal here before anything is built:
-// ERR_STATE without a job (a trace needs none), ERR_BUSY while a reply is awaited, ERR_RANGE and
-// ERR_MALFORMED for what cannot be sent. Nothing here blocks: a send queues one packet and arms a
-// deadline; loop() is where the deadline is checked; the reply arrives through onResponse(),
-// onText(), onTrace() and onReturnedPath(), which the board calls from its peer overrides.
+// ERR_STATE without a job (a trace needs none), ERR_BUSY while a reply is awaited, ERR_BUSY over
+// the send ceiling (SendCeiling.h: at most 6 sends in any 60 seconds, 2 seconds apart - the
+// backstop on a mistake in the Walter, which the Walter's own budget can never reach), ERR_RANGE
+// and ERR_MALFORMED for what cannot be sent. Nothing here blocks: a send queues one packet and
+// arms a deadline; loop() is where the deadline is checked; the reply arrives through
+// onResponse(), onText(), onTrace() and onReturnedPath(), which the board calls from its peer
+// overrides.
 //
 // Every buffer that held a password - the plaintext built here - is wiped before the send
 // returns; the link's receive buffer, where the request's bytes are, is the session's to wipe
@@ -40,6 +43,7 @@
 #include "Job.h"
 #include "MeshPort.h"
 #include "Reply.h"
+#include "SendCeiling.h"
 
 namespace twinoak {
 namespace meshclient {
@@ -126,15 +130,20 @@ class LinkMeshClient : public link::MeshClientAccess {
 
   // Packets the client originated since boot: one per send, and nothing else (6.4).
   uint32_t clientTx() const { return client_tx_; }
+  // Sends the ceiling refused since boot (`sensor get client.refused`).
+  uint32_t refused() const { return ceiling_.refused(); }
+  const SendCeiling& ceiling() const { return ceiling_; }
 
   Job& job() { return job_; }
   Reply& reply() { return reply_; }
   const Reply& reply() const { return reply_; }
 
  private:
-  // The refusals every send but a trace starts with: kErrState without a job, kErrBusy while a
-  // reply is awaited. kOk means "go on".
-  uint8_t gate(bool needs_job) const;
+  // The refusals every send starts with, in the order section 6.2 lists them and then ours:
+  // kErrState without a job (a trace needs none), kErrBusy while a reply is awaited, kErrBusy
+  // over the ceiling - which is the last of the three, so that a Walter with no job learns that
+  // and so that a request refused for any other reason costs it nothing. kOk means "go on".
+  uint8_t gate(bool needs_job, uint32_t now_ms);
   // The route the job's path gives a login, a request or a CLI line: direct with a path (modes 1
   // and 2), a flood without one.
   Route routeOfJob() const;
@@ -149,6 +158,7 @@ class LinkMeshClient : public link::MeshClientAccess {
   Job& job_;
   MeshPort& port_;
   Reply reply_;
+  SendCeiling ceiling_;
   uint32_t client_tx_ = 0;
 };
 

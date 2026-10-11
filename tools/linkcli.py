@@ -880,7 +880,11 @@ def _send_result(link, msg_type, fields, name):
         if f.get("status") == ref.ERR_STATE:
             print("no job: `job begin <key>` first (6.2)", file=sys.stderr)
         elif f.get("status") == ref.ERR_BUSY:
-            print("a reply is still awaited; `reply` reads it, or wait for it (6.2)",
+            # Two causes, and `status`' flag bit 1 is what tells them apart (docs/link.md 2h).
+            print("busy: either a reply is still awaited - `reply` reads it, and `status` has "
+                  "flag bit 1 set - or the send was over the RAK's own ceiling of 6 in a minute, "
+                  "2 s apart, which is flag bit 1 clear and one more on "
+                  "`cli \"sensor get client.refused\"` (6.2, docs/link.md 2h)",
                   file=sys.stderr)
         return 1
     return 0

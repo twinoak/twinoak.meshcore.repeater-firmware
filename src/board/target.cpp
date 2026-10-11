@@ -88,6 +88,7 @@ class BoardSettingsHost : public twinoak::SettingsHost {
   }
   bool obsWake() const override { return twinoak::link::obsWakeEnabled(); }
   void setObsWake(bool on) override { twinoak::link::setObsWakeEnabled(on); }
+  uint32_t clientSendsRefused() const override { return twinoak::link::clientRefused(); }
 };
 
 BoardSettingsHost g_settings_host;
