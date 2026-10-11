@@ -21,7 +21,8 @@ src/
                         attention (the machine of section 8, portable), UART transport
   clock/                ClockKeeper (the rules, portable), BoardClock (the board's ports and
                         its flash file), LinkClock (the keeper as the link's ClockAccess)
-  power/                INA3221 with per-channel shunts, BME280, thresholds (arithmetic portable)
+  power/                INA3221 with per-channel shunts, BME280, the two readers' schedules,
+                        the battery thresholds and the Cayenne-LPP (all portable but BoardPower)
   meshclient/           the job, the five sends, the reply, the observation ring (state portable)
   fwdesc/               the image descriptor
 test/                   native tests, one directory per subject
@@ -124,19 +125,26 @@ the link, there is no display or GPS, and the battery is read by the INA3221.
 
 - `board` — `TwinOakBoard`, a subclass of upstream's `RAK4631Board` (the SX1262 wiring inside the
   RAK4630 stamp is the stamp's, so the radio pins and the DC/DC setup are upstream's unchanged),
-  with `getBattMilliVolts()` returning channel 2's bus voltage from task 06 on - until then it is
-  upstream's ADC reading of a pin that is not wired. `NRF52Board` is a *virtual* base of
-  `RAK4631Board` (through `NRF52BoardDCDC`), so the most-derived class is the one that constructs
-  it, with the OTA name upstream passes; a board added in phase 3 does the same.
+  with `getBattMilliVolts()` returning **INA3221 channel 2's bus voltage** out of the reader's
+  cache, or 0 when that channel is not valid (§6). Upstream reads `PIN_VBAT_READ` (P0.05), which
+  is not wired on this adapter. `NRF52Board` is a *virtual* base of `RAK4631Board` (through
+  `NRF52BoardDCDC`), so the most-derived class is the one that constructs it, with the OTA name
+  upstream passes; a board added in phase 3 does the same.
 - `radio_driver`, `radio_init()`, `radio_new_identity()` — as upstream's.
 - `rtc_clock` — upstream's `AutoDiscoverRTCClock` over a volatile clock, so a hand-fitted RV-3028
   is found by itself; the clock keeper (§5) sits above it.
-- `sensors` — `TwinOakSensors : EnvironmentSensorManager`: upstream's manager finds the BME280 at
-  `0x76` by itself (`ENV_INCLUDE_BME280`); **its INA3221 support is left out of the build**
-  (`ENV_INCLUDE_INA3221` undefined) because it applies one shunt value to all three channels, and
-  ours are 100 mΩ, 20 mΩ and 50 mΩ. Ours reads the INA3221 itself (§6) and adds the settings seam
-  (§4): our keys follow upstream's own (none on this board, since there is no GPS) in
-  `sensor list`, `sensor get` and `sensor set`; `fw.version` is the first and is read-only.
+- `sensors` — `TwinOakSensors : EnvironmentSensorManager`. **Both** of upstream's sensor drivers
+  this unit would have used are left out of the build, and `test/test_rails` holds them out:
+  `ENV_INCLUDE_INA3221` because it applies one shunt value to all three channels and ours are
+  100 mΩ, 20 mΩ and 50 mΩ; `ENV_INCLUDE_BME280` because it samples the part *inside*
+  `querySensors` (`MODE_FORCED`, then `takeForcedMeasurement()` spins on the status register) and
+  `querySensors` is on the path of the box link's `LPP_GET`, which must never perform I2C. Ours
+  reads both parts itself, on a schedule, into one cache (§6). The class adds three things and
+  substitutes none: `begin()`/`loop()`, where those readers are driven — the manager is what
+  `src/main.cpp` already calls once in `setup()` and once in `loop()`; `querySensors()`, which
+  appends this unit's own telemetry after whatever upstream's manager adds (nothing, on this
+  board); and the settings seam (§4), where our keys follow upstream's own (none here, since
+  there is no GPS) in `sensor list`, `sensor get` and `sensor set`.
 
 Upstream's variant sources we still need (`RAK4631Board.cpp`, the Arduino `variant.cpp`) are
 compiled from the pin by a small PlatformIO script (`tools/pio/meshcore_variant.py`), the way the
@@ -214,10 +222,10 @@ attention per reason per hour. It also holds the belief that the Walter is aslee
 The session asks it once a pass what to put on the wire and tells it when the bytes have gone, so
 every rule about *when* is in one file with a fake clock in front of it.
 
-Five more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
-`src/app/Settings.{h,cpp}`, portable and tested; the board's half is six one-line readers. They
-work from the USB console and from a mesh admin's `sensor get/set`, in this order, which is the
-order `sensor list` prints:
+Seven more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
+`src/app/Settings.{h,cpp}`, portable and tested; the board's half is ten one-line readers and
+writers. They work from the USB console and from a mesh admin's `sensor get/set`, in this order,
+which is the order `sensor list` prints:
 
 | Key | `get` | `set` |
 |---|---|---|
@@ -226,6 +234,13 @@ order `sensor list` prints:
 | `link.errors` | frames dropped by the receiver since boot | — |
 | `walter.seen` | seconds since the last valid request on the link, or `never` | — |
 | `clock.state` | `unset`, `restored`, `set` or `rtc` | — |
+| `power.low_mv` | the *battery low* threshold in millivolts | a decimal number of millivolts (§6) |
+| `power.crit_mv` | the *battery critical* threshold | the same |
+
+Seven keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
+160-byte buffer, so a fresh node prints the first five and `... next:5` and `sensor list 5` is
+the rest. The order is task 05's five with task 06's two appended, which is the only place a new
+key can go without renumbering one a bench instruction or a document already names.
 
 `walter.wake` is the out-of-band way to reach a unit whose Walter is asleep: any exit node that
 reaches the repeater can ask it to wake its own uplink. Upstream's permission check is the whole
@@ -299,12 +314,35 @@ RTC**, **RAM that survives a reset**, and **a file**.
 The INA3221 at `0x42` is read directly: shunt voltage and bus voltage per channel, 16-bit
 registers, the shunt of each channel applied to its own reading (the arithmetic is the hardware
 repository's `CURRENT-SENSE.md` and NoiseScope's `telemetry.cpp`, and is a portable function with
-tests). The results feed four readers: the link's `POWER_GET`; the mesh telemetry reply; the
-board's battery voltage; and the attention thresholds (battery low / critical, with hysteresis and
-a rate limit, because every attention costs the battery an LTE attach).
+tests). The BME280 at `0x76` is read beside it, in normal mode so that a sample is three register
+reads and no waiting. **Both go into one cache**, and the four readers of that cache are the
+link's `POWER_GET` and `ENV_GET`; the mesh telemetry reply and the link's `LPP_GET`; the board's
+battery voltage (§3); and the battery thresholds.
 
-A sensor that stops answering is a missing reading, never a stalled loop: every I2C transaction
-has a timeout, and a channel that failed is marked invalid until it answers again.
+Nothing reads a bus on demand: the only two calls into I2C are `PowerReader::loop()` and
+`EnvReader::loop()`, both driven from `TwinOakSensors::loop()` once a pass (§3). That is what
+makes "a request on the box link never performs I2C" a property of the shape rather than of any
+one handler — and it is why upstream's own BME280 support had to leave the build.
+
+A sensor that stops answering is a missing reading, never a stalled loop: a channel that failed
+loses its validity bit and reads 0, a transaction that goes past its budget puts the whole device
+in a five-second back-off, and the sweep is abandoned where it stands. The one thing this layer
+cannot do is bound an I2C transaction: the Adafruit core's TWIM driver busy-waits on the
+peripheral's event registers with no deadline, and the ERROR event an absent device raises is what
+makes the realistic failure fast. `tasks/phase-1/reports/06.md` records that residual risk.
+
+The battery thresholds are *low* and *critical* on channel 2's bus voltage, with 100 mV of
+hysteresis and a minimum time below of one minute, so that a transmit burst's sag raises nothing;
+they are `power.low_mv` and `power.crit_mv` (§4), kept across a restart in a small versioned file
+of our own (`/power`, not upstream's `/prefs.json`). The hourly limit is not here: every attention
+goes through §4's machine, which already allows at most one new attention per reason per hour,
+because each one costs the battery an LTE attach.
+
+The Cayenne-LPP is **one field list and two appliers**: `TwinOakSensors::querySensors` walks it and
+calls upstream's `CayenneLPP` for each field, because a mesh telemetry reply is upstream's buffer
+and upstream's library; `LPP_GET` walks the same list with the two fields upstream's
+`handleRequest` adds around it, and encodes it with a portable mirror of `CayenneLPP::addField`.
+The channel numbers are chosen once and written in `docs/link.md`; they are never renumbered.
 
 ## 7. The mesh client
 
@@ -375,7 +413,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | link codec, session, retry memory | ✔ against the fixtures and fakes | | UART through the bulkheads |
 | the console over the link, our settings, the attention machine | ✔ against fakes, and the `CLI`, `SLEEP_NOTICE` and `EV_ATTENTION` fixtures through the real session | upstream's interpreter behind it | every console command, and a mesh admin waking the box |
 | clock rules, the boot order, the file's rate | ✔ against fakes, and the `TIME_SET` fixture through the real session | the flash file, the RTC probe | a reboot keeps time moving forward |
-| shunt arithmetic, thresholds | ✔ | I2C reads | real currents, sign, calibration |
+| shunt arithmetic, the two readers' schedules, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part, and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view |
 | job state, reply matching | ✔ | the overrides, the sends | a login to a real repeater |
 | observation ring | ✔ | advert capture | adverts heard on the roof |
 | descriptor, manifest | ✔ against the fixtures | placement in the image | the Walter reads it |
@@ -408,6 +446,18 @@ against the build, by the task that first compiled our application onto upstream
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
 
+Corrections and additions made above by **p1-06**, power and environment: §1 (what is under
+`src/power/`), §3 (`getBattMilliVolts()` is channel 2 now, and `TwinOakSensors` gained
+`begin()`/`loop()`/`querySensors()`; **upstream's BME280 support had to leave the build** too, for
+a reason this file did not foresee - it samples the part inside `querySensors`, which is on the
+path of `LPP_GET`), §4 (the settings table is seven keys and `sensor list` pages), §6 (rewritten:
+one cache and its four readers, why no request touches a bus, what the I2C layer cannot promise,
+the thresholds' own rules, and the one field list with two appliers) and §10. What that task read
+of upstream is cited where it is used - `src/power/Environment.h` for upstream's BME280 query,
+`src/power/Telemetry.{h,cpp}` for `handleRequest`'s two fields and CayenneLPP's `addField`,
+`src/board/target.h` for what reads `getBattMilliVolts()`, `src/power/BoardPower.cpp` for the
+core's TWIM driver - and `docs/upstream.md` place 5 lists them.
+
 Corrections and additions made above by **p1-05**, local management: §1 (`src/app/Settings.*` and
 `src/link/attention/`), §4 (what `CLI` does and what it costs; the attention machine; the settings
 table gained `fw.version` and the order `sensor list` really prints, and who may run `sensor set`
@@ -427,7 +477,7 @@ lists them.
 
 Corrections made above by that task: §1 (the wrapper headers), §2 (the define order, `UITask.cpp`,
 `the_mesh`, `onAdvertRecv`'s missing keyword), §3 (`TwinOakBoard` and the virtual base; the
-battery reading stays upstream's until task 06; `variant.cpp` is the only pin map, not one of
+battery reading stayed upstream's until task 06; `variant.cpp` is the only pin map, not one of
 two; `MC_VARIANT` refused; how `<target.h>` resolves). Phase 0's report said the core compiled its
 own `WisCore_RAK4631_Board/variant.cpp` beside MeshCore's; it does not, there is no such
 directory at the pin.

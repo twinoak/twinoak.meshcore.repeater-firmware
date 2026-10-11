@@ -270,6 +270,64 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       break;
     }
 
+    case kMsgPowerGet: {
+      // Section 5.8: the three channels' bus voltage and current, the board's per-channel shunt
+      // already applied. The numbers come out of the reader's cache and **no I2C happens here**
+      // (src/power/PowerReader.h): a request must not wait on a bus.
+      if (s_.power == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      PowerResponse out;
+      if (!s_.power->readPower(out)) {
+        n = encodeStatus(kErrFailed, resp_, sizeof(resp_));
+        break;
+      }
+      n = encodePowerResponse(out, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgEnvGet: {
+      // Section 5.8, the same way: the last sample of the part in the enclosure, and `valid` 0
+      // on a unit that has none.
+      if (s_.env == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      EnvResponse out;
+      if (!s_.env->readEnv(out)) {
+        n = encodeStatus(kErrFailed, resp_, sizeof(resp_));
+        break;
+      }
+      n = encodeEnvResponse(out, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgLppGet: {
+      // "The Cayenne-LPP bytes the node would answer a mesh telemetry request with at those
+      // permissions" (section 5.8). Section 4 gates this one on the CLI capability and not on a
+      // bit of its own, so a build with no LppAccess answers kErrUnsupported.
+      if (s_.lpp == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      LppGet m;
+      if (!decodeLppGet(pkt.body, m)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      // An unknown permission bit is ignored rather than refused (section 5.8), which is what
+      // handing `perm_mask` straight through does.
+      //
+      // The bytes are written **into the response payload, after its status byte**, which is
+      // exactly the payload encodeLppResponse() builds (test/test_link_codec holds that
+      // function to this shape against the fixture) - and this way without a second buffer of
+      // 180 bytes on a 2 KB stack.
+      n = encodeStatus(kOk, resp_, sizeof(resp_));  // one byte: kOk
+      n += s_.lpp->readLpp(m.perm_mask, resp_ + n, sizeof(resp_) - n);
+      break;
+    }
+
     case kMsgSleepNotice: {
       // Section 8: the Walter's last request before it sleeps. From here until the next valid
       // request this node sends no events but EV_BOOT and EV_ATTENTION (eventAllowed), and

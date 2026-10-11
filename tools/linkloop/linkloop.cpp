@@ -15,9 +15,9 @@
 //   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
-// a session with a board that has what phase 1's tasks 03 to 05 implement: caps 0x61 (CLI,
-// ATTENTION, TIME_PERSIST), no observations, no telemetry. Three things in it are the firmware's
-// own code and not a stub:
+// a session with a board that has what phase 1's tasks 03 to 06 implement: caps 0x67 (CLI, POWER,
+// ENV, ATTENTION, TIME_PERSIST), no observations, no mesh client. Four things in it are the
+// firmware's own code and not a stub:
 //
 //   - the **ClockKeeper** (src/clock/), with out/linkloop/clock where the board has its flash
 //     file, so `time` and `time set` exercise the rules the firmware will run; one run of this
@@ -29,7 +29,11 @@
 //     a mesh admin does;
 //   - the **settings table** (src/app/Settings.*), behind a `sensor list/get/set` that is a
 //     miniature of upstream's own CommonCLI branch - including its 134-byte paging rule, so that
-//     what `cli "sensor list"` prints here is what the console prints on the board.
+//     what `cli "sensor list"` prints here is what the console prints on the board;
+//   - the **power and environment readers** (src/power/), driven over a fake I2C bus that answers
+//     real INA3221 register values - so `power`, `env` and `lpp` go through the firmware's own
+//     conversion, its own cache and its own Cayenne-LPP, and `--drop-ina` is the bench's
+//     "unplug the B-board" case with no board at all.
 //
 // What cannot be here is upstream's interpreter itself, so every other command line is answered
 // by the handful of canned lines below. POSIX only: the loop waits on stdin with select(), which
@@ -54,6 +58,11 @@
 #include "link/codec/Numbers.h"
 #include "link/session/Interfaces.h"
 #include "link/session/Session.h"
+#include "power/BatteryWatch.h"
+#include "power/Environment.h"
+#include "power/Ina3221.h"
+#include "power/LinkPower.h"
+#include "power/PowerReader.h"
 
 using namespace twinoak::link;  // NOLINT: one namespace, and the names are the wire's
 
@@ -191,6 +200,13 @@ class LoopSettingsHost : public twinoak::SettingsHost {
   bool raiseWalterWake() override {
     return g_attention.raise(kAttentionPersonAsked, 0, nowMs());
   }
+  // Out of line, because the watch they read is declared below this class. Nothing here writes a
+  // preferences file - a host build has no file system of the board's - so a `set` lasts as long
+  // as this process, which is one boot.
+  uint16_t batteryLowMv() const override;
+  uint16_t batteryCritMv() const override;
+  bool setBatteryLowMv(uint16_t mv) override;
+  bool setBatteryCritMv(uint16_t mv) override;
 };
 
 LoopSettingsHost g_settings_host;
@@ -261,6 +277,88 @@ class LoopCli : public CliAccess {
 };
 
 LoopCli g_cli;
+
+// --- power and environment (src/power/) ---------------------------------------------------------
+
+// A fake I2C bus that answers the registers a B-board with a panel in the sun and a pack on
+// charge would: 18.1 V at 120 mA into the charger, the pack at 4.01 V taking 52 mA, and the two
+// radios drawing 85 mA (the numbers tasks/phase-1/reports/06.md works through). The values are
+// raw registers, so the firmware's own conversion and its own per-channel shunts are what turn
+// them into the millivolts and milliamps `power` prints.
+class LoopBus : public twinoak::power::I2cBus {
+ public:
+  bool dropped = false;  // --drop-ina: the B-board unplugged
+
+  LoopBus() {
+    reg_[twinoak::power::kRegManufacturerId] = twinoak::power::kManufacturerId;
+    set(1, 300, 2262);   // panel:   +120 mA over 100 mOhm, 18.096 V
+    set(2, -26, 501);    // battery:  -52 mA over  20 mOhm,  4.008 V - discharging
+    set(3, 106, 498);    // load:     +85 mA over  50 mOhm,  3.984 V
+  }
+
+  void set(uint8_t channel, int16_t shunt_raw, int16_t bus_raw) {
+    reg_[twinoak::power::shuntRegOf(channel)] = uint16_t(uint16_t(shunt_raw) << 3);
+    reg_[twinoak::power::busRegOf(channel)] = uint16_t(uint16_t(bus_raw) << 3);
+  }
+
+  bool writeRegister(uint8_t, uint8_t, uint16_t) override { return !dropped; }
+  bool readRegister(uint8_t, uint8_t reg, uint16_t& value) override {
+    if (dropped) return false;
+    value = reg_[reg];
+    return true;
+  }
+  uint32_t lastTransactionMicros() const override { return 400; }
+
+ private:
+  uint16_t reg_[256] = {0};
+};
+
+// A BME280 that answers what a sealed box on a Danish mast in winter would.
+class LoopPart : public twinoak::power::EnvSensor {
+ public:
+  bool begin() override { return true; }
+  bool read(float& temp_c, float& rh_pct, float& pressure_pa) override {
+    temp_c = -3.5f;
+    rh_pct = 81.25f;
+    pressure_pa = 101325.0f;
+    return true;
+  }
+  uint32_t lastTransactionMicros() const override { return 1500; }
+};
+
+LoopBus g_bus;
+LoopPart g_part;
+twinoak::power::PowerReader g_power_reader(g_bus);
+twinoak::power::EnvReader g_env_reader(g_part);
+twinoak::power::BatteryWatch g_battery;
+
+// The snapshot the three handlers answer out of - the firmware's own, with the MCU temperature
+// a board would read from its own die.
+class LoopTelemetry : public twinoak::power::TelemetrySource {
+ public:
+  twinoak::power::TelemetrySnapshot snapshot() const override {
+    twinoak::power::TelemetrySnapshot s;
+    s.power = g_power_reader.readings();
+    s.env = g_env_reader.readings();
+    s.batt_mv = s.power.batteryMilliVolts();
+    s.mcu_temp_valid = true;
+    s.mcu_temp_c = 21.25f;
+    return s;
+  }
+};
+
+LoopTelemetry g_telemetry;
+twinoak::power::LinkPower g_link_power(g_telemetry);
+
+uint16_t LoopSettingsHost::batteryLowMv() const { return g_battery.lowMilliVolts(); }
+uint16_t LoopSettingsHost::batteryCritMv() const { return g_battery.critMilliVolts(); }
+bool LoopSettingsHost::setBatteryLowMv(uint16_t mv) {
+  return g_battery.setThresholds(mv, g_battery.critMilliVolts());
+}
+bool LoopSettingsHost::setBatteryCritMv(uint16_t mv) {
+  return g_battery.setThresholds(g_battery.lowMilliVolts(), mv);
+}
+
 Firmware g_firmware;
 Services g_services;
 
@@ -276,6 +374,9 @@ void wire() {
   g_services.clock = &g_clock;
   g_services.cli = &g_cli;
   g_services.attention = &g_attention;
+  g_services.power = &g_link_power;
+  g_services.env = &g_link_power;
+  g_services.lpp = &g_link_power;
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule
@@ -302,6 +403,10 @@ int pump() {
   // believed asleep, which no board can know - so here it is the --wake flag's business instead.
   if (g_wake) g_attention.raise(kAttentionPersonAsked, 0, nowMs());
 
+  // As TwinOakSensors::begin() does it (src/board/target.cpp).
+  g_power_reader.begin(nowMs());
+  g_env_reader.begin(nowMs());
+
   for (;;) {
     // read() and not fgetc(), because select() knows nothing about a stdio buffer.
     fd_set readable;
@@ -317,6 +422,20 @@ int pump() {
       session.feedByte(byte, nowMs());
     }
     g_keeper.loop(nowMs());
+    // As TwinOakSensors::loop() does it, once a pass: one INA3221 channel, one BME280 sample,
+    // and the battery thresholds looked at with whatever channel 2 last said.
+    {
+      const uint32_t now = nowMs();
+      g_power_reader.loop(now);
+      g_env_reader.loop(now);
+      const twinoak::power::ChannelReading& batt = g_power_reader.readings().ch[1];
+      const uint8_t entered = g_battery.poll(batt.valid, batt.bus_mv, now);
+      if (entered == twinoak::power::kBatteryLow) {
+        g_attention.raise(kAttentionBatteryLow, g_battery.lastMilliVolts(), now);
+      } else if (entered == twinoak::power::kBatteryCritical) {
+        g_attention.raise(kAttentionBatteryCritical, g_battery.lastMilliVolts(), now);
+      }
+    }
     session.poll(nowMs());
     if (session.hasOutgoing()) {
       fwrite(session.outgoing(), 1, session.outgoingSize(), stdout);
@@ -409,8 +528,11 @@ int main(int argc, char** argv) {
       g_emitted = true;
     } else if (strcmp(argv[i], "--wake") == 0) {
       g_wake = true;
+    } else if (strcmp(argv[i], "--drop-ina") == 0) {
+      g_bus.dropped = true;  // the bench's "unplug the B-board": `power` then answers valid 0
     } else {
-      fprintf(stderr, "usage: linkloop [--bench <passes>] [--emitted] [--wake]\n");
+      fprintf(stderr,
+              "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina]\n");
       return 2;
     }
   }

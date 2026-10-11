@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine and
-# settings table behind a pipe) and drives tools/linkcli.py against it: hello, ping, status,
-# identity, time, time set, cli, sleep, an attention and reboot, with no board and no serial
-# port, plus the timed worst-case pass.
+# Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine,
+# settings table and power/environment readers behind a pipe) and drives tools/linkcli.py against
+# it: hello, ping, status, identity, time, time set, cli, power, env, lpp, sleep, an attention and
+# reboot, with no board and no serial port, plus the timed worst-case pass.
 #
 # It needs a host C++ compiler. On Windows that is the container tasks/RUNBOOK.md section 2 names,
 # from the repository root:
@@ -27,9 +27,14 @@ if ! command -v g++ > /dev/null; then
 fi
 
 echo "== build"
+# src/power/BoardPower.cpp is the one file of that directory left out: it is the board's half -
+# Wire, the Adafruit driver and the file system - and tools/linkloop/ has its own fakes for each.
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/link/codec/*.cpp src/link/session/*.cpp \
-  src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp
+  src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp \
+  src/power/BatteryWatch.cpp src/power/Environment.cpp src/power/Ina3221.cpp \
+  src/power/LinkPower.cpp src/power/PowerReader.cpp src/power/Prefs.cpp \
+  src/power/Telemetry.cpp
 echo "built $out/linkloop"
 
 cli="python3 tools/linkcli.py --pipe $out/linkloop"
@@ -112,6 +117,27 @@ echo "refused, as it should be"
 echo
 echo "== cli: a command that restarts the node is not owed an answer"
 $cli cli "reboot"
+
+echo
+echo "== power: the three INA3221 channels, each with its own shunt applied (5.8). The registers"
+echo "   are a fake bus's; the arithmetic, the cache and the signs are the firmware's own."
+$cli power
+
+echo
+echo "== env: the air in the enclosure, below freezing"
+$cli env
+
+echo
+echo "== lpp: exactly what a mesh telemetry request would be answered with, read back field by"
+echo "   field - the channel table is docs/link.md's and never changes"
+$cli lpp
+echo
+echo "   and with base permission alone, which is what a guest gets:"
+$cli lpp 1
+
+echo
+echo "== power with the B-board unplugged: valid 0, every channel 0, and the node still answers"
+python3 tools/linkcli.py --pipe "$out/linkloop --drop-ina" power
 
 echo
 echo "== sensor set walter.wake 1 - what a mesh admin sends - raises attention reason 4"

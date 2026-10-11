@@ -7,6 +7,7 @@
 #include "app/Version.h"
 #include "clock/BoardClock.h"
 #include "link/BoardLink.h"
+#include "power/BoardPower.h"
 
 // --- the board --------------------------------------------------------------------------------
 
@@ -36,6 +37,12 @@ void TwinOakBoard::powerOff() {
   twinoak::clock::saveBeforeRestart();
   RAK4631Board::powerOff();
 }
+
+// INA3221 channel 2's bus voltage - the pack side of RS3 - out of the reader's cache, or 0 when
+// that channel is not valid (target.h says what reads this and why 0 is the right answer). It is
+// deliberately *not* upstream's RAK4631Board::getBattMilliVolts(), whose PIN_VBAT_READ is
+// unconnected on this adapter.
+uint16_t TwinOakBoard::getBattMilliVolts() { return twinoak::power::batteryMilliVolts(); }
 
 TwinOakBoard board;
 
@@ -71,12 +78,51 @@ class BoardSettingsHost : public twinoak::SettingsHost {
   const char* clockStateName() const override { return twinoak::clock::stateName(); }
   bool attentionPending() const override { return twinoak::link::attentionPending(); }
   bool raiseWalterWake() override { return twinoak::link::raiseWalterWake(); }
+  uint16_t batteryLowMv() const override { return twinoak::power::batteryLowMilliVolts(); }
+  uint16_t batteryCritMv() const override { return twinoak::power::batteryCritMilliVolts(); }
+  bool setBatteryLowMv(uint16_t mv) override {
+    return twinoak::power::setBatteryLowMilliVolts(mv);
+  }
+  bool setBatteryCritMv(uint16_t mv) override {
+    return twinoak::power::setBatteryCritMilliVolts(mv);
+  }
 };
 
 BoardSettingsHost g_settings_host;
 twinoak::Settings g_settings(g_settings_host);
 
 }  // namespace
+
+// --- the readers of src/power/, where upstream's manager is already called ----------------------
+
+// src/main.cpp calls sensors.begin() in setup() and sensors.loop() once a pass, so this is where
+// the INA3221 and the BME280 are brought up and swept. Upstream's begin() runs first: it scans
+// the bus and would initialise anything of its own it found there - on this board, nothing
+// (target.h says why for each part).
+bool TwinOakSensors::begin() {
+  const bool ok = EnvironmentSensorManager::begin();
+  twinoak::power::begin(InternalFS);  // after board.begin()'s Wire and src/main.cpp's InternalFS
+  return ok;
+}
+
+void TwinOakSensors::loop() {
+  EnvironmentSensorManager::loop();
+  twinoak::power::loop();  // one INA3221 channel, one BME280 sample, the battery thresholds
+}
+
+// The telemetry a mesh client is answered with. Upstream's MyMesh::handleRequest has already put
+// the battery voltage on channel 1 and will add the MCU's temperature after this returns
+// (examples/simple_repeater/MyMesh.cpp:241-259 at the pin d9296435); upstream's manager goes
+// first here for the same reason the settings do, and ours follow on the fixed channels of
+// src/power/Telemetry.h. LPP_GET on the box link answers with the same field list and the same
+// cap, which is what makes the two the same bytes (src/power/LinkPower.cpp).
+bool TwinOakSensors::querySensors(uint8_t requester_permissions, CayenneLPP& telemetry) {
+  EnvironmentSensorManager::querySensors(requester_permissions, telemetry);
+  twinoak::power::appendOurFields(telemetry, requester_permissions);
+  return true;
+}
+
+// --- the settings -------------------------------------------------------------------------------
 
 // Ours follow upstream's own, which on this board are none - EnvironmentSensorManager lists a
 // setting only for a detected GPS (src/helpers/sensors/EnvironmentSensorManager.cpp:685 at the
@@ -101,7 +147,8 @@ const char* TwinOakSensors::getSettingValue(int i) const {
 
 bool TwinOakSensors::setSettingValue(const char* name, const char* value) {
   if (EnvironmentSensorManager::setSettingValue(name, value)) return true;
-  return g_settings.set(name, value);  // `walter.wake 1`; the other four refuse every value
+  // `walter.wake 1`, `power.low_mv <mv>` and `power.crit_mv <mv>`; the other four are read-only
+  return g_settings.set(name, value);
 }
 
 TwinOakSensors sensors;

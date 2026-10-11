@@ -19,13 +19,16 @@ cannot drift from the specification without the specification moving. It identif
     python3 tools/linkcli.py --port COM7 identity
     python3 tools/linkcli.py --port COM7 reboot 0
     python3 tools/linkcli.py --port COM7 cli "get radio"
+    python3 tools/linkcli.py --port COM7 power
+    python3 tools/linkcli.py --port COM7 env
+    python3 tools/linkcli.py --port COM7 lpp 5
     python3 tools/linkcli.py --port COM7 sleep 600
     python3 tools/linkcli.py --port COM7 listen
 
 `--pipe <program>` puts a program's stdin and stdout where the serial port would be, which is how
 the tool is exercised with no board: `tools/linkloop/` is the firmware's own session behind a pipe.
 
-Later tasks add their own sub-commands here (06 telemetry).
+Later tasks add their own sub-commands here (phase 2, the mesh client).
 Requires `pyserial` for `--port` and nothing at all for `--pipe` or `--help`.
 """
 
@@ -72,6 +75,26 @@ STATUS_FLAG_NAMES = [
     (0x0008, "adverts held"), (0x0010, "radio up"),
 ]
 TIME_SOURCE_NAMES = {1: "the cellular network", 2: "the server", 3: "a person at a console"}
+# POWER_GET's three channels on the standard B-board, what a positive current means on each, and
+# the shunt behind it (LINK-PROTOCOL.md 5.8; the hardware repository's CURRENT-SENSE.md).
+POWER_CHANNEL_NAMES = [
+    ("panel", "into the charger", 100),
+    ("battery", "charging", 20),
+    ("load", "drawn", 50),
+]
+POWER_VALID_NAMES = [(0x01, "channel 1"), (0x02, "channel 2"), (0x04, "channel 3")]
+ENV_VALID_NAMES = [(0x01, "temperature"), (0x02, "humidity"), (0x04, "pressure")]
+# LPP_GET's perm_mask: MeshCore's telemetry permission bits.
+LPP_PERM_NAMES = [(0x01, "base"), (0x02, "location"), (0x04, "environment")]
+# The LPP types this firmware writes, and how to read one (src/power/Telemetry.h; MeshCore's
+# src/helpers/sensors/LPPDataHelpers.h). Each is two bytes, most significant first.
+LPP_TYPES = {
+    103: ("temperature", 10.0, True, "C"),
+    116: ("voltage", 100.0, False, "V"),
+    117: ("current", 1000.0, True, "A"),
+}
+# The LPP channels of a TwinOak repeater - chosen once and never renumbered (docs/link.md).
+LPP_CHANNEL_NAMES = {1: "self", 2: "panel", 3: "battery", 4: "load", 5: "enclosure"}
 # EV_ATTENTION's reason, in words, with what its `detail` then means (LINK-PROTOCOL.md 8).
 ATTENTION_REASON_NAMES = {
     1: ("the node restarted", "the reset reason"),
@@ -372,6 +395,26 @@ def print_fields(msg_type, f, indent=""):
         else:
             for piece in text.split("\n"):
                 print("%s%s" % (indent, piece))
+    elif msg_type == ref.POWER_GET:
+        print("%svalid         0x%02x (%s)"
+              % (indent, f["valid"], bits(f["valid"], POWER_VALID_NAMES)))
+        for i, ch in enumerate(f["channels"]):
+            name, positive, shunt = POWER_CHANNEL_NAMES[i]
+            if not f["valid"] & (1 << i):
+                print("%s%d %-8s  (not read)" % (indent, i + 1, name))
+                continue
+            print("%s%d %-8s  %6d mV  %+7d mA   %d mohm, + = %s"
+                  % (indent, i + 1, name, ch["bus_mv"], ch["current_ma"], shunt, positive))
+    elif msg_type == ref.ENV_GET:
+        print("%svalid         0x%02x (%s)"
+              % (indent, f["valid"], bits(f["valid"], ENV_VALID_NAMES)))
+        print("%stemperature   %.2f C" % (indent, f["temp_centi"] / 100.0))
+        print("%shumidity      %.2f %%" % (indent, f["rh_centi"] / 100.0))
+        print("%spressure      %d Pa (%.2f hPa)"
+              % (indent, f["pressure_pa"], f["pressure_pa"] / 100.0))
+    elif msg_type == ref.LPP_GET:
+        print("%s%d byte(s): %s" % (indent, len(f["lpp"]) // 2, f["lpp"]))
+        print_lpp(f["lpp"], indent)
     elif msg_type == ref.EV_ATTENTION:
         reason, detail = ATTENTION_REASON_NAMES.get(f["reason"], ("?", "?"))
         print("%sreason        %d (%s)" % (indent, f["reason"], reason))
@@ -380,6 +423,29 @@ def print_fields(msg_type, f, indent=""):
     else:
         for key in sorted(f):
             print("%s%-13s %s" % (indent, key, f[key]))
+
+
+def print_lpp(data, indent=""):
+    """The Cayenne-LPP bytes, read back field by field - which is what a phone's telemetry view of
+    this repeater shows (docs/link.md has the channel table)."""
+    raw = bytes.fromhex(data) if isinstance(data, str) else bytes(data)
+    if not raw:
+        print("%s(no fields)" % indent)
+        return
+    i = 0
+    while i + 2 <= len(raw):
+        channel, kind = raw[i], raw[i + 1]
+        i += 2
+        name, mult, signed, unit = LPP_TYPES.get(kind, (None, None, None, None))
+        if name is None or i + 2 > len(raw):
+            print("%schannel %d: type %d, which this tool cannot read" % (indent, channel, kind))
+            return
+        value = int.from_bytes(raw[i:i + 2], "big", signed=signed)
+        i += 2
+        print("%schannel %-2d %-10s %-11s %8.3f %s"
+              % (indent, channel, LPP_CHANNEL_NAMES.get(channel, "?"), name, value / mult, unit))
+    if i != len(raw):
+        print("%s%d byte(s) left over" % (indent, len(raw) - i))
 
 
 def report_events(link):
@@ -530,6 +596,41 @@ def cmd_cli(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+def cmd_power(link, args):
+    """The three INA3221 channels, each with the board's own shunt already applied (5.8)."""
+    f = link.request(ref.POWER_GET, {})
+    print("POWER_GET")
+    print_fields(ref.POWER_GET, f, indent="  ")
+    if f.get("status") != ref.OK:
+        return 1
+    if f["valid"] == 0:
+        print("nothing was read: the INA3221 at 0x42 is not answering (check the ribbon to the")
+        print("B-board and its always-on 3.3 V) - and the repeater keeps repeating regardless")
+    elif f["channels"][1]["current_ma"] < 0:
+        print("channel 2 is negative, so the pack is **discharging** (5.8)")
+    return 0
+
+
+def cmd_env(link, args):
+    """The air inside the enclosure (5.8)."""
+    f = link.request(ref.ENV_GET, {})
+    print("ENV_GET")
+    print_fields(ref.ENV_GET, f, indent="  ")
+    if f.get("status") != ref.OK:
+        return 1
+    if f["valid"] == 0:
+        print("nothing was read: no BME280 answered at 0x76 on this unit")
+    return 0
+
+
+def cmd_lpp(link, args):
+    """Exactly what a mesh telemetry request at those permissions would be answered with."""
+    f = link.request(ref.LPP_GET, {"perm_mask": args.mask})
+    print("LPP_GET perm_mask 0x%02x (%s)" % (args.mask, bits(args.mask, LPP_PERM_NAMES)))
+    print_fields(ref.LPP_GET, f, indent="  ")
+    return 0 if f.get("status") == ref.OK else 1
+
+
 def cmd_sleep(link, args):
     """Tell the node this end is going to sleep (8): it then sends no events but EV_BOOT and
     EV_ATTENTION, and says so in STATUS's flag bit 2, until the next request."""
@@ -609,6 +710,15 @@ def build_parser():
     c.add_argument("words", nargs=argparse.REMAINDER, metavar='"<command line>"',
                    help="the line, exactly as it would be typed on the USB console")
     c.set_defaults(run=cmd_cli)
+    subs.add_parser("power", help="the three INA3221 channels, shunts applied (5.8)").set_defaults(
+        run=cmd_power)
+    subs.add_parser("env", help="temperature, humidity and pressure in the box (5.8)").set_defaults(
+        run=cmd_env)
+    lpp = subs.add_parser("lpp", help="the Cayenne-LPP a mesh telemetry request would get (5.8)")
+    lpp.add_argument("mask", type=lambda v: int(v, 0), nargs="?", default=0x05,
+                     help="MeshCore's telemetry permissions: 0x01 base, 0x02 location, "
+                          "0x04 environment; the default 0x05 is what an admin asks with")
+    lpp.set_defaults(run=cmd_lpp)
     sleep = subs.add_parser("sleep", help="say this end is going to sleep (8)")
     sleep.add_argument("seconds", type=int, nargs="?", default=0,
                        help="how long, for the node's information; 0 (the default) is unknown")

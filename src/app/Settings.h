@@ -1,6 +1,6 @@
 // Our settings, as upstream's CLI sees them: `sensor list`, `sensor get <key>` and
-// `sensor set <key> <value>` (docs/ARCHITECTURE.md section 4, the table of four keys plus the
-// version string).
+// `sensor set <key> <value>` (docs/ARCHITECTURE.md section 4's table, plus the two battery
+// thresholds of phase 1's task 06).
 //
 // Why they are here and not only on the box link: these are the two ways into a unit that do not
 // need the Walter. The USB console at the field port is one; a **mesh admin** with a phone is the
@@ -42,6 +42,15 @@ struct SettingsHost {
   // refused it - the hourly limit, or one of that reason already pending - which is not an error
   // and is not an answer the CLI has a word for (see set() below).
   virtual bool raiseWalterWake() = 0;
+
+  // The battery thresholds of section 8's reasons 2 and 3, in millivolts: `power.low_mv` and
+  // `power.crit_mv` (src/power/BatteryWatch.h). A `set` is refused - and nothing changed - when
+  // the pair that would result is not one the firmware accepts; the board also writes the
+  // preferences file here, so that the value survives a restart.
+  virtual uint16_t batteryLowMv() const = 0;
+  virtual uint16_t batteryCritMv() const = 0;
+  virtual bool setBatteryLowMv(uint16_t mv) = 0;
+  virtual bool setBatteryCritMv(uint16_t mv) = 0;
 };
 
 class Settings {
@@ -53,19 +62,20 @@ class Settings {
   // own paging (`sensor list <start>`) counts in it.
   static int count();
   static const char* name(int i);
-  // The value of key i, or nullptr out of range. Valid until the next call: two of the five are
-  // formatted into a buffer of this object, which is how upstream's CLI uses them (it prints one
-  // and then asks for the next).
+  // The value of key i, or nullptr out of range. Valid until the next call: four of the seven
+  // are formatted into a buffer of this object, which is how upstream's CLI uses them (it prints
+  // one and then asks for the next).
   const char* value(int i);
 
   // `sensor set <name> <value>`. True when this table took it - upstream's CLI then answers
   // "ok"; false when the key is not ours or the value is not one this key accepts, and upstream's
   // CLI then answers "can't find custom var" for both, which is its only other word.
   //
-  // Four of the five keys are read-only and refuse every value. `walter.wake` accepts "1" and
+  // Four of the seven keys are read-only and refuse every value. `walter.wake` accepts "1" and
   // nothing else, and accepting it means "the machine was asked": whether an attention was
   // actually raised is the hourly limit's business, and `sensor get walter.wake` is where the
-  // answer to that is read.
+  // answer to that is read. `power.low_mv` and `power.crit_mv` take a decimal number of
+  // millivolts and refuse anything the thresholds would not accept.
   bool set(const char* name, const char* value);
 
  private:

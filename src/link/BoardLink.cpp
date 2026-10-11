@@ -4,6 +4,7 @@
 #include "../board/target.h"
 #include "../clock/BoardClock.h"
 #include "../clock/LinkClock.h"
+#include "../power/BoardPower.h"
 #include "SerialTransport.h"
 #include "attention/Attention.h"
 #include "session/Interfaces.h"
@@ -185,6 +186,13 @@ void linkBegin(MyMesh& mesh) {
   g_services.clock = &g_clock;          // => kCapTimePersist in HELLO's caps
   g_services.cli = &g_cli;              // => kCapCli
   g_services.attention = &g_attention;  // => kCapAttention
+  // One object is all three of these (src/power/LinkPower.h): POWER_GET, ENV_GET and LPP_GET all
+  // answer out of the readers' cache, so none of them touches the I2C bus. LPP_GET has no
+  // capability bit of its own - section 4 gates it on CLI - which is why the third line adds
+  // nothing to `caps`.
+  g_services.power = &power::linkPower();  // => kCapPower
+  g_services.env = &power::linkPower();    // => kCapEnv
+  g_services.lpp = &power::linkPower();
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 

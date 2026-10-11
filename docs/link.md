@@ -5,13 +5,15 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-What the firmware answers today (phase 1's tasks 03 to 05): `HELLO`, `PING`,
+What the firmware answers today (phase 1's tasks 03 to 06): `HELLO`, `PING`,
 `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`, `CLI`, `SLEEP_NOTICE`,
-and `EV_BOOT` and `EV_ATTENTION` as events. Everything else of the protocol
-answers `ERR_UNSUPPORTED` until the task that owns it lands — 06 telemetry,
-phase 2 the mesh client — and `HELLO`'s `caps` is `0x61` (`CLI`, `ATTENTION`,
-`TIME_PERSIST`) and nothing else for exactly the same reason: a capability is an
-interface that is there (`src/link/session/Interfaces.h`).
+`POWER_GET`, `ENV_GET`, `LPP_GET`, and `EV_BOOT` and `EV_ATTENTION` as events.
+Everything else of the protocol answers `ERR_UNSUPPORTED` until the task that
+owns it lands — phase 2's mesh client and observation ring — and `HELLO`'s
+`caps` is `0x67` (`CLI`, `POWER`, `ENV`, `ATTENTION`, `TIME_PERSIST`) and
+nothing else for exactly the same reason: a capability is an interface that is
+there (`src/link/session/Interfaces.h`). `LPP_GET` has no capability bit of its
+own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
 
@@ -50,6 +52,9 @@ python3 tools/linkcli.py --port COM7 time         # read the clock
 python3 tools/linkcli.py --port COM7 time set     # set it to this laptop's
 python3 tools/linkcli.py --port COM7 identity
 python3 tools/linkcli.py --port COM7 cli "get radio"   # a console command line
+python3 tools/linkcli.py --port COM7 power        # panel, battery and load
+python3 tools/linkcli.py --port COM7 env          # the air inside the box
+python3 tools/linkcli.py --port COM7 lpp          # what a phone's telemetry view gets
 python3 tools/linkcli.py --port COM7 sleep 600    # "this end is asleep for 10 min"
 python3 tools/linkcli.py --port COM7 listen 30    # the events, for 30 s
 python3 tools/linkcli.py --port COM7 reboot 0     # and then `listen` for EV_BOOT
@@ -64,7 +69,7 @@ HELLO
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0x61 (CLI, ATTENTION, TIME_PERSIST)
+  caps          0x67 (CLI, POWER, ENV, ATTENTION, TIME_PERSIST)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -77,8 +82,8 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` grows as the later tasks land: `0x61` today. Nothing else of this page changes with
-  it.
+- `caps` grows as the later tasks land: `0x67` today, and phase 2 adds
+  `MESH_CLIENT` and `OBSERVATIONS`. Nothing else of this page changes with it.
 
 `ping` proves the main loop is turning, which a reset line cannot: it echoes
 the nonce and reports the uptime. `status` is the one to read when something is
@@ -191,7 +196,7 @@ CLI sensor list
 
 ### Our settings, from here, from the console and from the mesh
 
-The five keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
+The seven keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
 which means three ways to reach them: `cli "sensor get <key>"` over this link,
 the same line typed on the USB console, and — for a **mesh admin**, logged in
 with the admin password from a phone — the same line as a message. Upstream's
@@ -205,10 +210,22 @@ through the interpreter only for a client whose ACL entry is admin).
 | `link.errors` | frames this node's receiver dropped since boot | — |
 | `walter.seen` | seconds since the last valid request on the link, or `never` | — |
 | `clock.state` | `unset`, `restored`, `set` or `rtc` | — |
+| `power.low_mv` | the *battery low* threshold in millivolts (3500 by default) | a decimal number of millivolts |
+| `power.crit_mv` | the *battery critical* threshold (3300 by default) | the same |
 
 A `set` of any other key — or of `walter.wake` with any value but `1` — is
 answered `can't find custom var`, which is upstream's wording and its only other
-word.
+word. The two thresholds are refused the same way when the value is not a plain
+decimal number, when it is outside 2500–4300 mV, or when `low` would not sit
+more than 100 mV above `crit`; a `set` that is accepted is written to a small
+file of this firmware's own (`/power`) and survives a restart.
+
+**Seven keys no longer fit one `sensor list`.** Upstream stops a listing once it
+has written 134 bytes into a 160-byte reply, so a freshly booted node prints the
+first five and `... next:5`, and **`cli "sensor list 5"`** is how the two
+thresholds are read; a node whose counters have grown wide prints four and
+`... next:4`. `sensor get <key>` always works whatever the paging does, and
+`tasks/phase-1/reports/06.md` has the arithmetic.
 
 ## 2c. Attention, and a Walter that sleeps
 
@@ -267,8 +284,12 @@ EV_ATTENTION seq 8
   asleep when the node restarted, and nothing in this board's RAM survives a
   reset to say whether it was (`tasks/phase-1/reports/04.md`). `EV_BOOT` tells
   an awake Walter everything that event would.
-- Reasons 2, 3, 5 and 6 arrive with tasks 06 and phase 2; the machine they go
-  through is this one.
+- **Reasons 2 and 3 are the battery**, raised from channel 2's bus voltage with
+  hysteresis and a minimum time below, so that a transmit burst's sag raises
+  nothing: the voltage has to stay under the threshold for a **minute**.
+  `detail` is the millivolts. The thresholds are `power.low_mv` and
+  `power.crit_mv` above, and §2d has the rest. Reasons 5 and 6 arrive with
+  phase 2; the machine they go through is this one.
 
 **The out-of-band way in.** A unit whose Walter is asleep can be woken by
 anything that can reach the repeater on the mesh:
@@ -282,6 +303,90 @@ anything that can reach the repeater on the mesh:
 EV_ATTENTION reason 4 (a person asked for the Walter), repeat 0 of 10
 ```
 
+## 2d. Power and environment
+
+The unit knows its own power: what the panel gives, what the battery takes or
+gives, what the load draws — **each with its own shunt** — and the temperature,
+humidity and pressure inside the enclosure. Stock MeshCore applies one shunt
+value (0.1 Ω) to all three INA3221 channels; on this hardware that is right for
+channel 1 and wrong by a factor of five and two for the others, and it is the
+reason the unit runs custom firmware at all (the hardware repository's
+`CURRENT-SENSE.md` §4).
+
+```
+$ python3 tools/linkcli.py --port COM7 power
+POWER_GET
+  valid         0x07 (channel 1, channel 2, channel 3)
+  1 panel      18096 mV     +120 mA   100 mohm, + = into the charger
+  2 battery     4008 mV      -52 mA   20 mohm, + = charging
+  3 load        3984 mV      +85 mA   50 mohm, + = drawn
+channel 2 is negative, so the pack is **discharging** (5.8)
+
+$ python3 tools/linkcli.py --port COM7 env
+ENV_GET
+  valid         0x07 (temperature, humidity, pressure)
+  temperature   -3.50 C
+  humidity      81.25 %
+  pressure      101325 Pa (1013.25 hPa)
+```
+
+- **Read the sign first, then the size.** Channel 2 is the only one that goes
+  negative, and it means the pack is being drained; positive is charging.
+  Channels 1 and 3 are positive in normal service.
+- **A channel whose `valid` bit is clear reads 0** — a missing reading, never a
+  stale one. With the B-board unplugged, `power` answers `valid 0` and the
+  repeater keeps repeating: nothing on this bus can hold up forwarding.
+- **No request ever touches the I2C bus.** The three channels are swept once a
+  second and the BME280 every five, both out of the firmware's own `loop()`;
+  every request answers out of that cache. A sensor that stops answering is a
+  missing reading and the firmware leaves it alone for five seconds before
+  asking again (`src/power/PowerReader.h`).
+- The battery voltage a `status` reports over the mesh, and the one upstream's
+  own power management reads, is **channel 2's bus voltage** — not the WisBlock
+  ADC pin, which is not wired on this adapter.
+
+### The LPP channel table
+
+`lpp [mask]` answers with exactly the Cayenne-LPP bytes a mesh telemetry request
+at those permissions would get — which is how the Walter reports what a phone
+was told. **These channel numbers are chosen once and never renumbered**:
+
+| LPP channel | What | Fields | Whose |
+|---:|---|---|---|
+| 1 | the node itself | battery voltage, MCU temperature | upstream's (`TELEM_CHANNEL_SELF`) |
+| 2 | panel | voltage, current | ours |
+| 3 | battery | voltage, current | ours |
+| 4 | total load | voltage, current | ours |
+| 5 | the enclosure | temperature | ours |
+
+```
+$ python3 tools/linkcli.py --port COM7 lpp
+LPP_GET perm_mask 0x05 (base, environment)
+  36 byte(s): 017401900274071102750078037401900375ffcc0474018e047500550567ffdd016700d4
+  channel 1  self       voltage        4.000 V
+  channel 2  panel      voltage       18.090 V
+  channel 2  panel      current        0.120 A
+  channel 3  battery    voltage        4.000 V
+  channel 3  battery    current       -0.052 A
+  channel 4  load       voltage        3.980 V
+  channel 4  load       current        0.085 A
+  channel 5  enclosure  temperature   -3.500 C
+  channel 1  self       temperature   21.200 C
+```
+
+- Channels 2 to 5 need the **environment** permission (`0x04`), which is the
+  gate upstream's own sensor manager uses. `lpp 1` — base alone, which is what a
+  guest gets — is channel 1 and nothing else.
+- **The enclosure's humidity and pressure are not in the LPP.** CayenneLPP
+  1.6.1's own type gate does not list relative humidity or barometric pressure,
+  so `addRelativeHumidity` and `addBarometricPressure` write nothing at all —
+  upstream's library, not our choice. `ENV_GET` on this link carries all three,
+  which is where to read them until that is fixed upstream
+  (`tasks/phase-1/reports/06.md`).
+- A voltage is 0.01 V per step and a current 0.001 A, both truncated towards
+  zero, so `4008 mV` reads back as `4.00 V`. That is Cayenne-LPP's resolution
+  and it is the same on the mesh.
+
 ## 3. When it says nothing
 
 - `linkcli.py` retries exactly as the protocol says: the same frame, the same
@@ -294,6 +399,10 @@ EV_ATTENTION reason 4 (a person asked for the Walter), repeat 0 of 10
   but a power cycle).
 - **`dropped a frame (crc)`** on the way to the laptop means the line is noisy:
   check the ground, and that the dongle really is 3.3 V.
+- **`power` answering `valid 0`** is the INA3221 not answering, not a flat
+  battery: check the ribbon to the B-board and its always-on 3.3 V (the part
+  stays powered when the LoRa rail is killed). `env` answering `valid 0` is a
+  unit with no BME280 fitted, or one whose A-board rail is down.
 - `link.errors` on the USB console — or `link_errors` in `status` — is the same
   count in the other direction, the frames the *node* refused. It should stay
   at 0 on a good link, and it is also readable over the mesh by an admin
@@ -320,16 +429,18 @@ docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 ```
 
 That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
-`time set`, `cli`, `sleep`, an attention and `reboot` against it, and times one
-pass of the link. It is not part of `tools/verify.ps1`: it needs a host
+`time set`, `cli`, `power`, `env`, `lpp`, `sleep`, an attention and `reboot`
+against it, and times one pass of the link. It is not part of `tools/verify.ps1`: it needs a host
 compiler, and what it proves about the session itself is already a native test
 (`test/test_link_session`).
 
-Three things in that program are the firmware's own code and not a stub - the
-clock keeper, the attention machine and the settings table - so `cli
-"sensor set walter.wake 1"` through the pipe really does raise an attention, and
-`--wake` raises one at startup so that `listen` shows the whole sequence with
-nothing but a laptop.
+Four things in that program are the firmware's own code and not a stub - the
+clock keeper, the attention machine, the settings table and the power and
+environment readers - so `cli "sensor set walter.wake 1"` through the pipe
+really does raise an attention, `--wake` raises one at startup so that `listen`
+shows the whole sequence with nothing but a laptop, and `power`, `env` and `lpp`
+go through the firmware's own conversion and its own cache over a fake I2C bus
+(`--drop-ina` is the "unplug the B-board" case).
 
 ## 5. Inside the firmware
 
@@ -340,6 +451,7 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 | codec | `src/link/codec/` | CRC-16/CCITT-FALSE, COBS, packets, frames, one function per message. Portable. |
 | session | `src/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
 | attention | `src/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
+| power | `src/power/` | the INA3221's registers and per-channel shunts, the BME280, the two readers' schedules, the battery thresholds and the Cayenne-LPP. Portable but for `BoardPower.cpp`. |
 | transport | `src/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
 | the board's half | `src/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
 

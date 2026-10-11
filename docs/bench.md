@@ -224,4 +224,63 @@ mesh admin.
 
 ## 5. Power
 
-(phase 1, task 06)
+The hardware repository's `hardware/pcb/CURRENT-SENSE.md` §6 is the fuller
+procedure for this block — the zero-current offsets, the known-current check at
+0.1/0.5/1.0/2.0 A, the charge profile, the "dead-battery dawn" case and the
+thermal check. These are the **firmware's** lines on top of it, and the first
+of them is the exit criterion of the whole phase.
+
+- [ ] **p1-06** **`linkcli.py power` against a multimeter — sign first, then
+  size.** With the bench supply at 18–21 V standing in for the panel:
+  **channel 1** positive and within a few percent of a DMM in series with the
+  panel lead; **channel 2 positive while charging** and **negative with the
+  panel switched off**; **channel 3** equal to the two radios' draw (expect
+  20–60 mA idle, and a visible step when the Walter's modem attaches). Channel
+  1's LSB is 0.4 mA, channel 2's is 2 mA and channel 3's is 0.8 mA, so do not
+  chase the last milliamp — what matters is that none of the three reads 2×,
+  2.5× or 5× out, which is what a single shunt constant would give
+  (`CURRENT-SENSE.md` §4).
+- [ ] **p1-06** **The same three numbers in a phone's telemetry view** of the
+  repeater, on LPP channels 2, 3 and 4 (`docs/link.md` §2d has the table), and
+  **the battery voltage in its `status`** — which is channel 2's bus voltage and
+  not the unconnected ADC pin. `linkcli.py lpp` and the phone must agree byte
+  for byte; that equality is a native test over the same field list, but only a
+  radio proves the mesh half of it. **No phone has ever read this node's
+  telemetry.**
+- [ ] **p1-06** **`linkcli.py env` against a thermometer** in the enclosure, and
+  the humidity and pressure against anything trustworthy (a weather station's
+  sea-level pressure minus about 12 Pa per 100 m of altitude). The temperature
+  must also appear on **LPP channel 5**; the humidity and pressure deliberately
+  do not, because CayenneLPP 1.6.1 cannot encode them (`reports/06.md`).
+- [ ] **p1-06** **The battery thresholds, with the simulator.** Step the pack
+  below **3500 mV** and hold it: nothing for the first minute, then
+  `EV_ATTENTION` **reason 2** with `detail` the millivolts. Below **3300 mV**,
+  held a minute: **reason 3**. A dip of a few seconds — or a transmit burst —
+  raises nothing. Coming back needs 100 mV of hysteresis *and* the same minute.
+  A second reason 2 inside the hour raises nothing (the machine's limit, §2c).
+- [ ] **p1-06** **The thresholds are settable and survive a restart.**
+  `cli "sensor set power.low_mv 3600"` answers `ok`, `cli "sensor list 5"` shows
+  it, `reboot 0` — and it is still 3600 after the boot. `sensor set
+  power.low_mv 3350` is refused (`can't find custom var`) because it would sit
+  less than 100 mV above `crit`, and so are `2400` and `4400`.
+- [ ] **p1-06** **With the INA3221's bus unplugged, the repeater keeps
+  repeating** and `power` answers `valid 0` with every number 0. Nothing on the
+  console hangs, `ping` still answers inside its 250 ms, and a packet forwarded
+  during the unplug is forwarded normally. **Then plug it back in**: the three
+  channels come back within about five seconds (the reader's back-off) with no
+  restart. Do the same with the A-board's BME280: `env` answers `valid 0` and
+  `power` is unaffected.
+- [ ] **p1-06** **`sensor list` really does page.** `cli "sensor list"` says
+  `7 vars` and prints the first five with `... next:5`; `cli "sensor list 5"`
+  prints `power.low_mv` and `power.crit_mv`. On a release image (a longer
+  `fw.version`) the first page is two bytes over the window and comes back cut
+  at 159 characters — expected, counted, and the reason `sensor get <key>` is
+  the way to read one key (`reports/06.md`).
+- [ ] **p1-06** **The boot-voltage question, which is the reviewer's.** Upstream
+  will not boot a node whose battery reads between 1000 and 3300 mV
+  (`PWRMGT_VOLTAGE_BOOTLOCK`), and on this board the reading it checks is 0 at
+  that moment, so the protection never fires — `reports/06.md` says why and what
+  enabling it would cost. Confirm on the bench that a node **does** come up with
+  the pack at 3.2 V, which is the behaviour this firmware chose, and read
+  `cli "get pwrmgt.bootmv"` (it says `0 mV`) and `cli "get pwrmgt.bootreason"`
+  while there.
