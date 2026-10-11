@@ -28,7 +28,13 @@ cannot drift from the specification without the specification moving. It identif
 `--pipe <program>` puts a program's stdin and stdout where the serial port would be, which is how
 the tool is exercised with no board: `tools/linkloop/` is the firmware's own session behind a pipe.
 
-Later tasks add their own sub-commands here (phase 2, the mesh client).
+    python3 tools/linkcli.py --port COM7 job begin <64-hex-key> --path aabb,ccdd
+    python3 tools/linkcli.py --port COM7 path
+    python3 tools/linkcli.py --port COM7 job end
+
+The mesh client's job (phase 2's task 01): name a peer and a path, read the path back, end the
+job. Nothing is sent on the mesh yet - that is task 02's five sends. Later tasks add the rest of
+their own sub-commands here.
 Requires `pyserial` for `--port` and nothing at all for `--pipe` or `--help`.
 """
 
@@ -75,6 +81,8 @@ STATUS_FLAG_NAMES = [
     (0x0008, "adverts held"), (0x0010, "radio up"),
 ]
 TIME_SOURCE_NAMES = {1: "the cellular network", 2: "the server", 3: "a person at a console"}
+# A path's path_mode (LINK-PROTOCOL.md 6.1).
+PATH_MODE_NAMES = {0: "none (the next send floods)", 1: "direct (zero hops)", 2: "hops"}
 # POWER_GET's three channels on the standard B-board, what a positive current means on each, and
 # the shunt behind it (LINK-PROTOCOL.md 5.8; the hardware repository's CURRENT-SENSE.md).
 POWER_CHANNEL_NAMES = [
@@ -352,6 +360,13 @@ def print_fields(msg_type, f, indent=""):
         # "When status is not OK the payload is that one byte and nothing else" (section 3), and
         # these five have no body when it is OK either.
         print('%sstatus        0 (OK)' % indent)
+    elif msg_type == ref.PATH_GET:
+        print("%spath_mode     %d (%s)"
+              % (indent, f["path_mode"], PATH_MODE_NAMES.get(f["path_mode"], "?")))
+        if f["path_mode"] == 2:
+            print("%shash_size     %d" % (indent, f["hash_size"]))
+            print("%shop_count     %d" % (indent, f["hop_count"]))
+            print("%shashes        %s" % (indent, f["hashes"]))
     elif msg_type == ref.HELLO:
         print_hello_body(f, indent)
     elif msg_type == ref.PING:
@@ -645,6 +660,65 @@ def cmd_sleep(link, args):
     return 0
 
 
+def _parse_path(args):
+    """The path fields a JOB_BEGIN or PATH_SET carries, from --direct / --path (6.1)."""
+    if args.direct and args.path:
+        raise SystemExit("give --direct or --path, not both")
+    if args.direct:
+        return {"path_mode": ref.PATH_DIRECT}
+    if not args.path:
+        return {"path_mode": ref.PATH_NONE}  # flood
+    hops = [h.strip() for h in args.path.split(",") if h.strip()]
+    if not 1 <= len(hops) <= 63:
+        raise SystemExit("a path is 1 to 63 hops")
+    sizes = {len(h) // 2 for h in hops}
+    if len(sizes) != 1 or any(len(h) % 2 for h in hops):
+        raise SystemExit("every hop is the same number of whole bytes of hex")
+    size = sizes.pop()
+    if not 1 <= size <= 3:
+        raise SystemExit("a hop hash is 1 to 3 bytes")
+    return {
+        "path_mode": ref.PATH_HOPS,
+        "hash_size": size,
+        "hop_count": len(hops),
+        "hashes": "".join(hops),
+    }
+
+
+def cmd_job(link, args):
+    """Begin or end the mesh client's job (6.1): one peer, one path, nothing on the air yet."""
+    if args.what == "end":
+        f = link.request(ref.JOB_END, {})
+        print("JOB_END")
+        print_fields(ref.JOB_END, f, indent="  ")
+        return 0 if f.get("status") == ref.OK else 1
+
+    key = (args.key or "").lower()
+    if len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+        print("job begin needs the peer's 64-hex-character public key", file=sys.stderr)
+        return 2
+    fields = {"pubkey": key}
+    fields.update(_parse_path(args))
+    f = link.request(ref.JOB_BEGIN, fields)
+    print("JOB_BEGIN %s, path %s"
+          % (key[:8] + "...", PATH_MODE_NAMES.get(fields["path_mode"], "?")))
+    print_fields(ref.JOB_BEGIN, f, indent="  ")
+    if f.get("status") == ref.OK:
+        print("the peer is set; `path` reads the route, and task 02's sends put one packet on the")
+        print("air each (nothing is transmitted yet)")
+    return 0 if f.get("status") == ref.OK else 1
+
+
+def cmd_path(link, args):
+    """The path the job holds now (6.1). A reply that returned a path changes it (task 02)."""
+    f = link.request(ref.PATH_GET, {})
+    print("PATH_GET")
+    print_fields(ref.PATH_GET, f, indent="  ")
+    if f.get("status") == ref.ERR_STATE:
+        print("no job: `job begin <key>` first", file=sys.stderr)
+    return 0 if f.get("status") == ref.OK else 1
+
+
 def cmd_listen(link, args):
     if args.seconds:
         print("listening for %d s" % args.seconds)
@@ -723,6 +797,16 @@ def build_parser():
     sleep.add_argument("seconds", type=int, nargs="?", default=0,
                        help="how long, for the node's information; 0 (the default) is unknown")
     sleep.set_defaults(run=cmd_sleep)
+    job = subs.add_parser("job", help="begin or end the mesh client's job (6.1)")
+    job.add_argument("what", choices=["begin", "end"])
+    job.add_argument("key", nargs="?", help="the peer's 64-hex-character public key (begin)")
+    job.add_argument("--direct", action="store_true",
+                     help="the peer is a direct neighbour: zero hops, sent direct")
+    job.add_argument("--path", metavar="aabb,ccdd",
+                     help="the hops to the peer, comma-separated hex, each 1 to 3 bytes; "
+                          "the default with neither flag is a flood")
+    job.set_defaults(run=cmd_job)
+    subs.add_parser("path", help="the path the job holds now (6.1)").set_defaults(run=cmd_path)
     listen = subs.add_parser("listen", help="print the events the node sends")
     listen.add_argument("seconds", type=int, nargs="?", default=0,
                         help="how long; 0 (the default) is for ever")

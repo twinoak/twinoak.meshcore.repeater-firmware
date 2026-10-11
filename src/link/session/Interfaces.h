@@ -160,12 +160,32 @@ struct LppAccess {
   virtual size_t readLpp(uint8_t perm_mask, uint8_t* out, size_t cap) = 0;
 };
 
-// The mesh client (phase 2). Present => kCapMeshClient.
+// The mesh client (phase 2; src/meshclient/LinkMeshClient.h implements it over the job of
+// src/meshclient/Job.h). Present => kCapMeshClient.
+//
+// The four job requests of section 6.1 are here; the five sends, the reply and the counters of
+// 6.2 to 6.4 are task 02's and arrive on this same interface. Every method that answers a request
+// returns one of Numbers.h's Status values, because which refusal a request gets - ERR_STATE with
+// no job, ERR_MALFORMED for a path 6.1 does not allow - is the job's rule and not the session's.
 struct MeshClientAccess {
   virtual ~MeshClientAccess() {}
 
   virtual bool jobBegun() const = 0;      // STATUS flag bit 0
   virtual bool replyAwaited() const = 0;  // STATUS flag bit 1
+
+  // JOB_BEGIN: ends any job in progress, then makes this key the peer and this path the job's.
+  virtual uint8_t beginJob(const JobBegin& m, uint32_t now_ms) = 0;
+  // JOB_END: forgets the peer, the path and any awaited reply, and wipes the shared secret.
+  virtual void endJob() = 0;
+  // PATH_SET: replaces the job's path (mode kPathNone forgets it). kErrState with no job.
+  virtual uint8_t setPath(const Path& p) = 0;
+  // PATH_GET: the path the job holds now, as a view into the client's own storage that stays
+  // valid until the next request. kErrState with no job.
+  virtual uint8_t getPath(Path& out) = 0;
+  // A valid request arrived on the link, of any type, a retry included. "The RAK also ends a job
+  // by itself when 120 seconds pass with no request on the link while a job is begun" (6.1):
+  // this is what restarts that count.
+  virtual void noteLinkRequest(uint32_t now_ms) = 0;
 };
 
 // The observation ring (phase 2). Present => kCapObservations.

@@ -5,15 +5,17 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-What the firmware answers today (phase 1's tasks 03 to 06): `HELLO`, `PING`,
-`STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`, `CLI`, `SLEEP_NOTICE`,
-`POWER_GET`, `ENV_GET`, `LPP_GET`, and `EV_BOOT` and `EV_ATTENTION` as events.
-Everything else of the protocol answers `ERR_UNSUPPORTED` until the task that
-owns it lands — phase 2's mesh client and observation ring — and `HELLO`'s
-`caps` is `0x67` (`CLI`, `POWER`, `ENV`, `ATTENTION`, `TIME_PERSIST`) and
-nothing else for exactly the same reason: a capability is an interface that is
-there (`src/link/session/Interfaces.h`). `LPP_GET` has no capability bit of its
-own: §4 gates it on `CLI`.
+What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's task
+01): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`,
+`CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job requests
+`JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, and `EV_BOOT` and
+`EV_ATTENTION` as events. Everything else of the protocol answers
+`ERR_UNSUPPORTED` until the task that owns it lands — the five sends, the reply
+and the counters of phase 2's task 02, the observation ring of its task 03 —
+and `HELLO`'s `caps` is `0x6f` (`CLI`, `POWER`, `ENV`, `MESH_CLIENT`,
+`ATTENTION`, `TIME_PERSIST`) and nothing else for exactly the same reason: a
+capability is an interface that is there (`src/link/session/Interfaces.h`).
+`LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
 
@@ -58,6 +60,9 @@ python3 tools/linkcli.py --port COM7 lpp          # what a phone's telemetry vie
 python3 tools/linkcli.py --port COM7 sleep 600    # "this end is asleep for 10 min"
 python3 tools/linkcli.py --port COM7 listen 30    # the events, for 30 s
 python3 tools/linkcli.py --port COM7 reboot 0     # and then `listen` for EV_BOOT
+python3 tools/linkcli.py --port COM7 job begin <key> --path aabb,ccdd  # a peer and a route
+python3 tools/linkcli.py --port COM7 path         # the route the job holds
+python3 tools/linkcli.py --port COM7 job end      # forget the peer
 ```
 
 `hello` is the first request of a session and may be repeated at any time. It
@@ -69,7 +74,7 @@ HELLO
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0x67 (CLI, POWER, ENV, ATTENTION, TIME_PERSIST)
+  caps          0x6f (CLI, POWER, ENV, MESH_CLIENT, ATTENTION, TIME_PERSIST)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -82,8 +87,8 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` grows as the later tasks land: `0x67` today, and phase 2 adds
-  `MESH_CLIENT` and `OBSERVATIONS`. Nothing else of this page changes with it.
+- `caps` grows as the later tasks land: `0x6f` today, and phase 2's task 03
+  adds `OBSERVATIONS`. Nothing else of this page changes with it.
 
 `ping` proves the main loop is turning, which a reset line cannot: it echoes
 the nonce and reports the uptime. `status` is the one to read when something is
@@ -387,6 +392,50 @@ LPP_GET perm_mask 0x05 (base, environment)
   zero, so `4008 mV` reads back as `4.00 V`. That is Cayenne-LPP's resolution
   and it is the same on the mesh.
 
+## 2e. The mesh client's job
+
+A unit is one MeshCore node with one identity (`spec/SYSTEM.md` S-1). With
+`MESH_CLIENT`, the link lends that identity to the Walter for the handful of
+exchanges an exit node makes with *another* repeater — a login, a request, a
+CLI line, a path discovery, a trace. Phase 2's task 01 is the state those
+exchanges hang on: a **job** with one peer and a path. The sends themselves are
+task 02; nothing is transmitted on the mesh yet.
+
+```
+$ python3 tools/linkcli.py --port COM7 job begin a1b2…8f90 --path a1b2,7f3a
+JOB_BEGIN a1b2c3d4..., path hops
+  status        0 (OK)
+
+$ python3 tools/linkcli.py --port COM7 path
+PATH_GET
+  path_mode     2 (hops)
+  hash_size     2
+  hop_count     2
+  hashes        a1b27f3a
+```
+
+- **One peer at a time.** `job begin <key>` ends any job in progress first,
+  then makes that 64-hex-character key the peer. A second `job begin` ends the
+  first. `job end` forgets the peer, the path and any awaited reply, and wipes
+  the shared secret.
+- **The path** is how the next send goes out: `--path aabb,ccdd` is the hops to
+  the peer (comma-separated hex, each hop 1 to 3 bytes); `--direct` is a direct
+  neighbour, zero hops; and neither flag is a flood. `path` reads back the route
+  the job holds now — which, once task 02 lands, is also the route a flooded
+  send's reply came back by. `PATH_SET` replaces it, and `path_mode` 0 forgets
+  it; `PATH_SET` with no job is `ERR_STATE`, and a path the protocol does not
+  allow (a hash outside 1–3 bytes, more than 63 hops or 64 bytes, a hop count
+  that disagrees with the bytes) is `ERR_MALFORMED` and changes nothing.
+- **`STATUS`'s flag bit 0** (`job begun`) is on while a job is; bit 1 (`reply
+  awaited`) is task 02's.
+- **The job ends itself after 120 seconds of link silence** while one is begun
+  — a Walter that crashed must not leave a peer open. Any valid request on the
+  link restarts that count.
+- **Only the job's peer is ever decrypted for the client, and only while a
+  reply is awaited** (`docs/ARCHITECTURE.md` §2). Outside that window nothing of
+  the repeater's own business is disturbed: the four peer overrides are
+  upstream's own, untouched.
+
 ## 3. When it says nothing
 
 - `linkcli.py` retries exactly as the protocol says: the same frame, the same
@@ -434,13 +483,16 @@ against it, and times one pass of the link. It is not part of `tools/verify.ps1`
 compiler, and what it proves about the session itself is already a native test
 (`test/test_link_session`).
 
-Four things in that program are the firmware's own code and not a stub - the
-clock keeper, the attention machine, the settings table and the power and
-environment readers - so `cli "sensor set walter.wake 1"` through the pipe
-really does raise an attention, `--wake` raises one at startup so that `listen`
-shows the whole sequence with nothing but a laptop, and `power`, `env` and `lpp`
-go through the firmware's own conversion and its own cache over a fake I2C bus
-(`--drop-ina` is the "unplug the B-board" case).
+Five things in that program are the firmware's own code and not a stub - the
+clock keeper, the attention machine, the settings table, the power and
+environment readers and the mesh client's job - so `cli "sensor set walter.wake
+1"` through the pipe really does raise an attention, `--wake` raises one at
+startup so that `listen` shows the whole sequence with nothing but a laptop,
+`power`, `env` and `lpp` go through the firmware's own conversion and its own
+cache over a fake I2C bus (`--drop-ina` is the "unplug the B-board" case), and
+`--job` begins a job at startup so that `path` reads a route back through the
+real `Job` (a job is per-boot RAM, so each one-shot `linkcli` invocation is
+otherwise a fresh boot with no job).
 
 ## 5. Inside the firmware
 
@@ -452,6 +504,7 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 | session | `src/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
 | attention | `src/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
 | power | `src/power/` | the INA3221's registers and per-channel shunts, the BME280, the two readers' schedules, the battery thresholds and the Cayenne-LPP. Portable but for `BoardPower.cpp`. |
+| mesh client | `src/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule — and `PeerSlot`, the index arithmetic of the extra peer. Portable; the peer overrides are in `src/app/TwinOakMesh.cpp`. |
 | transport | `src/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
 | the board's half | `src/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
 

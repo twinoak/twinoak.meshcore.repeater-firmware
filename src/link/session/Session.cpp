@@ -58,6 +58,10 @@ void Session::poll(uint32_t now_ms) {
   // repeats (section 8). A retry counts - it is the same Walter saying the same thing - which is
   // why this is here and not inside execute().
   if (s_.attention != nullptr) s_.attention->noteRequest(pkt.type, now_ms);
+  // And it restarts the mesh client's silence count (section 6.1: a job is ended by the RAK
+  // after 120 seconds with no request on the link). A retry counts here too, for the same
+  // reason, which is why this is above the memory check and not inside execute().
+  if (s_.mesh != nullptr) s_.mesh->noteLinkRequest(now_ms);
 
   // Section 3: the same (type, seq) is not executed again; the remembered response is sent again.
   if (have_memory_ && mem_type_ == pkt.type && mem_seq_ == pkt.seq) {
@@ -347,6 +351,70 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       // exactly this moment (src/link/attention/Attention.cpp).
       s_.attention->sleepNotice(m.expect_back_s, now_ms);
       n = encodeStatus(kOk, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgJobBegin: {
+      // Section 6.1: ends any job in progress first, then makes this key the peer. The path is
+      // judged by the codec against 6.1's bounds (decodeJobBegin), so a path that is not legal
+      // is kErrMalformed here and the client is never asked - nothing changes, the job in
+      // progress included.
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      JobBegin m;
+      if (!decodeJobBegin(pkt.body, m)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      n = encodeStatus(s_.mesh->beginJob(m, now_ms), resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgJobEnd: {
+      // Section 6.1: the peer, the path, any awaited or held reply, and the shared secret - gone.
+      // With no job it is still kOk: there is nothing to refuse.
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      s_.mesh->endJob();
+      n = encodeStatus(kOk, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgPathSet: {
+      // Section 6.1: the job's path replaced (mode 0 forgets it); kErrState with no job; a path
+      // that is not legal is kErrMalformed and changes nothing - the codec refuses it before the
+      // client is asked, as for JOB_BEGIN.
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      Path p;
+      if (!decodePathSet(pkt.body, p)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      n = encodeStatus(s_.mesh->setPath(p), resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgPathGet: {
+      // Section 6.1: the path the job holds now - which, once task 02 lands, is also the route a
+      // flooded send's reply came back by.
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      Path p;
+      const uint8_t status = s_.mesh->getPath(p);
+      if (status != kOk) {
+        n = encodeStatus(status, resp_, sizeof(resp_));
+        break;
+      }
+      n = encodePathGetResponse(p, resp_, sizeof(resp_));
       break;
     }
 

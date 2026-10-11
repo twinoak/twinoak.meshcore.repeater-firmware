@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine,
-# settings table and power/environment readers behind a pipe) and drives tools/linkcli.py against
-# it: hello, ping, status, identity, time, time set, cli, power, env, lpp, sleep, an attention and
-# reboot, with no board and no serial port, plus the timed worst-case pass.
+# settings table, power/environment readers and mesh-client job behind a pipe) and drives
+# tools/linkcli.py against it: hello, ping, status, identity, time, time set, cli, power, env,
+# lpp, the job and its path, sleep, an attention and reboot, with no board and no serial port,
+# plus the timed worst-case pass.
 #
 # It needs a host C++ compiler. On Windows that is the container tasks/RUNBOOK.md section 2 names,
 # from the repository root:
@@ -32,6 +33,7 @@ echo "== build"
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/link/codec/*.cpp src/link/session/*.cpp \
   src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp \
+  src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp \
   src/power/BatteryWatch.cpp src/power/Environment.cpp src/power/Ina3221.cpp \
   src/power/LinkPower.cpp src/power/PowerReader.cpp src/power/Prefs.cpp \
   src/power/Telemetry.cpp
@@ -138,6 +140,18 @@ $cli lpp 1
 echo
 echo "== power with the B-board unplugged: valid 0, every channel 0, and the node still answers"
 python3 tools/linkcli.py --pipe "$out/linkloop --drop-ina" power
+
+echo
+echo "== the mesh client's job (6.1): begin a peer and a path, answered OK, and end it. Nothing"
+echo "   goes on the air - that is task 02's five sends; this is the state and the path codec."
+$cli job begin a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90 --path a1b2,7f3a
+$cli job end
+
+echo
+echo "== a job is per-boot RAM, so --job begins one at startup and this one invocation reads the"
+echo "   route back and sees STATUS's job bit (0x0001) set - what a board holds across one boot"
+python3 tools/linkcli.py --pipe "$out/linkloop --job" path
+python3 tools/linkcli.py --pipe "$out/linkloop --job" status
 
 echo
 echo "== sensor set walter.wake 1 - what a mesh admin sends - raises attention reason 4"

@@ -43,6 +43,8 @@
 #include "link/session/Interfaces.h"
 #include "link/session/ResetReason.h"
 #include "link/session/Session.h"
+#include "meshclient/Job.h"
+#include "meshclient/LinkMeshClient.h"
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -328,9 +330,27 @@ class FakeMeshClient : public MeshClientAccess {
  public:
   bool job = false;
   bool awaiting = false;
+  int link_requests = 0;
 
   bool jobBegun() const override { return job; }
   bool replyAwaited() const override { return awaiting; }
+
+  // The generic sweep only reads the two bits above (for STATUS); the four job requests are
+  // driven against the real src/meshclient/ further down, so these answer plainly.
+  uint8_t beginJob(const JobBegin&, uint32_t) override {
+    job = true;
+    return kOk;
+  }
+  void endJob() override {
+    job = false;
+    awaiting = false;
+  }
+  uint8_t setPath(const Path&) override { return job ? kOk : kErrState; }
+  uint8_t getPath(Path& out) override {
+    out = Path();
+    return job ? kOk : kErrState;
+  }
+  void noteLinkRequest(uint32_t) override { link_requests++; }
 };
 
 class FakeObservations : public ObservationAccess {
@@ -1609,6 +1629,197 @@ TEST(Telemetry, ARetriedRequestDoesNotAskTheReadersAgain) {
   ASSERT_EQ(2u, h.sent.size());
   EXPECT_EQ(first, h.lastFrame()) << "the remembered response, to the byte";
   EXPECT_EQ(1, h.power.calls);
+}
+
+// ----------------------------------------------------------------------------- the mesh client
+
+// The four job requests of section 6.1 driven against the **real** src/meshclient/ through a real
+// Session: the Harness's FakeMeshClient is replaced with a LinkMeshClient over a real Job, so
+// JOB_BEGIN, JOB_END, PATH_SET and PATH_GET are answered by the code the board runs and held
+// against spec/fixtures/link/link-v1.json byte for byte. (The peer overrides of TwinOakMesh need
+// MeshCore and are not here; their arithmetic and state are test/test_meshclient's.)
+namespace {
+
+// Feeds a request frame to a harness whose mesh service is `client`, and returns the one answer.
+std::string answerWithClient(Harness& h, twinoak::meshclient::LinkMeshClient& client,
+                             const std::vector<uint8_t>& frame) {
+  h.services.mesh = &client;  // the session reads s_.mesh through the reference every pass
+  h.sent.clear();
+  h.feed(frame);
+  h.run();
+  EXPECT_EQ(1u, h.sent.size());
+  return h.lastFrame();
+}
+
+}  // namespace
+
+TEST(TheMeshClient, TheFourJobRequestsAreTheFixturesFrames) {
+  // JOB_BEGIN, the two-hops shape (seq 18), answered kOk - the fixture's job begin response.
+  {
+    Harness h;
+    twinoak::meshclient::Job job;
+    twinoak::meshclient::LinkMeshClient client(job);
+    const Case* req = findCase("request", kMsgJobBegin, 18);
+    const Case* resp = findCase("response", kMsgJobBegin, 18);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), answerWithClient(h, client, req->frame));
+    EXPECT_TRUE(job.begun());
+    EXPECT_EQ(twinoak::meshclient::kPathHops, job.pathMode());
+    EXPECT_EQ(2u, job.pathHopCount());
+  }
+  // JOB_END (seq 19): the job is forgotten, answered kOk.
+  {
+    Harness h;
+    twinoak::meshclient::Job job;
+    twinoak::meshclient::LinkMeshClient client(job);
+    const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {0x11};
+    ASSERT_TRUE(job.begin(key, twinoak::meshclient::kPathNone, 0, 0, nullptr, 0, 0));
+    const Case* req = findCase("request", kMsgJobEnd, 19);
+    const Case* resp = findCase("response", kMsgJobEnd, 19);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), answerWithClient(h, client, req->frame));
+    EXPECT_FALSE(job.begun());
+  }
+  // PATH_GET (seq 21): the job holds the route the fixture's response carries (hops, size 2,
+  // one hop, 7f3a), and PATH_GET reads it back byte for byte.
+  {
+    Harness h;
+    twinoak::meshclient::Job job;
+    twinoak::meshclient::LinkMeshClient client(job);
+    const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {0x22};
+    const uint8_t hashes[] = {0x7f, 0x3a};
+    ASSERT_TRUE(job.begin(key, twinoak::meshclient::kPathHops, 2, 1, hashes, sizeof hashes, 0));
+    const Case* req = findCase("request", kMsgPathGet, 21);
+    const Case* resp = findCase("response", kMsgPathGet, 21);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), answerWithClient(h, client, req->frame));
+  }
+}
+
+TEST(TheMeshClient, JobBeginFloodAndDirectBothSucceed) {
+  for (uint8_t seq : {16, 17}) {  // flood (seq 16) and direct neighbour (seq 17)
+    Harness h;
+    twinoak::meshclient::Job job;
+    twinoak::meshclient::LinkMeshClient client(job);
+    const Case* req = findCase("request", kMsgJobBegin, seq);
+    ASSERT_NE(nullptr, req) << "seq " << int(seq);
+    const std::string frame = answerWithClient(h, client, req->frame);
+    // kOk is a status-only response: type JOB_BEGIN|0x80, seq, one byte 0x00.
+    FrameReceiver rx;
+    for (uint8_t b : fromHex(frame)) rx.feedByte(b);
+    ASSERT_TRUE(rx.hasPacket());
+    EXPECT_EQ(responseType(kMsgJobBegin), rx.packet().type);
+    EXPECT_EQ(seq, rx.packet().seq);
+    ASSERT_EQ(1u, rx.packet().body.len);
+    EXPECT_EQ(kOk, rx.packet().body.ptr[0]);
+    EXPECT_TRUE(job.begun());
+    EXPECT_EQ(seq == 16 ? twinoak::meshclient::kPathNone : twinoak::meshclient::kPathDirect,
+              job.pathMode());
+  }
+}
+
+TEST(TheMeshClient, PathSetForgetIsOkWithAJobAndErrStateWithout) {
+  const Case* req = findCase("request", kMsgPathSet, 20);  // "path set: forget"
+  ASSERT_NE(nullptr, req);
+
+  // With no job: ERR_STATE, and nothing changes.
+  {
+    Harness h;
+    twinoak::meshclient::Job job;
+    twinoak::meshclient::LinkMeshClient client(job);
+    const std::string frame = answerWithClient(h, client, req->frame);
+    FrameReceiver rx;
+    for (uint8_t b : fromHex(frame)) rx.feedByte(b);
+    ASSERT_TRUE(rx.hasPacket());
+    ASSERT_EQ(1u, rx.packet().body.len);
+    EXPECT_EQ(kErrState, rx.packet().body.ptr[0]) << "PATH_SET with no job is ERR_STATE (6.1)";
+  }
+  // With a job: kOk, and the path is forgotten.
+  {
+    Harness h;
+    twinoak::meshclient::Job job;
+    twinoak::meshclient::LinkMeshClient client(job);
+    const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {0x33};
+    const uint8_t hashes[] = {0x7f, 0x3a};
+    ASSERT_TRUE(job.begin(key, twinoak::meshclient::kPathHops, 2, 1, hashes, sizeof hashes, 0));
+    const std::string frame = answerWithClient(h, client, req->frame);
+    FrameReceiver rx;
+    for (uint8_t b : fromHex(frame)) rx.feedByte(b);
+    ASSERT_TRUE(rx.hasPacket());
+    ASSERT_EQ(1u, rx.packet().body.len);
+    EXPECT_EQ(kOk, rx.packet().body.ptr[0]);
+    EXPECT_EQ(twinoak::meshclient::kPathNone, job.pathMode());
+  }
+}
+
+TEST(TheMeshClient, AnIllegalPathInJobBeginIsMalformedAndChangesNothing) {
+  Harness h;
+  twinoak::meshclient::Job job;
+  twinoak::meshclient::LinkMeshClient client(job);
+  // A path 6.1 does not allow: hops, size 2, two hops, but only three bytes of hashes. The codec
+  // refuses it, so the session answers ERR_MALFORMED and the client is never asked.
+  std::vector<uint8_t> body(kPubKeyLen, 0x44);
+  body.push_back(kPathHops);
+  body.push_back(2);  // hash_size
+  body.push_back(2);  // hop_count
+  body.push_back(0xa1);
+  body.push_back(0xb2);
+  body.push_back(0x7f);  // three bytes, not four
+  const std::string frame = answerWithClient(h, client, frameOf(kMsgJobBegin, 40, body));
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(frame)) rx.feedByte(b);
+  ASSERT_TRUE(rx.hasPacket());
+  ASSERT_EQ(1u, rx.packet().body.len);
+  EXPECT_EQ(kErrMalformed, rx.packet().body.ptr[0]);
+  EXPECT_FALSE(job.begun()) << "a malformed JOB_BEGIN begins no job";
+}
+
+TEST(TheMeshClient, ASecondJobBeginEndsTheFirstThroughTheSession) {
+  Harness h;
+  twinoak::meshclient::Job job;
+  twinoak::meshclient::LinkMeshClient client(job);
+  const Case* first = findCase("request", kMsgJobBegin, 18);   // two hops
+  const Case* second = findCase("request", kMsgJobBegin, 16);  // flood
+  ASSERT_NE(nullptr, first);
+  ASSERT_NE(nullptr, second);
+  answerWithClient(h, client, first->frame);
+  EXPECT_EQ(twinoak::meshclient::kPathHops, job.pathMode());
+  answerWithClient(h, client, second->frame);
+  EXPECT_TRUE(job.begun());
+  EXPECT_EQ(twinoak::meshclient::kPathNone, job.pathMode()) << "the second job's path";
+}
+
+TEST(TheMeshClient, AnyRequestRestartsTheJobsSilenceCountThroughTheSession) {
+  Harness h;
+  twinoak::meshclient::Job job;
+  twinoak::meshclient::LinkMeshClient client(job);
+  h.services.mesh = &client;
+  h.now = 1000;
+
+  // Begin a job, then let the clock run almost to the 120-second limit.
+  const Case* begin = findCase("request", kMsgJobBegin, 16);
+  ASSERT_NE(nullptr, begin);
+  h.feed(begin->frame);
+  h.run();
+  ASSERT_TRUE(job.begun());
+
+  h.now = 1000 + twinoak::meshclient::kIdleEndMs - 1;
+  client.loop(h.now);
+  EXPECT_TRUE(job.begun()) << "one millisecond short of the limit";
+
+  // A PING at that moment is a valid request: the session calls noteLinkRequest and the count
+  // starts again, so the job survives another near-two-minutes.
+  h.feed(frameOf(kMsgPing, 7, {0, 0, 0, 0}));
+  h.run();
+  client.loop(h.now);
+  EXPECT_TRUE(job.begun());
+
+  h.now += twinoak::meshclient::kIdleEndMs;  // now silent again for the full span
+  client.loop(h.now);
+  EXPECT_FALSE(job.begun()) << "120 s of silence after the last request ends the job";
 }
 
 int main(int argc, char** argv) {

@@ -10,14 +10,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "../app/UpstreamMyMesh.h"  // MyMesh: the node's identity and its advert name
+#include "../app/TwinOakMesh.h"  // the node's identity, its advert name, and the mesh client's job
 
 namespace twinoak {
 namespace link {
 
 // Serial1 up, EV_BOOT queued. After radio_init() and the_mesh.begin(), because the boot
 // identifier is drawn from the radio's RNG and the advert name comes from the loaded preferences.
-void linkBegin(MyMesh& mesh);
+void linkBegin(TwinOakMesh& mesh);
 
 // One bounded pass of the link. Once per loop().
 void linkLoop();
