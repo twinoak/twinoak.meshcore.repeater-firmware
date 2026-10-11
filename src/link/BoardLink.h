@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "../app/TwinOakMesh.h"  // the node's identity, its advert name, and the mesh client's job
+#include "../meshclient/ObservationRing.h"
 
 namespace twinoak {
 namespace link {
@@ -37,6 +38,19 @@ bool raiseWalterWake();
 bool attentionPending();
 // Whether the Walter is believed asleep (SLEEP_NOTICE, STATUS flag bit 2).
 bool walterAsleep();
+
+// --- observations (spec/LINK-PROTOCOL.md section 7) -------------------------------------------
+
+// One advert this node heard, after its signature verified: into the ring, and section 8's
+// reason 5 raised when the ring has just reached three quarters full while `obs.wake` is on and
+// the Walter is believed asleep. src/app/TwinOakMesh.cpp's onAdvertRecv is the only caller; the
+// rules are src/meshclient/LinkObservations.h's and the hourly limit is the attention machine's.
+void noteAdvert(const meshclient::HeardAdvert& heard);
+
+// The `obs.wake` setting (src/app/Settings.h), off at boot: whether a filling ring may ask for
+// the Walter at all.
+bool obsWakeEnabled();
+void setObsWakeEnabled(bool on);
 
 // --- what src/board/target.cpp reads for the settings -----------------------------------------
 

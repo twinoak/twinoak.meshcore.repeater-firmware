@@ -475,17 +475,45 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       break;
     }
 
+    case kMsgObsPull: {
+      // Section 7: up to `max` records, oldest first, as many as fit in one payload; what is left
+      // in the ring; what was lost since the last pull. Which records those are, and how many fit,
+      // is the ring's (src/meshclient/LinkObservations.cpp) - the session asks and encodes.
+      //
+      // "Because a response can be repeated and the records are gone from the ring once sent, the
+      // remembered response of a pull is what a retry gets - the same records, not the next ones"
+      // (section 7). That is poll()'s one-entry memory above and needs nothing here: a retried
+      // OBS_PULL never reaches this handler.
+      if (s_.observations == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      ObsPull m;
+      if (!decodeObsPull(pkt.body, m)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      ObsPullResponse out;
+      s_.observations->pull(m.max, out, now_ms);
+      n = encodeObsPullResponse(out, resp_, sizeof(resp_));
+      break;
+    }
+
     case kMsgMeshCounters: {
       // Section 6.4: the radio's rx and tx, the client's own client_tx, the radio's floor, RSSI
-      // and SNR - and the observation ring's three, which read zero until the ring exists and are
-      // the ring's to answer when it does (obs_dropped is the same count STATUS carries).
+      // and SNR - and the observation ring's three, which are the ring's to answer and read zero
+      // on a build with no ring at all (obs_dropped is the same count STATUS carries).
       if (s_.mesh == nullptr) {
         n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
         break;
       }
       MeshCountersResponse out;
       s_.mesh->getCounters(out);
-      if (s_.observations != nullptr) out.obs_dropped = s_.observations->droppedSinceBoot();
+      if (s_.observations != nullptr) {
+        out.adverts = s_.observations->adverts();
+        out.adverts_dropped = s_.observations->advertsDropped();
+        out.obs_dropped = s_.observations->observationsDropped();
+      }
       n = encodeMeshCountersResponse(out, resp_, sizeof(resp_));
       break;
     }

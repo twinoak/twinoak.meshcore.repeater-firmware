@@ -1,5 +1,6 @@
 // The box link's session: bytes in, one request handled, one frame out
-// (spec/LINK-PROTOCOL.md sections 2, 3, 5.1-5.8, 8; docs/ARCHITECTURE.md section 4, layer 2).
+// (spec/LINK-PROTOCOL.md sections 2, 3, 5.1-5.8, 6, 7 and 8; docs/ARCHITECTURE.md section 4,
+// layer 2).
 //
 // Host-portable: no Arduino, no MeshCore, no heap, no recursion. Everything it knows about the
 // board arrives through the interfaces of Interfaces.h, which is what lets test/test_link_session

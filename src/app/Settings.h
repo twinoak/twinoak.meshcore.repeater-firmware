@@ -51,6 +51,14 @@ struct SettingsHost {
   virtual uint16_t batteryCritMv() const = 0;
   virtual bool setBatteryLowMv(uint16_t mv) = 0;
   virtual bool setBatteryCritMv(uint16_t mv) = 0;
+
+  // `obs.wake` (spec/LINK-PROTOCOL.md section 8, reason 5; src/meshclient/LinkObservations.h):
+  // whether a filling observation ring may ask for a sleeping Walter at all. **Off at boot**, and
+  // per-boot: a unit on a busy mesh must not wake its box every hour for adverts alone, so the
+  // default is "collect them when the Walter is awake anyway" and a Walter that wants otherwise
+  // says so after each EV_BOOT, as it already must for the clock (section 5.4).
+  virtual bool obsWake() const = 0;
+  virtual void setObsWake(bool on) = 0;
 };
 
 class Settings {
@@ -71,11 +79,12 @@ class Settings {
   // "ok"; false when the key is not ours or the value is not one this key accepts, and upstream's
   // CLI then answers "can't find custom var" for both, which is its only other word.
   //
-  // Four of the seven keys are read-only and refuse every value. `walter.wake` accepts "1" and
+  // Four of the eight keys are read-only and refuse every value. `walter.wake` accepts "1" and
   // nothing else, and accepting it means "the machine was asked": whether an attention was
   // actually raised is the hourly limit's business, and `sensor get walter.wake` is where the
   // answer to that is read. `power.low_mv` and `power.crit_mv` take a decimal number of
-  // millivolts and refuse anything the thresholds would not accept.
+  // millivolts and refuse anything the thresholds would not accept. `obs.wake` takes "0" and
+  // "1" and nothing else.
   bool set(const char* name, const char* value);
 
  private:

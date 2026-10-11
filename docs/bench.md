@@ -324,7 +324,46 @@ channel) and a **companion as an observer**.
   reply is read as the job's **reply** and nothing is executed on this unit
   (`docs/ARCHITECTURE.md` §2, the reason the peer is in front). This is the one
   that would go wrong if the extra peer were behind upstream's own.
-- [ ] **p2-02** **The RSSI of a reply reads unknown until task 03.** `reply` and
-  `EV_MESH_REPLY` carry `rssi` `0x7FFF` (shown as *unknown*) and a real SNR: the
-  note `logRx` takes is task 03's, and until then only the SNR, which is the
-  packet's own, is known. Worth seeing once so it is not read as a fault.
+- [ ] **p2-02** **A reply's SNR is the packet's own.** `reply` and
+  `EV_MESH_REPLY` carry a real SNR for every reply. Its `rssi` comes from the
+  note `logRx` takes, which task 03 added, so it reads a number now and not
+  *unknown* — §7's last line but one is where that is walked. An *unknown*
+  `rssi` with a sensible SNR is not a fault: it means the note for that packet
+  was pushed out of a 32-entry table while the packet waited in the queue.
+
+## 7. Observations
+
+`docs/link.md` §2g is the page. It needs **ten minutes on the roof antenna** and
+nothing else: no second radio, no companion — the mesh advertises by itself.
+
+- [ ] **p2-03** **The adverts are there, and they look like a neighbourhood.**
+  After ten minutes on the roof antenna, `linkcli.py obs` lists the repeaters in
+  range with plausible hops, SNR and RSSI, oldest first. **A direct neighbour
+  has hops 0 and an RSSI**; a record with hops has the path it arrived by and no
+  RSSI only if it waited a long time in the inbound queue. `obs --names` shows
+  the names, decoded on the laptop. `counters`' `adverts` matches roughly what a
+  console `neighbors` and the air would suggest, and `adverts_drop` is 0.
+- [ ] **p2-03** **`neighbors` on the unit's own console still lists its
+  neighbours as before.** Upstream's table is filled first, from the same
+  advert, and nothing of ours can change what it made of it — the one thing that
+  would go wrong if `onAdvertRecv` did not call its base first.
+- [ ] **p2-03** **A pull empties what it returns, and a retry does not.**
+  `obs 2` twice hands over four different records; `status`' `obs_pending` falls
+  by two each time. With `-v` and a disconnected TX for one second (or
+  `--attempts 3` against a node that is busy), the retried frame comes back with
+  the *same* records and `obs_pending` falls once.
+- [ ] **p2-03** **With the laptop away for a day, `status` shows the ring full
+  and a loss count, and the repeater is none the worse.** `obs_pending` 64,
+  `obs_dropped` well above zero, and the first `obs` then reports that same
+  `dropped` once and zero on the next pull. Repeating, a phone's login and
+  `neighbors` are all unaffected.
+- [ ] **p2-03** **A reply's RSSI is a number now.** With a job and a login to
+  the second repeater (§6), `reply` shows an `rssi` in dBm and not *unknown* —
+  the note `logRx` takes is what fills it, and this is the line that was owed
+  from task 02.
+- [ ] **p2-03** **`obs.wake`, on.** `sensor set obs.wake 1` on the console, then
+  `sleep 600` from the laptop and leave the ring to fill past 48 records: within
+  one advert of crossing it the node raises `EV_ATTENTION` reason 5 with the
+  records waiting as its `detail`, at most once an hour, and `sensor get
+  obs.wake` reads 1. With the setting back at 0 — the default, and what a fresh
+  boot gives — a ring that fills right up raises nothing.

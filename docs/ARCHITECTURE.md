@@ -222,8 +222,8 @@ attention per reason per hour. It also holds the belief that the Walter is aslee
 The session asks it once a pass what to put on the wire and tells it when the bytes have gone, so
 every rule about *when* is in one file with a fake clock in front of it.
 
-Seven more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
-`src/app/Settings.{h,cpp}`, portable and tested; the board's half is ten one-line readers and
+Eight more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
+`src/app/Settings.{h,cpp}`, portable and tested; the board's half is a dozen one-line readers and
 writers. They work from the USB console and from a mesh admin's `sensor get/set`, in this order,
 which is the order `sensor list` prints:
 
@@ -236,11 +236,12 @@ which is the order `sensor list` prints:
 | `clock.state` | `unset`, `restored`, `set` or `rtc` | — |
 | `power.low_mv` | the *battery low* threshold in millivolts | a decimal number of millivolts (§6) |
 | `power.crit_mv` | the *battery critical* threshold | the same |
+| `obs.wake` | `0` or `1`: whether a filling observation ring may ask for a sleeping Walter | `0` or `1`; off at boot and per boot (§7) |
 
-Seven keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
+Eight keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
 160-byte buffer, so a fresh node prints the first five and `... next:5` and `sensor list 5` is
-the rest. The order is task 05's five with task 06's two appended, which is the only place a new
-key can go without renumbering one a bench instruction or a document already names.
+the rest. The order is task 05's five with the later tasks' appended, which is the only place a
+new key can go without renumbering one a bench instruction or a document already names.
 
 `walter.wake` is the out-of-band way to reach a unit whose Walter is asleep: any exit node that
 reaches the repeater can ask it to wake its own uplink. Upstream's permission check is the whole
@@ -356,9 +357,15 @@ where that file blocks in `await()`.
   job's path or as a flood with two-byte hashes, wipe the plaintext if it held a password, count
   it. Refuse a second send while a reply is awaited.
 - **Replies**: through the extra peer of §2, and only while awaiting.
-- **Observations**: every advert that verified goes to upstream first (its neighbour table), then
-  into a ring the Walter empties. RSSI is noted in `logRx`, when it still belongs to the packet —
-  a flood can wait a second in the inbound queue before `onRecvPacket` sees it.
+- **Observations** (portable, tested natively): every advert that verified goes to upstream
+  first (its neighbour table), then into a ring of **64** records of `LINK-PROTOCOL.md` §7 that
+  the Walter empties with `OBS_PULL` — the records a pull hands out leave it, the oldest is
+  overwritten when it is full and the loss is counted. The advert's application data is **copied
+  and never parsed**: the name inside it is a stranger's, and the agent on the Walter is where it
+  is decoded. RSSI is noted in `logRx`, when it still belongs to the packet — a flood can wait up
+  to 32 seconds in the inbound queue before `onRecvPacket` sees it — and the same note is what
+  fills a reply's `rssi`. `obs.wake`, off by default, is what lets a ring at three quarters full
+  ask for a sleeping Walter (§8's reason 5).
 
 What it deliberately is not: a chat client. No contacts, no channels, no acknowledgements, no
 reciprocal path returns. One send is one packet.
@@ -415,7 +422,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | clock rules, the boot order, the file's rate | ✔ against fakes, and the `TIME_SET` fixture through the real session | the flash file, the RTC probe | a reboot keeps time moving forward |
 | shunt arithmetic, the two readers' schedules, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part, and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view |
 | job state, reply matching | ✔ | the overrides, the sends | a login to a real repeater |
-| observation ring | ✔ | advert capture | adverts heard on the roof |
+| the observation ring, the pull's payload fitting, the RSSI note table, `obs.wake` | ✔ against fakes, and the `OBS_PULL` fixture through the real session | advert capture, the two overrides | adverts heard on the roof |
 | descriptor, manifest | ✔ against the fixtures | placement in the image | the Walter reads it |
 
 ## 11. Proved by task p1-01

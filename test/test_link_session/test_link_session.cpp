@@ -1,7 +1,7 @@
 // src/link/session/: the whole box-link session, driven the way src/link/SerialTransport.cpp
 // drives it, against fakes - and held against spec/fixtures/link/link-v1.json for every request
 // this firmware answers today (HELLO, PING, STATUS, TIME_SET, TIME_GET, IDENTITY, REBOOT, CLI,
-// SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET) and for EV_BOOT and EV_ATTENTION.
+// SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL) and for EV_BOOT and EV_ATTENTION.
 //
 // The fixture is read at run time from FIXTURES_DIR (platformio.ini's [env:native]). For each
 // request case the suite finds the response case of the same type and seq, sets the fakes to
@@ -21,7 +21,10 @@
 //     answered kErrUnsupported when there is no clock interface at all;
 //   - the reset-reason mapping;
 //   - a capability whose interface is absent is not advertised, and the field of STATUS it owns
-//     reads zero.
+//     reads zero;
+//   - and, with the **real** observation ring behind a real session (phase 2's task 03): OBS_PULL
+//     oldest first, a repeated pull that gets the same records while the ring is drained once,
+//     STATUS's two observation fields and MESH_COUNTERS' three.
 
 #include <gtest/gtest.h>
 
@@ -45,7 +48,9 @@
 #include "link/session/Session.h"
 #include "meshclient/Job.h"
 #include "meshclient/LinkMeshClient.h"
+#include "meshclient/LinkObservations.h"
 #include "meshclient/MeshPort.h"
+#include "meshclient/ObservationRing.h"
 #include "meshclient/Reply.h"
 
 #ifndef FIXTURES_DIR
@@ -442,13 +447,41 @@ class FakeMeshPort : public twinoak::meshclient::MeshPort {
   }
 };
 
+// The ring itself is test/test_meshclient's. Here it is a fake that answers what the test - or
+// the fixture - set, so that the session's half of section 7 is visible on its own; the real ring
+// behind a real session is driven further down (ObsRig).
 class FakeObservations : public ObservationAccess {
  public:
   uint8_t waiting = 0;
   uint16_t lost = 0;
+  uint32_t heard = 0;
+  uint32_t heard_dropped = 0;
+  uint32_t obs_lost = 0;
+
+  // What the next pull answers, and what it was asked for.
+  uint8_t answer_remaining = 0;
+  uint16_t answer_dropped = 0;
+  std::vector<Observation> answer;
+  std::vector<std::vector<uint8_t>> blobs;  // the bytes the views above point into
+  int pulls = 0;
+  uint8_t last_max = 0;
+  uint32_t last_now = 0;
 
   uint8_t pending() const override { return waiting; }
   uint16_t droppedSinceBoot() const override { return lost; }
+  uint32_t adverts() const override { return heard; }
+  uint32_t advertsDropped() const override { return heard_dropped; }
+  uint32_t observationsDropped() const override { return obs_lost; }
+
+  void pull(uint8_t max, ObsPullResponse& out, uint32_t now_ms) override {
+    pulls++;
+    last_max = max;
+    last_now = now_ms;
+    out.remaining = answer_remaining;
+    out.dropped = answer_dropped;
+    out.records = answer.empty() ? nullptr : answer.data();
+    out.count = uint8_t(answer.size());
+  }
 };
 
 // ----------------------------------------------------------------------------- the harness
@@ -644,6 +677,34 @@ void arrange(Harness& h, const Case& response) {
     case kMsgLppGet:
       h.lpp.answer = fromHex(f["lpp"].as<std::string>());
       break;
+    case kMsgObsPull: {
+      // Section 7, as a shape: the fixture's own two records, handed to the session by the fake
+      // ring so that what this suite checks is the handler and the encoding. Which records a real
+      // ring hands out, and how many fit, is test/test_meshclient's and ObsRig's below.
+      h.observations.answer_remaining = f["remaining"].as<uint8_t>();
+      h.observations.answer_dropped = f["dropped"].as<uint16_t>();
+      JsonArray records = f["records"].as<JsonArray>();
+      h.observations.blobs.reserve(3 * records.size());
+      for (JsonObject r : records) {
+        Observation o;
+        h.observations.blobs.push_back(fromHex(r["pubkey"].as<std::string>()));
+        o.pubkey = h.observations.blobs.back().data();
+        o.adv_ts = r["adv_ts"].as<uint32_t>();
+        o.age_s = r["age_s"].as<uint32_t>();
+        o.snr_q4 = r["snr_q4"].as<int8_t>();
+        o.rssi = r["rssi"].as<int16_t>();
+        o.path_len = r["path_len"].as<uint8_t>();
+        h.observations.blobs.push_back(fromHex(r["path"].as<std::string>()));
+        o.path = bytesOf(h.observations.blobs.back().data(),
+                         h.observations.blobs.back().size());
+        h.observations.blobs.push_back(fromHex(r["app_data"].as<std::string>()));
+        o.app_data = bytesOf(h.observations.blobs.back().data(),
+                             h.observations.blobs.back().size());
+        h.observations.answer.push_back(o);
+      }
+      break;
+    }
+
     case kMsgSleepNotice:
       break;  // its response is a status byte and nothing else
     default:
@@ -658,7 +719,7 @@ bool handledHere(uint8_t type) {
   return type == kMsgHello || type == kMsgPing || type == kMsgStatus || type == kMsgIdentity ||
          type == kMsgReboot || type == kMsgTimeSet || type == kMsgTimeGet || type == kMsgCli ||
          type == kMsgSleepNotice || type == kMsgPowerGet || type == kMsgEnvGet ||
-         type == kMsgLppGet;
+         type == kMsgLppGet || type == kMsgObsPull;
 }
 
 }  // namespace
@@ -684,8 +745,8 @@ TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
     EXPECT_EQ(1u, h.session.executed()) << c.name << ": one handler call";
     n++;
   }
-  EXPECT_EQ(12, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET, CLI,"
-                      " SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET";
+  EXPECT_EQ(13, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET, CLI,"
+                      " SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL";
 }
 
 TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
@@ -2651,9 +2712,9 @@ TEST(TheReply, AReturnedPathOfZeroHopsIsTheDirectMode) {
 TEST(TheCounters, MeshCountersReadsTheRadioTheClientAndTheRing) {
   // The fixture's "mesh counters response" (seq 37), field by field: rx, tx, noise floor, RSSI
   // and SNR are the radio's and the fake port answers them; client_tx is this client's and is
-  // made to happen with 42 sends; obs_dropped is the ring's count STATUS carries too. The two
-  // advert counts are the observation ring's (task 03) and read 0 until it exists, which is why
-  // this is a comparison of fields and not of the frame.
+  // made to happen with 42 sends; the three advert counts are the observation ring's (task 03)
+  // and the fake ring answers them. A comparison of fields and not of the frame, because
+  // client_tx has to be *made* to happen.
   const Case* want = findCase("response", kMsgMeshCounters, 37);
   ASSERT_NE(nullptr, want);
   JsonObject f = want->fields;
@@ -2665,7 +2726,9 @@ TEST(TheCounters, MeshCountersReadsTheRadioTheClientAndTheRing) {
   r.port.counters.noise_floor = f["noise_floor"].as<int16_t>();
   r.port.counters.last_rssi = f["last_rssi"].as<int16_t>();
   r.port.counters.last_snr_q4 = f["last_snr_q4"].as<int8_t>();
-  r.h.observations.lost = f["obs_dropped"].as<uint16_t>();
+  r.h.observations.heard = f["adverts"].as<uint32_t>();
+  r.h.observations.heard_dropped = f["adverts_dropped"].as<uint32_t>();
+  r.h.observations.obs_lost = f["obs_dropped"].as<uint32_t>();
   const uint32_t sends = f["client_tx"].as<uint32_t>();
   for (uint32_t i = 0; i < sends; i++) {
     r.answer(frameOf(kMsgSendRequest, uint8_t(100 + i), sendPayload(0, {0x01})));
@@ -2683,8 +2746,8 @@ TEST(TheCounters, MeshCountersReadsTheRadioTheClientAndTheRing) {
   EXPECT_EQ(f["rx"].as<uint32_t>(), rd.u32());
   EXPECT_EQ(f["tx"].as<uint32_t>(), rd.u32());
   EXPECT_EQ(f["client_tx"].as<uint32_t>(), rd.u32());
-  EXPECT_EQ(0u, rd.u32()) << "adverts: the ring's, task 03";
-  EXPECT_EQ(0u, rd.u32()) << "adverts_dropped: the ring's, task 03";
+  EXPECT_EQ(f["adverts"].as<uint32_t>(), rd.u32());
+  EXPECT_EQ(f["adverts_dropped"].as<uint32_t>(), rd.u32());
   EXPECT_EQ(f["obs_dropped"].as<uint32_t>(), rd.u32());
   EXPECT_EQ(f["noise_floor"].as<int16_t>(), rd.i16());
   EXPECT_EQ(f["last_rssi"].as<int16_t>(), rd.i16());
@@ -2708,6 +2771,187 @@ TEST(TheCounters, WithNoMeshClientTheEightAreUnsupported) {
     seq++;
   }
   EXPECT_EQ(7u, h.sent.size());
+}
+
+// ----------------------------------------------------------------------------- observations
+
+namespace {
+
+// A session with the **real** observation ring behind it (src/meshclient/), so that OBS_PULL, the
+// retry, STATUS's two fields and MESH_COUNTERS' three are the firmware's own code end to end.
+struct ObsRig {
+  Harness h;
+  twinoak::meshclient::ObservationRing ring;
+  twinoak::meshclient::LinkObservations obs{ring};
+
+  ObsRig() { h.services.observations = &obs; }
+
+  // One advert heard, as TwinOakMesh::onAdvertRecv builds the record.
+  void hear(uint8_t key_byte, uint32_t adv_ts, uint32_t heard_ms, uint8_t app_len = 4) {
+    twinoak::meshclient::HeardAdvert a;
+    for (uint8_t i = 0; i < twinoak::meshclient::kObsPubKeyLen; i++) {
+      a.pubkey[i] = uint8_t(key_byte + i);
+    }
+    a.adv_ts = adv_ts;
+    a.heard_ms = heard_ms;
+    a.snr_q4 = 24;
+    a.rssi = -90;
+    a.app_len = app_len;
+    for (uint8_t i = 0; i < app_len; i++) a.app_data[i] = uint8_t(0x30 + i);
+    EXPECT_TRUE(ring.push(a));
+  }
+
+  // One request in, its response body out.
+  std::vector<uint8_t> answer(const std::vector<uint8_t>& frame) {
+    h.feed(frame);
+    h.run();
+    uint8_t type = 0, seq = 0;
+    return lastBody(h, type, seq);
+  }
+};
+
+}  // namespace
+
+TEST(Observations, TheRingIsEmptiedOldestFirstAndTheRecordsLeaveIt) {
+  ObsRig r;
+  r.h.now = 100000;
+  for (uint8_t i = 0; i < 3; i++) r.hear(i, 1791719000u + i, 100000u - 1000u * (3 - i));
+  EXPECT_EQ(3u, r.obs.pending());
+
+  const std::vector<uint8_t> body = r.answer(frameOf(kMsgObsPull, 7, {2}));
+  Reader rd(body.data(), body.size());
+  EXPECT_EQ(kOk, rd.u8());
+  EXPECT_EQ(1u, rd.u8()) << "remaining";
+  EXPECT_EQ(0u, rd.u16()) << "dropped";
+  ASSERT_EQ(2u, rd.u8()) << "count";
+  // The oldest first, with the age measured on the millisecond clock.
+  Bytes key = rd.take(kPubKeyLen);
+  ASSERT_EQ(size_t(kPubKeyLen), key.len);
+  EXPECT_EQ(0u, key.ptr[0]) << "the first advert heard";
+  EXPECT_EQ(1791719000u, rd.u32()) << "adv_ts";
+  EXPECT_EQ(3u, rd.u32()) << "age_s: heard 3000 ms ago";
+  EXPECT_EQ(24, rd.i8());
+  EXPECT_EQ(-90, rd.i16());
+  EXPECT_EQ(0u, rd.u8()) << "path_len: a direct neighbour";
+  EXPECT_EQ(4u, rd.u8()) << "app_len";
+  rd.take(4);
+  key = rd.take(kPubKeyLen);
+  EXPECT_EQ(1u, key.ptr[0]) << "then the second";
+  EXPECT_TRUE(rd.ok());
+
+  EXPECT_EQ(1u, r.obs.pending()) << "the two handed out left the ring";
+}
+
+TEST(Observations, ARepeatedPullGetsTheSameRecordsAndTheRingIsDrainedOnce) {
+  // "Because a response can be repeated and the records are gone from the ring once sent, the
+  // remembered response of a pull is what a retry gets - the same records, not the next ones"
+  // (section 7). The frame is byte for byte the same and the ring is one pull lighter, not two.
+  ObsRig r;
+  r.h.now = 50000;
+  for (uint8_t i = 0; i < 5; i++) r.hear(uint8_t(0x10 + i), 1700u + i, 50000u);
+  const std::vector<uint8_t> frame = frameOf(kMsgObsPull, 9, {2});
+
+  r.h.feed(frame);
+  r.h.run();
+  ASSERT_EQ(1u, r.h.sent.size());
+  const std::string first = r.h.lastFrame();
+  EXPECT_EQ(3u, r.obs.pending());
+  EXPECT_EQ(1u, r.h.session.executed());
+
+  // The same (type, seq) again: no handler runs, the remembered response goes out again.
+  r.h.feed(frame);
+  r.h.run();
+  ASSERT_EQ(2u, r.h.sent.size());
+  EXPECT_EQ(first, r.h.lastFrame()) << "the same records, byte for byte";
+  EXPECT_EQ(3u, r.obs.pending()) << "and the ring was drained once";
+  EXPECT_EQ(1u, r.h.session.executed()) << "one handler call for two frames";
+
+  // A new seq is a new pull, and it hands out the next ones.
+  r.h.feed(frameOf(kMsgObsPull, 10, {2}));
+  r.h.run();
+  EXPECT_NE(first, r.h.lastFrame());
+  EXPECT_EQ(1u, r.obs.pending());
+  EXPECT_EQ(2u, r.h.session.executed());
+}
+
+TEST(Observations, StatusAndMeshCountersReadTheRealRing) {
+  ObsRig r;
+  r.h.now = 10000;
+  // Overflow it: 64 kept, three lost.
+  for (int i = 0; i < twinoak::meshclient::kObsCapacity + 3; i++) {
+    r.hear(uint8_t(i), uint32_t(2000 + i), 10000u);
+  }
+  // And one record the ring cannot carry, which is an advert dropped and not a ring overflow.
+  twinoak::meshclient::HeardAdvert bad;
+  bad.path_len = 0xFF;  // a four-byte hash size: 252 bytes of path
+  EXPECT_FALSE(r.ring.push(bad));
+
+  const std::vector<uint8_t> status = r.answer(frameOf(kMsgStatus, 11, {}));
+  Reader rd(status.data(), status.size());
+  EXPECT_EQ(kOk, rd.u8());
+  rd.u32();  // uptime_s
+  rd.u8();   // reset_reason
+  rd.u8();   // time_state
+  rd.u32();  // epoch
+  rd.u16();  // flags
+  EXPECT_EQ(twinoak::meshclient::kObsCapacity, rd.u8()) << "obs_pending";
+  EXPECT_EQ(3u, rd.u16()) << "obs_dropped, saturating";
+
+  r.h.sent.clear();
+  const std::vector<uint8_t> counters = r.answer(frameOf(kMsgMeshCounters, 12, {}));
+  Reader rc(counters.data(), counters.size());
+  EXPECT_EQ(kOk, rc.u8());
+  rc.u32();  // rx
+  rc.u32();  // tx
+  rc.u32();  // client_tx
+  EXPECT_EQ(uint32_t(twinoak::meshclient::kObsCapacity) + 4u, rc.u32()) << "adverts";
+  EXPECT_EQ(1u, rc.u32()) << "adverts_dropped";
+  EXPECT_EQ(3u, rc.u32()) << "obs_dropped";
+  EXPECT_TRUE(rc.ok());
+}
+
+TEST(Observations, WithNoRingObsPullIsUnsupportedAndTheCountsReadZero) {
+  Harness h;
+  h.services.observations = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapObservations);
+
+  h.feed(frameOf(kMsgObsPull, 3, {4}));
+  h.run();
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgObsPull), 3, {kErrUnsupported})), h.lastFrame());
+
+  h.sent.clear();
+  h.feed(frameOf(kMsgMeshCounters, 4, {}));
+  h.run();
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(h, type, seq);
+  Reader rd(body.data(), body.size());
+  EXPECT_EQ(kOk, rd.u8());
+  rd.u32();
+  rd.u32();
+  rd.u32();
+  EXPECT_EQ(0u, rd.u32()) << "adverts";
+  EXPECT_EQ(0u, rd.u32()) << "adverts_dropped";
+  EXPECT_EQ(0u, rd.u32()) << "obs_dropped";
+}
+
+TEST(Observations, AMalformedPullIsRefusedAndNothingLeavesTheRing) {
+  ObsRig r;
+  r.h.now = 1000;
+  r.hear(1, 2000, 1000);
+  // An empty payload: `max` is a u8 and there is none (section 3, kErrMalformed).
+  r.h.feed(frameOf(kMsgObsPull, 5, {}));
+  r.h.run();
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgObsPull), 5, {kErrMalformed})), r.h.lastFrame());
+  EXPECT_EQ(1u, r.obs.pending()) << "a refused request takes nothing";
+  // And trailing bytes a newer Walter appended are ignored (section 5.1, "Versions").
+  r.h.sent.clear();
+  r.h.feed(frameOf(kMsgObsPull, 6, {1, 0xAA, 0xBB}));
+  r.h.run();
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(r.h, type, seq);
+  ASSERT_GE(body.size(), 4u);
+  EXPECT_EQ(kOk, body[0]);
+  EXPECT_EQ(0u, r.obs.pending());
 }
 
 int main(int argc, char** argv) {

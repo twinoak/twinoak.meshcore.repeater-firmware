@@ -5,8 +5,10 @@
 //     flag, not in a comment), or mentioned at all in a file of src/ - which also forbids
 //     upstream's debug-print macro in our sources, on purpose: nothing the mesh says is logged as
 //     text;
-//   - a line of src/ that prints a packet's payload - any line that names `payload` beside a
-//     print-like call;
+//   - a line of src/ that prints a packet's payload or an advert's application data - any line
+//     that names `payload` or `app_data` beside a print-like call. The second is section 7's
+//     rule: the name inside an advert's app_data is something a stranger chose, and neither end
+//     logs it;
 //   - a print-like call anywhere under src/link/, or a use of `Serial` that is not the framing
 //     or the flush before a restart: a CLI line over the link is a console command and can be
 //     `password <new>`, whose reply echoes it back (tasks/phase-1/05-local-management.md);
@@ -301,21 +303,30 @@ TEST(Rails, NothingInSrcMentionsMeshDebugOrPacketLogging) {
   }
 }
 
-TEST(Rails, NothingInSrcPrintsAPacketsPayload) {
+TEST(Rails, NothingInSrcPrintsAPacketsPayloadOrAnAdvertsApplicationData) {
+  // `payload` is the mesh's own bytes. `app_data` is an advert's, and the **name a stranger
+  // chose** is inside it: "The name inside app_data is something a stranger chose. Neither end
+  // logs it" (spec/LINK-PROTOCOL.md section 7). This firmware copies those bytes into the
+  // observation ring and hands them to the Walter without parsing them, so no line of src/ has
+  // any business naming either beside something that writes to a console
+  // (tasks/phase-2/03-observations.md, the rails-test line).
   const fs::path root = projectRoot();
   const char* const kPrintLike[] = {"print", "write(", "Hex("};
+  const char* const kMeshBytes[] = {"payload", "app_data"};
   for (const fs::path& file : filesUnder(root / "src")) {
     std::ifstream in(file, std::ios::binary);
     std::string line;
     int n = 0;
     while (std::getline(in, line)) {
       n++;
-      if (line.find("payload") == std::string::npos) continue;
-      for (const char* p : kPrintLike) {
-        if (line.find(p) != std::string::npos) {
-          ADD_FAILURE() << rel(root, file) << ":" << n << ": a payload beside '" << p
-                        << "' - nothing the mesh says is logged as text (S-12)";
-          break;
+      for (const char* bytes : kMeshBytes) {
+        if (line.find(bytes) == std::string::npos) continue;
+        for (const char* p : kPrintLike) {
+          if (line.find(p) != std::string::npos) {
+            ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << bytes << "' beside '" << p
+                          << "' - nothing the mesh says is logged as text (S-12)";
+            break;
+          }
         }
       }
     }

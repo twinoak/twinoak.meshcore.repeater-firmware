@@ -4,6 +4,7 @@
 #include "../board/target.h"
 #include "../clock/BoardClock.h"
 #include "../clock/LinkClock.h"
+#include "../meshclient/LinkObservations.h"
 #include "../power/BoardPower.h"
 #include "SerialTransport.h"
 #include "attention/Attention.h"
@@ -154,6 +155,12 @@ AttentionMachine g_attention;
 // nothing here calls the keeper before main().
 clock::LinkClock g_clock(clock::keeper());
 
+// The observation ring and its link face (src/meshclient/): every advert this node hears, kept
+// for the Walter to collect. The ring is the largest single thing this firmware keeps in RAM -
+// 64 records of section 7 - and it is a global, in .bss, for exactly that reason.
+meshclient::ObservationRing g_ring;
+meshclient::LinkObservations g_observations(g_ring);
+
 // What this image is, filled in by linkBegin(). Field by field and not by braces: a C++11 struct
 // with default member initialisers is not an aggregate, and the board builds as gnu++11
 // (tasks/phase-1/reports/02.md).
@@ -198,9 +205,13 @@ void linkBegin(TwinOakMesh& mesh) {
   g_services.power = &power::linkPower();  // => kCapPower
   g_services.env = &power::linkPower();    // => kCapEnv
   g_services.lpp = &power::linkPower();
-  // JOB_BEGIN, JOB_END, PATH_SET, PATH_GET and STATUS's two job bits (spec/LINK-PROTOCOL.md 6.1;
-  // the sends, the reply and the counters follow in phase 2's tasks 02 to 04).
+  // The job of 6.1, the five sends of 6.2, the reply of 6.3, the counters of 6.4 and STATUS's two
+  // job bits (spec/LINK-PROTOCOL.md section 6; phase 2's task 04 is the backstop over them).
   g_services.mesh = g_mesh_client;  // => kCapMeshClient
+  // OBS_PULL, STATUS's obs_pending and obs_dropped, and MESH_COUNTERS' three advert counts
+  // (spec/LINK-PROTOCOL.md section 7). The ring is filled from TwinOakMesh::onAdvertRecv through
+  // noteAdvert() below, not from here.
+  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0x7f
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 
@@ -228,6 +239,18 @@ bool raiseAttention(uint8_t reason, uint16_t detail) {
 }
 
 bool raiseWalterWake() { return raiseAttention(kAttentionPersonAsked, 0); }
+
+void noteAdvert(const meshclient::HeardAdvert& heard) {
+  // The threshold, the `obs.wake` setting and "once per filling of the ring" are the ring face's
+  // (src/meshclient/LinkObservations.cpp); the hourly limit and the whole of section 8's sequence
+  // are the machine's. This is the one line that joins them, and it is here because this file is
+  // where both objects live.
+  if (!g_observations.noteAdvert(heard, g_attention.walterAsleep())) return;
+  raiseAttention(kAttentionRingNearlyFull, g_observations.wakeWaiting());
+}
+
+bool obsWakeEnabled() { return g_observations.wakeEnabled(); }
+void setObsWakeEnabled(bool on) { g_observations.setWakeEnabled(on); }
 
 bool attentionPending() { return g_attention.pendingReason() != kAttentionNone; }
 

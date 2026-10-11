@@ -1,18 +1,18 @@
-// src/app/Settings.{h,cpp}: our seven keys as upstream's CLI sees them - `sensor list`,
+// src/app/Settings.{h,cpp}: our eight keys as upstream's CLI sees them - `sensor list`,
 // `sensor get <key>`, `sensor set <key> <value>` - against a fake host.
 //
 // What is checked: the order of `sensor list` is stable (it is what a bench reads and what
-// upstream's paging counts in, and the two keys of phase 1's task 06 are **appended** so that
-// nothing task 05 documented moved), an unknown key is not ours, a `set` of a read-only key is
-// refused, `walter.wake` takes 1 and nothing else, and the two battery thresholds take a decimal
-// number of millivolts and nothing else.
+// upstream's paging counts in, and every key a later task adds is **appended** so that nothing
+// task 05 documented moved), an unknown key is not ours, a `set` of a read-only key is refused,
+// `walter.wake` takes 1 and nothing else, the two battery thresholds take a decimal number of
+// millivolts and nothing else, and `obs.wake` takes 0 and 1 both ways.
 //
 // The last tests are the arithmetic of upstream's own `sensor list`, which stops adding lines
-// once it has written 134 bytes into a 160-byte reply: with these seven keys in this order a
+// once it has written 134 bytes into a 160-byte reply: with these eight keys in this order a
 // fresh node prints task 05's five and `... next:5`, a node whose counters have grown wide
-// prints four and `... next:4`, `sensor list 5` prints the two thresholds - and the one case
-// that would be longer than the window (a release version string together with a `restored`
-// clock) is measured here rather than found on a bench.
+// prints four and `... next:4`, `sensor list 5` prints the two thresholds and `obs.wake` - and
+// the one case that would be longer than the window (a release version string together with a
+// `restored` clock) is measured here rather than found on a bench.
 
 #include <gtest/gtest.h>
 
@@ -43,6 +43,8 @@ class FakeHost : public twinoak::SettingsHost {
   bool accept_thresholds = true;
   int low_sets = 0;
   int crit_sets = 0;
+  bool obs_wake = false;
+  int obs_sets = 0;
 
   const char* fwVersion() const override { return version.c_str(); }
   uint16_t linkErrors() const override { return errors; }
@@ -68,6 +70,11 @@ class FakeHost : public twinoak::SettingsHost {
     crit_mv = mv;
     return true;
   }
+  bool obsWake() const override { return obs_wake; }
+  void setObsWake(bool on) override {
+    obs_sets++;
+    obs_wake = on;
+  }
 };
 
 }  // namespace
@@ -75,18 +82,18 @@ class FakeHost : public twinoak::SettingsHost {
 TEST(TheTable, TheOrderIsStableAndIsWhatSensorListPrints) {
   FakeHost host;
   twinoak::Settings s(host);
-  ASSERT_EQ(7, twinoak::Settings::count());
+  ASSERT_EQ(8, twinoak::Settings::count());
 
-  // Task 05's five, in task 05's order, and the two of task 06 after them.
-  const char* const want[] = {"fw.version",  "walter.wake",  "link.errors", "walter.seen",
-                              "clock.state", "power.low_mv", "power.crit_mv"};
+  // Task 05's five, in task 05's order, then task 06's two, then phase 2's task 03's.
+  const char* const want[] = {"fw.version",  "walter.wake",  "link.errors",   "walter.seen",
+                              "clock.state", "power.low_mv", "power.crit_mv", "obs.wake"};
   for (int i = 0; i < twinoak::Settings::count(); i++) {
     EXPECT_STREQ(want[i], twinoak::Settings::name(i)) << "index " << i;
   }
   EXPECT_EQ(nullptr, twinoak::Settings::name(-1));
-  EXPECT_EQ(nullptr, twinoak::Settings::name(7));
+  EXPECT_EQ(nullptr, twinoak::Settings::name(8));
   EXPECT_EQ(nullptr, s.value(-1));
-  EXPECT_EQ(nullptr, s.value(7));
+  EXPECT_EQ(nullptr, s.value(8));
 }
 
 TEST(TheTable, EveryValueIsWhatTheHostSays) {
@@ -101,6 +108,7 @@ TEST(TheTable, EveryValueIsWhatTheHostSays) {
   EXPECT_STREQ("unset", s.value(4)) << "clock.state";
   EXPECT_STREQ("3500", s.value(5)) << "power.low_mv, the default";
   EXPECT_STREQ("3300", s.value(6)) << "power.crit_mv, the default";
+  EXPECT_STREQ("0", s.value(7)) << "obs.wake, off at boot";
 
   // And one that has been running, with thresholds somebody set.
   host.errors = 65535;  // the counter saturates there
@@ -116,9 +124,11 @@ TEST(TheTable, EveryValueIsWhatTheHostSays) {
   EXPECT_STREQ("restored", s.value(4));
   EXPECT_STREQ("3600", s.value(5));
   EXPECT_STREQ("3350", s.value(6));
+  host.obs_wake = true;
+  EXPECT_STREQ("1", s.value(7));
 }
 
-TEST(TheTable, FourOfTheSevenAreReadOnlyAndAnUnknownKeyIsNotOurs) {
+TEST(TheTable, FourOfTheEightAreReadOnlyAndAnUnknownKeyIsNotOurs) {
   FakeHost host;
   twinoak::Settings s(host);
 
@@ -130,6 +140,7 @@ TEST(TheTable, FourOfTheSevenAreReadOnlyAndAnUnknownKeyIsNotOurs) {
   EXPECT_EQ(0, host.wakes);
   EXPECT_EQ(0, host.low_sets);
   EXPECT_EQ(0, host.crit_sets);
+  EXPECT_EQ(0, host.obs_sets);
 
   // Not ours: upstream's CLI has already offered it to upstream's own manager and will answer
   // "can't find custom var" when nobody takes it.
@@ -142,8 +153,12 @@ TEST(TheTable, FourOfTheSevenAreReadOnlyAndAnUnknownKeyIsNotOurs) {
   EXPECT_FALSE(s.set(nullptr, "1"));
   EXPECT_FALSE(s.set("walter.wake", nullptr));
   EXPECT_FALSE(s.set("power.low_mv", nullptr));
+  EXPECT_FALSE(s.set("obs.wak", "1"));
+  EXPECT_FALSE(s.set("obs.wake1", "1"));
+  EXPECT_FALSE(s.set("obs.wake", nullptr));
   EXPECT_EQ(0, host.wakes);
   EXPECT_EQ(0, host.low_sets);
+  EXPECT_EQ(0, host.obs_sets);
 }
 
 TEST(TheTable, WalterWakeTakesOneAndNothingElse) {
@@ -203,6 +218,29 @@ TEST(TheTable, TheTwoThresholdsTakeADecimalNumberOfMillivolts) {
   EXPECT_EQ(3, host.low_sets);
 }
 
+TEST(TheTable, ObsWakeTakesZeroAndOneAndGoesBothWays) {
+  // Section 8's reason 5 is off by default, because a unit on a busy mesh must not wake its
+  // Walter every hour for adverts alone (src/meshclient/LinkObservations.h). Unlike
+  // `walter.wake`, which is a request, this one is a setting: it can be turned off again.
+  FakeHost host;
+  twinoak::Settings s(host);
+
+  EXPECT_STREQ("0", s.value(7));
+  EXPECT_TRUE(s.set("obs.wake", "1"));
+  EXPECT_TRUE(host.obs_wake);
+  EXPECT_STREQ("1", s.value(7));
+  EXPECT_TRUE(s.set("obs.wake", "0"));
+  EXPECT_FALSE(host.obs_wake);
+  EXPECT_STREQ("0", s.value(7));
+  EXPECT_EQ(2, host.obs_sets);
+
+  const char* const no[] = {"", "2", "on", "off", "true", "false", "1 ", " 0", "01"};
+  for (const char* value : no) {
+    EXPECT_FALSE(s.set("obs.wake", value)) << "'" << value << "'";
+  }
+  EXPECT_EQ(2, host.obs_sets) << "a value the table cannot read never reaches the board";
+}
+
 namespace {
 
 // Upstream's `sensor list` (src/helpers/CommonCLI.cpp at the pin d9296435) writes "<n> vars\n"
@@ -227,7 +265,7 @@ std::string sensorList(twinoak::Settings& s, int start, int& printed) {
 
 }  // namespace
 
-TEST(SensorList, AFreshNodeListsTaskFivesFiveAndPagesTheTwoThresholds) {
+TEST(SensorList, AFreshNodeListsTaskFivesFiveAndPagesTheRest) {
   FakeHost host;
   host.seen = true;
   host.seen_ago = 42;
@@ -245,12 +283,13 @@ TEST(SensorList, AFreshNodeListsTaskFivesFiveAndPagesTheTwoThresholds) {
   EXPECT_NE(std::string::npos, page1.find("... next:5")) << page1;
   EXPECT_EQ(std::string::npos, page1.find("power.low_mv")) << page1;
 
-  // `sensor list 5` is the rest of it, and the pair is together.
+  // `sensor list 5` is the rest of it, and the pair of thresholds is together.
   const std::string page2 = sensorList(s, 5, printed);
-  EXPECT_EQ(2, printed) << page2;
+  EXPECT_EQ(3, printed) << page2;
   EXPECT_LT(page2.size(), 160u) << page2;
   EXPECT_NE(std::string::npos, page2.find("power.low_mv=3500\n")) << page2;
-  EXPECT_NE(std::string::npos, page2.find("power.crit_mv=3300")) << page2;
+  EXPECT_NE(std::string::npos, page2.find("power.crit_mv=3300\n")) << page2;
+  EXPECT_NE(std::string::npos, page2.find("obs.wake=0")) << page2;
   EXPECT_EQ(std::string::npos, page2.find("next:")) << page2;
 }
 

@@ -86,6 +86,8 @@ class BoardSettingsHost : public twinoak::SettingsHost {
   bool setBatteryCritMv(uint16_t mv) override {
     return twinoak::power::setBatteryCritMilliVolts(mv);
   }
+  bool obsWake() const override { return twinoak::link::obsWakeEnabled(); }
+  void setObsWake(bool on) override { twinoak::link::setObsWakeEnabled(on); }
 };
 
 BoardSettingsHost g_settings_host;

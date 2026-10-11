@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine,
-# settings table, power/environment readers and mesh-client job behind a pipe) and drives
-# tools/linkcli.py against it: hello, ping, status, identity, time, time set, cli, power, env,
-# lpp, the job and its path, sleep, an attention and reboot, with no board and no serial port,
-# plus the timed worst-case pass.
+# settings table, power/environment readers, mesh-client job and observation ring behind a pipe)
+# and drives tools/linkcli.py against it: hello, ping, status, identity, time, time set, cli,
+# power, env, lpp, the job and its path, the five sends, the observations, sleep, an attention
+# and reboot, with no board and no serial port, plus the timed worst-case pass.
 #
 # It needs a host C++ compiler. On Windows that is the container tasks/RUNBOOK.md section 2 names,
 # from the repository root:
@@ -33,7 +33,9 @@ echo "== build"
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/link/codec/*.cpp src/link/session/*.cpp \
   src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp \
-  src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp src/meshclient/Reply.cpp \
+  src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp \
+  src/meshclient/LinkObservations.cpp src/meshclient/ObservationRing.cpp \
+  src/meshclient/Reply.cpp \
   src/power/BatteryWatch.cpp src/power/Environment.cpp src/power/Ina3221.cpp \
   src/power/LinkPower.cpp src/power/PowerReader.cpp src/power/Prefs.cpp \
   src/power/Telemetry.cpp
@@ -186,6 +188,25 @@ echo
 echo "== reply (nothing held on a fresh boot) and counters"
 $cli reply
 $cli counters
+
+echo
+echo "== observations (7). A ring is per-boot RAM, so --adverts hears that many at startup. The"
+echo "   pull prints the key prefix, the hops, the SNR, the RSSI and the age; the name comes only"
+echo "   with --names, decoded from app_data on this laptop and never on the node."
+python3 tools/linkcli.py --pipe "$out/linkloop --adverts 7" obs
+python3 tools/linkcli.py --pipe "$out/linkloop --adverts 7" obs 2 --names
+
+echo
+echo "== more adverts than the ring holds: status shows it full with a loss count, counters say"
+echo "   how many verified, and a pull reports what was lost since the last one"
+python3 tools/linkcli.py --pipe "$out/linkloop --adverts 70" status
+python3 tools/linkcli.py --pipe "$out/linkloop --adverts 70" counters
+python3 tools/linkcli.py --pipe "$out/linkloop --adverts 70" obs 1
+
+echo
+echo "== a pull of nothing takes nothing, and an empty ring says so"
+python3 tools/linkcli.py --pipe "$out/linkloop --adverts 3" obs 0
+$cli obs
 
 echo
 echo "== sensor set walter.wake 1 - what a mesh admin sends - raises attention reason 4"

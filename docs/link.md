@@ -6,18 +6,16 @@ page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
 What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's tasks
-01 and 02): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
+01 to 03): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
 `REBOOT`, `CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job
 requests `JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, the five sends
 `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY` and `SEND_TRACE`, the
-reply with `REPLY_GET` and `MESH_COUNTERS`, and `EV_BOOT`, `EV_ATTENTION` and
-`EV_MESH_REPLY` as events. Everything else of the protocol answers
-`ERR_UNSUPPORTED` until the task that owns it lands — the observation ring and
-`OBS_PULL` of phase 2's task 03 — and `HELLO`'s `caps` is `0x6f` (`CLI`,
-`POWER`, `ENV`, `MESH_CLIENT`, `ATTENTION`, `TIME_PERSIST`) and nothing else for
-exactly the same reason: a capability is an interface that is there
-(`src/link/session/Interfaces.h`). `LPP_GET` has no capability bit of its own:
-§4 gates it on `CLI`.
+reply with `REPLY_GET`, `OBS_PULL` and `MESH_COUNTERS`, and `EV_BOOT`,
+`EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type protocol
+1.0 defines** outside its two reserved ranges (provisioning, phase 3's task 03;
+the bridge role, later). `HELLO`'s `caps` is `0x7f`, every bit of it, because a
+capability is an interface that is there (`src/link/session/Interfaces.h`).
+`LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
 
@@ -71,6 +69,7 @@ python3 tools/linkcli.py --port COM7 discover     # flood a path discovery to it
 python3 tools/linkcli.py --port COM7 reply        # the reply the last send is waiting for
 python3 tools/linkcli.py --port COM7 counters     # what the radio and the client have sent
 python3 tools/linkcli.py --port COM7 job end      # forget the peer
+python3 tools/linkcli.py --port COM7 obs          # collect the adverts the node heard
 ```
 
 `hello` is the first request of a session and may be repeated at any time. It
@@ -82,7 +81,7 @@ HELLO
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0x6f (CLI, POWER, ENV, MESH_CLIENT, ATTENTION, TIME_PERSIST)
+  caps          0x7f (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -95,8 +94,9 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` grows as the later tasks land: `0x6f` today, and phase 2's task 03
-  adds `OBSERVATIONS`. Nothing else of this page changes with it.
+- `caps` is `0x7f` — every bit protocol 1.0 defines. A capability is an
+  interface that is there, so a build that left one out would simply not
+  advertise it and would answer `ERR_UNSUPPORTED` for its requests.
 
 `ping` proves the main loop is turning, which a reset line cannot: it echoes
 the nonce and reports the uptime. `status` is the one to read when something is
@@ -502,10 +502,65 @@ REPLY
   the way to it.
 - **`counters`** is `MESH_COUNTERS`: `rx` and `tx` from the radio, `client_tx`
   the mesh client's own — **one per send and nothing else**, which is what an
-  exit node's transaction count is held against — and the noise floor and last
-  RSSI/SNR. The advert counts and `obs_dropped` arrive with the ring (task 03).
+  exit node's transaction count is held against — the noise floor and last
+  RSSI/SNR, and the observation ring's three counts (`adverts`, `adverts_drop`
+  and `obs_dropped`; §2g).
 - **`STATUS`'s flag bit 1** (`reply awaited`) is on from a send with a timeout
   until its reply or its deadline.
+
+## 2g. Observations: the adverts the node heard
+
+Every advert this repeater hears — once its signature has verified — is kept
+for the Walter, with the path it arrived by and how well it was heard. That is
+the free half of what an exit node tells MeshMaster: who is out there, and how
+they are reached from here. The ring holds **64** records and nothing is ever
+pushed: the Walter collects them when it is awake.
+
+```
+$ python3 tools/linkcli.py --port COM7 obs
+OBS_PULL
+  count         5
+  remaining     12
+  dropped       0  (lost to a full ring since the last pull)
+    key        hops     snr     rssi      age
+    a1b2c3d4   0       6.00  -84 dBm      41s
+    7f3a9c02   2      -2.50  unknown     300s  via a1b27f3a (2-byte)
+    ...
+```
+
+- **`obs [max]`** asks for at most `max` records and gets as many as fit **one
+  payload** — one to five of them, depending on how long each record's path and
+  application data are. **The records it returns leave the ring**, so this is a
+  collection and not a view: `remaining` says how many are still there, and a
+  second `obs` fetches the next ones. A retry of the same request (§3) gets the
+  *same* records back and not the next ones, because the node remembers the
+  response it gave.
+- `hops` **0 with an RSSI** is a direct neighbour, which is the thing to look
+  for first. A record with hops carries the path the advert arrived by and the
+  hash size it was flooded at.
+- `age` is **measured** on the node's millisecond clock and not computed from
+  its epoch, so it is right whatever the clock has been told since; `adv_ts` in
+  the record is the *advertiser's* own timestamp.
+- `rssi` reads `unknown` for an advert whose RSSI could not be kept: the node
+  notes it while the packet is still the one the radio just received, and a
+  flood held back behind more than 32 others loses the note. The SNR is the
+  packet's own and is always there.
+- **`--names`** decodes each advert's name, role and position from its
+  application data **on this laptop**. The node copies those bytes and never
+  looks inside them: the name is something a stranger chose, and neither end of
+  this link logs it (`spec/LINK-PROTOCOL.md` §7).
+- `status` carries `obs_pending` (waiting in the ring) and `obs_dropped` (lost
+  to a full ring since boot); `counters` carries `adverts` (adverts that
+  verified), `adverts_drop` and the same `obs_dropped`. A ring that is full and
+  losing records is a node nobody has collected from and not a fault — the
+  repeater is none the worse for it.
+- **`sensor set obs.wake 1`**, from the console or from a mesh admin, lets a
+  ring at three quarters full ask for a sleeping Walter (`EV_ATTENTION` reason
+  5, with the records waiting as its `detail`). It is **off by default**,
+  because a unit on a busy mesh would otherwise wake its box every hour for
+  adverts alone and each wake costs an LTE attach; the default is "collect them
+  when the Walter is awake anyway". It is a per-boot setting, like the clock: a
+  Walter that wants it says so after each `EV_BOOT`.
 
 ## 3. When it says nothing
 
@@ -549,21 +604,25 @@ docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 ```
 
 That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
-`time set`, `cli`, `power`, `env`, `lpp`, `sleep`, an attention and `reboot`
-against it, and times one pass of the link. It is not part of `tools/verify.ps1`: it needs a host
-compiler, and what it proves about the session itself is already a native test
+`time set`, `cli`, `power`, `env`, `lpp`, the job, the five sends, `obs`,
+`sleep`, an attention and `reboot` against it, and times one pass of the link.
+It is not part of `tools/verify.ps1`: it needs a host compiler, and what it
+proves about the session itself is already a native test
 (`test/test_link_session`).
 
-Five things in that program are the firmware's own code and not a stub - the
+Six things in that program are the firmware's own code and not a stub - the
 clock keeper, the attention machine, the settings table, the power and
-environment readers and the mesh client's job - so `cli "sensor set walter.wake
-1"` through the pipe really does raise an attention, `--wake` raises one at
-startup so that `listen` shows the whole sequence with nothing but a laptop,
-`power`, `env` and `lpp` go through the firmware's own conversion and its own
-cache over a fake I2C bus (`--drop-ina` is the "unplug the B-board" case), and
-`--job` begins a job at startup so that `path` reads a route back through the
-real `Job` (a job is per-boot RAM, so each one-shot `linkcli` invocation is
-otherwise a fresh boot with no job).
+environment readers, the mesh client's job and the observation ring - so `cli
+"sensor set walter.wake 1"` through the pipe really does raise an attention,
+`--wake` raises one at startup so that `listen` shows the whole sequence with
+nothing but a laptop, `power`, `env` and `lpp` go through the firmware's own
+conversion and its own cache over a fake I2C bus (`--drop-ina` is the "unplug
+the B-board" case), `--job` begins a job at startup so that `path` reads a route
+back through the real `Job`, and `--adverts <n>` hears that many synthetic
+adverts so that `obs` empties the firmware's own ring with its own payload
+fitting (a job and a ring are both per-boot RAM, so each one-shot `linkcli`
+invocation is otherwise a fresh boot with neither). `--obs-wake` turns the
+`obs.wake` setting on.
 
 ## 5. Inside the firmware
 
@@ -575,7 +634,7 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 | session | `src/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
 | attention | `src/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
 | power | `src/power/` | the INA3221's registers and per-channel shunts, the BME280, the two readers' schedules, the battery thresholds and the Cayenne-LPP. Portable but for `BoardPower.cpp`. |
-| mesh client | `src/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule — and `PeerSlot`, the index arithmetic of the extra peer. Portable; the peer overrides are in `src/app/TwinOakMesh.cpp`. |
+| mesh client | `src/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule; the five sends behind `MeshPort`; the reply record and its matching rules; `PeerSlot`, the index arithmetic of the extra peer; the observation ring, its pull and the RSSI note table. Portable; the peer overrides, the packet building and the advert capture are in `src/app/TwinOakMesh.cpp`. |
 | transport | `src/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
 | the board's half | `src/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
 

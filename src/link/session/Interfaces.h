@@ -210,12 +210,31 @@ struct MeshClientAccess {
   virtual void getCounters(MeshCountersResponse& out) = 0;
 };
 
-// The observation ring (phase 2). Present => kCapObservations.
+// The observation ring (phase 2's task 03; src/meshclient/LinkObservations.h implements it over
+// the ring of src/meshclient/ObservationRing.h). Present => kCapObservations.
 struct ObservationAccess {
   virtual ~ObservationAccess() {}
 
-  virtual uint8_t pending() const = 0;           // STATUS's obs_pending
+  virtual uint8_t pending() const = 0;            // STATUS's obs_pending
   virtual uint16_t droppedSinceBoot() const = 0;  // STATUS's obs_dropped, saturating
+
+  // MESH_COUNTERS' three observation counts (section 6.4), since boot. They are the ring's and
+  // not the mesh client's, which is why the session reads them here and not through
+  // MeshClientAccess::getCounters.
+  virtual uint32_t adverts() const = 0;               // adverts that verified
+  virtual uint32_t advertsDropped() const = 0;
+  virtual uint32_t observationsDropped() const = 0;   // lost to a full ring
+
+  // OBS_PULL (section 7): up to `max` records, oldest first, as many as fit in one payload.
+  // Fills `remaining`, `dropped` and the records, whose views point into the implementation's own
+  // storage and stay valid until the next pull - which is long enough, because the session
+  // encodes the response inside this request's own handler.
+  //
+  // **The records handed out leave the ring.** A link-level retry of the same request (section 3)
+  // never reaches here: the session answers it from its one-entry memory, which is what makes
+  // "the same records, not the next ones" true without this function knowing anything about
+  // retries.
+  virtual void pull(uint8_t max, ObsPullResponse& out, uint32_t now_ms) = 0;
 };
 
 // Everything the session is given. The three that are not optional are checked by the session's

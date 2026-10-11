@@ -7,9 +7,10 @@ namespace twinoak {
 namespace {
 
 // The order `sensor list` prints, and the order upstream's paging counts in. **It is phase 1's
-// task 05's order of five keys with two appended**, which is the only place a new key can go
-// without renumbering one a bench instruction or a document already names (docs/link.md,
-// docs/bench.md, tasks/phase-1/reports/05.md).
+// task 05's order of five keys with the later tasks' appended** - task 06's two thresholds, then
+// phase 2's task 03's `obs.wake` - which is the only place a new key can go without renumbering
+// one a bench instruction or a document already names (docs/link.md, docs/bench.md,
+// tasks/phase-1/reports/05.md).
 //
 // That order was chosen for one quirk of upstream's: `sensor list` stops adding lines once it has
 // written **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp at the pin d9296435),
@@ -19,8 +20,8 @@ namespace {
 //
 //   - a fresh node lists all five of task 05's and `... next:5`, 159 bytes of the 160;
 //   - a node whose counters have grown wide lists four and `... next:4`;
-//   - `sensor list 5` is then how the two thresholds are read, and `sensor get <key>` always
-//     works whatever the paging does.
+//   - `sensor list 5` is then how the two thresholds and `obs.wake` are read, and
+//     `sensor get <key>` always works whatever the paging does.
 //
 // A listing that would be longer than the window is **cut, not spilled**: the session keeps 64
 // guard bytes behind upstream's 160 and counts the cut (src/link/session/Session.h,
@@ -37,12 +38,13 @@ enum Key : int {
   kClockState,
   kPowerLowMv,
   kPowerCritMv,
+  kObsWake,
   kKeyCount,
 };
 
 const char* const kNames[kKeyCount] = {
-    "fw.version",  "walter.wake",  "link.errors", "walter.seen",
-    "clock.state", "power.low_mv", "power.crit_mv",
+    "fw.version",  "walter.wake",  "link.errors",   "walter.seen",
+    "clock.state", "power.low_mv", "power.crit_mv", "obs.wake",
 };
 
 // A decimal millivolt value, with nothing else in it: "3500" yes, "3500 " no, "3.5" no, "+3500"
@@ -91,6 +93,10 @@ const char* Settings::value(int i) {
     case kPowerCritMv:
       snprintf(buf_, sizeof(buf_), "%u", unsigned(host_.batteryCritMv()));
       return buf_;
+    case kObsWake:
+      // "0" or "1": whether a filling observation ring may ask for a sleeping Walter
+      // (LINK-PROTOCOL.md section 8, reason 5). Off at boot.
+      return host_.obsWake() ? "1" : "0";
     default:
       return nullptr;
   }
@@ -112,6 +118,14 @@ bool Settings::set(const char* name, const char* value) {
     uint16_t mv = 0;
     if (!parseMilliVolts(value, mv)) return false;
     return host_.setBatteryCritMv(mv);
+  }
+  if (strcmp(name, kNames[kObsWake]) == 0) {
+    // Both ways, unlike `walter.wake`: this one is a setting and not a request, so it can be
+    // turned off again.
+    const bool on = strcmp(value, "1") == 0;
+    if (!on && strcmp(value, "0") != 0) return false;
+    host_.setObsWake(on);
+    return true;
   }
   return false;  // the other four are read-only
 }
