@@ -17,7 +17,8 @@ src/
   board/                target.h / target.cpp for our adapter: the board object, the radio, the clock, the sensors;
                         UpstreamHeaders.h, the one place upstream's headers are included from (section 11)
   link/                 the box link: codec (portable), session and dispatcher (portable), UART transport
-  clock/                the clock keeper (portable) and its flash file
+  clock/                ClockKeeper (the rules, portable), BoardClock (the board's ports and
+                        its flash file), LinkClock (the keeper as the link's ClockAccess)
   power/                INA3221 with per-channel shunts, BME280, thresholds (arithmetic portable)
   meshclient/           the job, the five sends, the reply, the observation ring (state portable)
   fwdesc/               the image descriptor
@@ -60,13 +61,15 @@ We need none of it, because what we add hangs on three kinds of thing that are *
 | know a packet's RSSI while it is still that packet's | `logRx` | protected virtual |
 | count what we transmit | `logTx` | protected virtual |
 | be a client of one peer | `searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | protected virtual |
+| know when a packet of ours carried our clock (§5) | `sendSelfAdvertisement` (public, `CommonCLICallbacks`), `onAnonDataRecv` (protected) | virtual |
+| write the clock's file before a restart (§5) | `MainBoard::reboot()`, `MainBoard::powerOff()` | virtual on the board |
 | originate a packet | `createAnonDatagram`, `createDatagram`, `createTrace`, `sendDirect`, `sendFlood` | public on `Mesh` |
 
-`TwinOakMesh : public MyMesh` overrides the protected virtuals, calls the base for everything that
-is not ours, and adds the link. `main.cpp` constructs it where upstream's constructs `MyMesh`.
+`TwinOakMesh : public MyMesh` overrides those virtuals, calls the base for everything that is
+not ours, and adds the link. `main.cpp` constructs it where upstream's constructs `MyMesh`.
 Nothing of upstream's names `the_mesh` but its own `main.cpp`, so the type of ours is nobody's
-business but ours. One of the eight, `onAdvertRecv`, is declared in `MyMesh.h` without the
-`override` keyword; it is virtual all the same, through `mesh::Mesh`, and ours says `override`.
+business but ours. One of them, `onAdvertRecv`, is declared in `MyMesh.h` without the `override`
+keyword; it is virtual all the same, through `mesh::Mesh`, and ours says `override`.
 
 ### The one piece of cleverness: an extra peer in front
 
@@ -206,22 +209,63 @@ reaches the repeater can ask it to wake its own uplink.
 
 ## 5. The clock keeper
 
-Batch-1 boards have no RTC. Upstream's volatile clock starts every boot at a fixed date in 2024,
-and a node whose clock runs backwards has its adverts and requests taken for replays by everyone
-who heard the later ones.
+Batch-1 boards have no RTC - the RV-3028 and its backup capacitors are DNP for a worldwide
+allocation (the hardware repository's `PROJECT-KNOWLEDGE.md` S1). Upstream's volatile clock starts
+every boot at a fixed date in 2024 (`VolatileRTCClock`, `src/helpers/ArduinoHelpers.h`:
+`base_time = 1715770351`), and a node whose clock runs backwards has its adverts and replies taken
+for replays by everyone who heard the later ones.
 
-The keeper (portable rules, a small flash file):
+`src/clock/` is three files: `ClockKeeper.{h,cpp}` is every rule, portable and tested natively
+against fakes; `BoardClock.{h,cpp}` is the only one that knows what a RAK4630 is; `LinkClock.h` is
+twenty lines that make the keeper the box link's `ClockAccess` - and the one place that holds the
+keeper's four states against the wire's `time_state` with a `static_assert`.
 
-- keeps the newest time it has known twice: in RAM that survives a reset (a watchdog or the reset
-  pin loses nothing), and in a file, rewritten at most once an hour and on a clean reboot (a power
-  cut loses up to that hour);
-- at boot, if no RTC answered, continues from the RAM value, or else from the file's value plus the
-  save interval — **never earlier than anything this node has sent**, at the price of being up to
-  an hour ahead (`time_state` *restored*);
-- takes the time from the Walter (`TIME_SET`, *set*): forward always; backwards only while nothing
-  with a timestamp has left the node since boot, or when told to force it, as the protocol says;
-- **holds the boot advert** until the clock is *set* or *rtc*, or until a timeout — a repeater
-  with no Walter must still announce itself, late and with the best time it has.
+The keeper reaches the board through four ports, and a null port is a memory this board does not
+have: **upstream's clock** (`rtc_clock`, which is what the mesh stamps packets from), **a hardware
+RTC**, **RAM that survives a reset**, and **a file**.
+
+- **Two memories, and only one of them exists today.** The file is `/clock`, ten bytes - a magic,
+  the time, one flag and a checksum - rewritten when what it holds is more than the save interval
+  (an hour) behind the clock, and unconditionally on a restart the firmware itself asks for, where
+  it is marked *clean*. The surviving-RAM memory is **not implemented**: no place in this board's
+  RAM can be shown to survive, because the core's startup copies `__data_start__` to
+  `__bss_start__` out of flash and the C library zeroes `__bss_start__` to `__bss_end__`, which
+  leaves only the gap above `__bss_end__` - and that is inside the RAM the Adafruit bootloader uses
+  for itself, and the bootloader runs before us on every reset (`tasks/phase-1/reports/04.md` has
+  the reading, with the linker script and the bootloader image's own numbers). The port and its
+  rules stay, tested, for the day a place is found or an RTC is fitted.
+- **At boot**, in order: a hardware RTC whose answer is a sane time wins (`time_state` *rtc*, and
+  nothing is written to it); otherwise the surviving RAM value as it stands (*restored*); otherwise
+  the file's value **plus the save interval** (*restored*) - the node cannot know how long it was
+  down, and being an hour ahead is harmless where being a second behind its own last advert is not.
+  The one exception is a file marked *clean* read after a software reset: that value is the second
+  the restart happened in, so it needs no margin, and the flag is spent at once so that a later
+  crash cannot reuse it. Otherwise upstream's default, which is never right (*unset*).
+- **Sane** means 2026-01-01 or later and before 2100: this firmware did not exist before that, so
+  an earlier answer is an unset RTC, a part that lost its backup, or a mistake. It is also what
+  lets the board tell "an RTC answered" from "upstream's volatile clock answered" when they are the
+  same object, which `AutoDiscoverRTCClock` makes them (it keeps no flag a caller can read).
+- **`TIME_SET`** (*set*): forward always; backwards only with *force*, or while the state is
+  *unset* or *restored* and nothing carrying a timestamp has left this node since it booted - which
+  the advert hold makes the normal case. An epoch outside the sane window is `ERR_RANGE` whatever
+  *force* says. A set saves both memories, and a forced set that moves the clock *down* brings the
+  saved bound down with it.
+- **The console keeps working.** Upstream's own `time <epoch>` and `clock sync` set `rtc_clock`
+  directly and refuse to go backwards themselves; the keeper **polls** for a forward jump it did
+  not make and moves to *set* when it sees one, so not a line of upstream's CLI is patched. A
+  backwards jump - only `clkreboot` can make one - is deliberately not followed: the memories are a
+  high-water mark.
+- **The boot advert waits.** Our `main.cpp` sends it, so ours decides when: as soon as the state is
+  *set* or *rtc*, or 60 seconds after boot, and `STATUS` flag bit 3 says so while the hold is on.
+  Upstream's *periodic* adverts stay upstream's - the first of them cannot fire for two minutes.
+- **What counts as a timestamp leaving the node** is four virtuals of `TwinOakMesh`:
+  `sendSelfAdvertisement` (ours, and the console's `advert`), and `onAnonDataRecv`,
+  `onPeerDataRecv`, `onPeerPathRecv` - a packet addressed to us that verified, which upstream
+  answers with a reply carrying our clock.
+- **Every restart the firmware performs writes the file first**: `TwinOakBoard::reboot()` and
+  `powerOff()` (which is what the console's `reboot`, `clkreboot` and `poweroff` reach) and the box
+  link's own restart, which also covers the three bootloader modes that never touch the board
+  object.
 
 ## 6. Power and environment
 
@@ -302,7 +346,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | | Native tests | Build only | Bench |
 |---|---|---|---|
 | link codec, session, retry memory | ✔ against the fixtures and fakes | | UART through the bulkheads |
-| clock rules | ✔ | the flash file | a reboot keeps time moving forward |
+| clock rules, the boot order, the file's rate | ✔ against fakes, and the `TIME_SET` fixture through the real session | the flash file, the RTC probe | a reboot keeps time moving forward |
 | shunt arithmetic, thresholds | ✔ | I2C reads | real currents, sign, calibration |
 | job state, reply matching | ✔ | the overrides, the sends | a login to a real repeater |
 | observation ring | ✔ | advert capture | adverts heard on the roof |
@@ -335,6 +379,15 @@ against the build, by the task that first compiled our application onto upstream
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/board/UpstreamHeaders.h` and `src/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Corrections made above by **p1-04**, the clock: §1 (what is under `src/clock/`), §2 (two more
+rows of the table - the virtuals the clock keeper needs, which p1-01 did not know about - and "the
+eight" is now ten), §5 (rewritten: the file is the only memory there is, and why; the *clean*
+flag; the sane window; the jump poll; which virtuals count as a timestamp leaving the node) and
+§10. What that task read of upstream is cited where it is used - `src/clock/BoardClock.cpp` for
+the clock helpers and the reset reason, `src/app/TwinOakMesh.h` for the four virtuals and the
+advert timers, `src/board/target.h` for `reboot()`/`powerOff()` - and `docs/upstream.md` place 5
+lists them.
 
 Corrections made above by that task: §1 (the wrapper headers), §2 (the define order, `UITask.cpp`,
 `the_mesh`, `onAdvertRecv`'s missing keyword), §3 (`TwinOakBoard` and the virtual base; the

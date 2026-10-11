@@ -5,12 +5,13 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-What the firmware answers today (phase 1's task 03): `HELLO`, `PING`, `STATUS`,
-`IDENTITY`, `REBOOT`, and `EV_BOOT` once when it comes up. Everything else of
-the protocol answers `ERR_UNSUPPORTED` until the task that owns it lands — 04
-the clock, 05 the console and attention, 06 telemetry, phase 2 the mesh client
-— and `HELLO`'s `caps` is `0x00` for exactly the same reason: a capability is
-an interface that is there (`src/link/session/Interfaces.h`).
+What the firmware answers today (phase 1's tasks 03 and 04): `HELLO`, `PING`,
+`STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`, and `EV_BOOT` once when
+it comes up. Everything else of the protocol answers `ERR_UNSUPPORTED` until the
+task that owns it lands — 05 the console and attention, 06 telemetry, phase 2
+the mesh client — and `HELLO`'s `caps` is `0x40` (`TIME_PERSIST`) and nothing
+else for exactly the same reason: a capability is an interface that is there
+(`src/link/session/Interfaces.h`).
 
 ## 1. Wiring the dongle
 
@@ -45,6 +46,8 @@ resetting while the other is alive, and neither waits for the other.
 python3 tools/linkcli.py --port COM7 hello        # /dev/ttyUSB0 on Linux
 python3 tools/linkcli.py --port COM7 ping
 python3 tools/linkcli.py --port COM7 status
+python3 tools/linkcli.py --port COM7 time         # read the clock
+python3 tools/linkcli.py --port COM7 time set     # set it to this laptop's
 python3 tools/linkcli.py --port COM7 identity
 python3 tools/linkcli.py --port COM7 listen 30    # the events, for 30 s
 python3 tools/linkcli.py --port COM7 reboot 0     # and then `listen` for EV_BOOT
@@ -59,7 +62,7 @@ HELLO
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0x00 (none)
+  caps          0x40 (TIME_PERSIST)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -72,7 +75,7 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` grows as the later tasks land. Nothing else of this page changes with
+- `caps` grows as the later tasks land: `0x40` today. Nothing else of this page changes with
   it.
 
 `ping` proves the main loop is turning, which a reset line cannot: it echoes
@@ -90,6 +93,53 @@ boot that follows.
 
 `-v` prints every frame as hex, in both directions, which is the thing to paste
 into a report when a frame is refused.
+
+## 2a. The clock
+
+The first-batch boards have **no RTC fitted**, so a repeater that restarts has
+no idea what time it is — and MeshCore judges replays by timestamps, so a clock
+that goes backwards makes this node's own adverts look like replays to every
+node that heard the later ones. `docs/ARCHITECTURE.md` §5 is the design; from a
+laptop it looks like this:
+
+```
+$ python3 tools/linkcli.py --port COM7 time
+TIME_GET
+  epoch         1791740555 (2026-10-11 17:42:35 UTC)
+  time_state    1 (restored)
+
+$ python3 tools/linkcli.py --port COM7 time set
+TIME_SET 1791736955 (2026-10-11 16:42:35 UTC), source 3 (a person at a console)
+  prev_epoch    1791740555 (2026-10-11 17:42:35 UTC)
+  epoch         1791736955 (2026-10-11 16:42:35 UTC)
+  time_state    2 (set)
+```
+
+- `time_state` **0 unset** is the firmware's built-in date in 2024 and is never
+  right. **1 restored** is carried over from before the reset: never earlier
+  than anything this node has already sent, but up to an hour *ahead* of the
+  truth, because the node cannot know how long it was down. **2 set** means
+  somebody set it over this link (or at the console) since boot. **3 rtc** means
+  a hardware RTC answered, which no batch-1 board can do.
+- **A set may always move the clock forward.** Backwards it is refused with
+  `ERR_RANGE` unless `--force` is given, *or* the state is still `unset` or
+  `restored` and nothing carrying a timestamp has left the node since it booted
+  — which is the normal case, because the boot advert is held back until the
+  clock is set. So a Walter (or a person) that sets the time promptly may
+  correct a restored clock in either direction; one that waits may not, and
+  `--force` is then the override, on a person's instruction.
+- An epoch before 2026 or after 2099 is `ERR_RANGE` whatever `--force` says:
+  this firmware did not exist then.
+- `status` says the same thing in `time_state` and `epoch`, and its **flag bit
+  3** (`adverts held`) is on while the boot advert is waiting for a clock. It
+  clears when the clock is set or after 60 seconds, whichever comes first. The
+  USB console's `sensor get clock.state` is the same state by name, readable
+  over the mesh by an admin as well.
+- The node keeps its own lower bound in a file (`/clock`, rewritten at most once
+  an hour and always just before a restart it performs itself), which is what
+  `restored` is restored from. There is **no** surviving-RAM copy on this board;
+  `tasks/phase-1/reports/04.md` says why, and the consequence is that every
+  reset costs up to an hour of being ahead until something sets the clock.
 
 ## 3. When it says nothing
 
