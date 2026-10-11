@@ -50,6 +50,14 @@ The five sends (phase 2's task 02): on the job's behalf the RAK logs in to its p
 something, sends it a CLI line, floods a discovery or traces a path, and reports the reply as an
 `EV_MESH_REPLY` event (which `listen` shows) and on `reply`. Each send is one packet on the air.
 A password is read from a prompt, never the command line, and printed as stars.
+
+    python3 tools/linkcli.py --port COM7 obs                   # the adverts the node heard
+    python3 tools/linkcli.py --port COM7 obs 2 --names         # ... with the names decoded here
+
+The observation ring (phase 2's task 03): every advert the repeater heard, with the path it
+arrived by and how well it was heard. **The records a pull returns leave the ring**, so this is
+a collection and not a view. The node never parses an advert's application data; `--names`
+decodes it on this laptop, which is the only place a stranger's chosen name is read.
 Requires `pyserial` for `--port` and nothing at all for `--pipe` or `--help`.
 """
 
@@ -97,6 +105,11 @@ STATUS_FLAG_NAMES = [
     (0x0008, "adverts held"), (0x0010, "radio up"),
 ]
 TIME_SOURCE_NAMES = {1: "the cellular network", 2: "the server", 3: "a person at a console"}
+# MeshCore's ADV_TYPE_* (helpers/AdvertDataHelpers.h), in the low nibble of an advert's first
+# application-data byte, named as the MeshMaster agent names them.
+ADV_TYPE_NAMES = {1: "companion", 2: "repeater", 3: "roomserver", 4: "sensor"}
+ADV_FLAG_HAS_POSITION = 0x10
+ADV_FLAG_HAS_NAME = 0x80
 # A path's path_mode (LINK-PROTOCOL.md 6.1).
 PATH_MODE_NAMES = {0: "none (the next send floods)", 1: "direct (zero hops)", 2: "hops"}
 # POWER_GET's three channels on the standard B-board, what a positive current means on each, and
@@ -469,6 +482,8 @@ def print_fields(msg_type, f, indent=""):
         print("%ssender_ts     %d (%s)" % (indent, f["sender_ts"], utc(f["sender_ts"])))
     elif msg_type in (ref.REPLY_GET, ref.EV_MESH_REPLY):
         print_reply(f, indent)
+    elif msg_type == ref.OBS_PULL:
+        print_observations(f, indent)
     elif msg_type == ref.MESH_COUNTERS:
         print("%srx            %d" % (indent, f["rx"]))
         print("%stx            %d" % (indent, f["tx"]))
@@ -487,6 +502,63 @@ def print_fields(msg_type, f, indent=""):
     else:
         for key in sorted(f):
             print("%s%-13s %s" % (indent, key, f[key]))
+
+
+def decode_advert_app(app_hex):
+    """An advert's app_data as MeshCore's AdvertDataBuilder wrote it (spec/tools/linkref.py's
+    advert_app): a flags byte with the node type in its low nibble, 0x10 = a position follows,
+    0x80 = a name follows; then two little-endian int32 of degrees times 1e6; then the name.
+
+    This runs **on the laptop**. The repeater copies these bytes and never looks inside them: the
+    name is something a stranger chose, and neither end of the link logs it (LINK-PROTOCOL.md 7).
+    Returns (role, lat, lon, name), each None when the advert did not say."""
+    raw = bytes.fromhex(app_hex) if isinstance(app_hex, str) else bytes(app_hex)
+    if not raw:
+        return None, None, None, None
+    flags = raw[0]
+    role = ADV_TYPE_NAMES.get(flags & 0x0F)
+    at = 1
+    lat = lon = None
+    if flags & ADV_FLAG_HAS_POSITION and len(raw) >= at + 8:
+        lat = int.from_bytes(raw[at:at + 4], "little", signed=True) / 1e6
+        lon = int.from_bytes(raw[at + 4:at + 8], "little", signed=True) / 1e6
+        at += 8
+    name = None
+    if flags & ADV_FLAG_HAS_NAME and len(raw) > at:
+        name = raw[at:].decode("utf-8", "replace")
+    return role, lat, lon, name
+
+
+def print_observations(f, indent="", names=False):
+    """An OBS_PULL response (LINK-PROTOCOL.md section 7): one line per advert, oldest first."""
+    print("%scount         %d" % (indent, len(f["records"])))
+    print("%sremaining     %d" % (indent, f["remaining"]))
+    print("%sdropped       %d  (lost to a full ring since the last pull)"
+          % (indent, f["dropped"]))
+    if not f["records"]:
+        return
+    print("%s  %-10s %-4s %7s %8s %8s" % (indent, "key", "hops", "snr", "rssi", "age"))
+    for o in f["records"]:
+        hops = o["path_len"] & 0x3F
+        size = (o["path_len"] >> 6) + 1
+        rssi = "unknown" if o["rssi"] == 0x7FFF else "%d dBm" % o["rssi"]
+        line = "%s  %-10s %-4d %6.2f %8s %7ds" % (
+            indent, o["pubkey"][:8], hops, o["snr_q4"] / 4.0, rssi, o["age_s"])
+        if hops:
+            line += "  via %s (%d-byte)" % (o["path"], size)
+        print(line)
+        if names:
+            # Decoded here and nowhere else. An advert whose app_data says nothing prints nothing.
+            role, lat, lon, name = decode_advert_app(o["app_data"])
+            parts = []
+            if name is not None:
+                parts.append(name)
+            if role is not None:
+                parts.append(role)
+            if lat is not None:
+                parts.append("%.5f, %.5f" % (lat, lon))
+            if parts:
+                print("%s    %s" % (indent, " - ".join(parts)))
 
 
 def print_reply(f, indent=""):
@@ -956,6 +1028,23 @@ def cmd_counters(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+def cmd_obs(link, args):
+    """OBS_PULL (section 7): the adverts the node heard, oldest first. The records it hands over
+    **leave its ring**, so this empties what it returns."""
+    if not 0 <= args.max <= 255:
+        print("max is a u8: 0 to 255 (section 7)")
+        return 2
+    f = link.request(ref.OBS_PULL, {"max": args.max})
+    print("OBS_PULL")
+    if f["status"] != ref.OK:
+        print_fields(ref.OBS_PULL, f, indent="  ")
+        report_events(link)
+        return 1
+    print_observations(f, indent="  ", names=args.names)
+    report_events(link)
+    return 0
+
+
 def cmd_listen(link, args):
     if args.seconds:
         print("listening for %d s" % args.seconds)
@@ -1099,6 +1188,13 @@ def build_parser():
     subs.add_parser("reply", help="the reply record as it stands (6.3)").set_defaults(
         run=cmd_reply)
     subs.add_parser("counters", help="the mesh counters (6.4)").set_defaults(run=cmd_counters)
+    obs = subs.add_parser("obs", help="collect the adverts the node heard (7)")
+    obs.add_argument("max", nargs="?", type=int, default=255,
+                     help="the most records wanted; the node returns as many as fit one payload")
+    obs.add_argument("--names", action="store_true",
+                     help="decode each advert's name, role and position from its application"
+                          " data - on this laptop, which is the only place it is read")
+    obs.set_defaults(run=cmd_obs)
 
     listen = subs.add_parser("listen", help="print the events the node sends")
     listen.add_argument("seconds", type=int, nargs="?", default=0,

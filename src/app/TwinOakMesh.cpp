@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../clock/BoardClock.h"
+#include "../link/BoardLink.h"
 #include "../meshclient/PeerSlot.h"
 
 // The mesh client's portable constants are upstream's own numbers, held together here - the one
@@ -26,6 +27,20 @@ static_assert(twinoak::meshclient::kPayloadTypeAnonReq == PAYLOAD_TYPE_ANON_REQ,
               "PAYLOAD_TYPE_ANON_REQ");
 static_assert(twinoak::meshclient::kTxtTypeCliData == TXT_TYPE_CLI_DATA, "TXT_TYPE_CLI_DATA");
 static_assert(twinoak::meshclient::kTxtTypePlain == TXT_TYPE_PLAIN, "TXT_TYPE_PLAIN");
+// The observation ring's three (src/meshclient/ObservationRing.h). The app_data cap is the one
+// that matters: Mesh::onRecvPacket clamps an advert's app_data to MAX_ADVERT_DATA_SIZE before
+// onAdvertRecv sees it (src/Mesh.cpp:269), and spec/LINK-PROTOCOL.md section 7 caps a record's
+// app_len at 32 - so while the two agree nothing is ever truncated, and a bump that raises
+// upstream's is a compile error here rather than a silently shortened record.
+static_assert(twinoak::meshclient::kObsAppDataMax == MAX_ADVERT_DATA_SIZE,
+              "an advert's app_data is MAX_ADVERT_DATA_SIZE");
+static_assert(twinoak::meshclient::kObsPathBytesMax == MAX_PATH_SIZE,
+              "a record's path is MAX_PATH_SIZE");
+// The note table is as long as the packet pool, so a note cannot be pushed out while its own
+// packet still waits in the inbound queue (examples/simple_repeater/MyMesh.cpp:863 at the pin
+// constructs `new StaticPoolPacketManager(32)`; the number is not a macro, so it is cited and
+// held here as a literal).
+static_assert(twinoak::meshclient::kRssiNotes == 32, "the packet pool of simple_repeater");
 // REQ_TYPE_GET_TELEMETRY_DATA is a define of MyMesh.cpp alone (examples/simple_repeater/
 // MyMesh.cpp:48), not of a header, so it is cited and not asserted: 0x03. TELEM_PERM_BASE is
 // src/helpers/SensorManager.h's.
@@ -96,6 +111,14 @@ int8_t TwinOakMesh::snrQ4Of(const mesh::Packet* pkt) {
   return int8_t(pkt->getSNR() * 4.0f);
 }
 
+int16_t TwinOakMesh::rssiOf(const mesh::Packet* pkt) {
+  // The note logRx took, taken back once (src/meshclient/RssiNotes.h). There is none for a
+  // packet this node built itself, and none for one whose note was pushed out of the table -
+  // which the record then says with 0x7FFF, as section 6.3 and section 7 both allow.
+  int16_t rssi = 0;
+  return rssi_notes_.take(pkt, rssi) ? rssi : twinoak::meshclient::kReplyRssiUnknown;
+}
+
 void TwinOakMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx,
                                  const uint8_t* secret, uint8_t* data, size_t len) {
   if (extra_ && twinoak::meshclient::peerSlotIsOurs(sender_idx, extra_)) {
@@ -106,15 +129,15 @@ void TwinOakMesh::onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_
     // which is the price a single-peer client pays (ARCHITECTURE section 2) - and so the clock
     // keeper is *not* told: nothing carrying our clock is answered.
     //
-    // The RSSI is not known yet: the note logRx will take (task 03) is what will carry it, and
-    // until then the record says so with kRssiUnknown (0x7FFF), as section 6.3 allows.
+    // The RSSI is the note logRx took against this packet (task 03): taken once, here, because
+    // this is where the reply is made of it. A packet with no note - one that arrived before the
+    // table had room - reads 0x7FFF, which section 6.3 names as "not known".
     (void)secret;
+    const int16_t rssi = rssiOf(packet);
     if (type == PAYLOAD_TYPE_RESPONSE) {
-      client_.onResponse(data, len, /*via_path=*/false, snrQ4Of(packet),
-                         twinoak::meshclient::kReplyRssiUnknown, millis());
+      client_.onResponse(data, len, /*via_path=*/false, snrQ4Of(packet), rssi, millis());
     } else if (type == PAYLOAD_TYPE_TXT_MSG) {
-      client_.onText(data, len, snrQ4Of(packet), twinoak::meshclient::kReplyRssiUnknown,
-                     millis());
+      client_.onText(data, len, snrQ4Of(packet), rssi, millis());
     }
     return;
   }
@@ -140,8 +163,8 @@ bool TwinOakMesh::onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uin
     (void)secret;
     client_.onReturnedPath(path_len, path);
     if (extra_type == PAYLOAD_TYPE_RESPONSE && extra != nullptr) {
-      client_.onResponse(extra, extra_len, /*via_path=*/true, snrQ4Of(packet),
-                         twinoak::meshclient::kReplyRssiUnknown, millis());
+      client_.onResponse(extra, extra_len, /*via_path=*/true, snrQ4Of(packet), rssiOf(packet),
+                         millis());
     }
     return false;
   }
@@ -162,7 +185,7 @@ void TwinOakMesh::onTraceRecv(mesh::Packet* packet, uint32_t tag, uint32_t auth_
   (void)auth_code;
   const size_t hops = size_t(path_len) >> (flags & 0x03);
   client_.onTrace(tag, flags, path_hashes, path_len, path_snrs, hops, snrQ4Of(packet),
-                  twinoak::meshclient::kReplyRssiUnknown, millis());
+                  rssiOf(packet), millis());
   MyMesh::onTraceRecv(packet, tag, auth_code, flags, path_snrs, path_hashes, path_len);
 }
 
@@ -271,11 +294,58 @@ void TwinOakMesh::onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret,
 void TwinOakMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                                uint32_t timestamp, const uint8_t* app_data,
                                size_t app_data_len) {
+  // **The base first, before anything of ours.** Upstream's neighbour table is the repeater's
+  // own - MyMesh::onAdvertRecv chains to mesh::Mesh and puts a zero-hop repeater advert in it
+  // (MyMesh.cpp:650-660 at the pin d9296435) - and it must see every advert exactly as it did
+  // before this firmware existed. The ring is what we add after it, and nothing here can change
+  // what upstream made of the advert.
   MyMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);
+
+  // An advert from this node's own key is not recorded: it is this node's voice coming back, not
+  // an observation of anybody. Mesh::onRecvPacket never delivers one - it drops a self advert
+  // before the signature check (src/Mesh.cpp:263, `self_id.matches(id.pub_key)`) - so this is the
+  // guard that says so in our own code rather than resting on upstream's.
+  if (self_id.matches(id.pub_key)) return;
+
+  twinoak::meshclient::HeardAdvert heard;
+  memcpy(heard.pubkey, id.pub_key, PUB_KEY_SIZE);
+  heard.adv_ts = timestamp;  // the advertiser's own clock, not ours
+  heard.heard_ms = millis();
+  heard.snr_q4 = snrQ4Of(packet);
+  heard.rssi = rssiOf(packet);
+  // The path as it arrived, in MeshCore's own encoding: Packet::path_len is the byte, and
+  // getPathByteLen() is getPathHashCount() * getPathHashSize() (src/Packet.h:79-81). Empty for a
+  // direct neighbour. Dispatcher::tryParsePacket has already refused a packet whose path is
+  // longer than MAX_PATH_SIZE (src/Dispatcher.cpp:172-176), so the copy below cannot be clamped
+  // on this pin; the clamp is what makes a bump that widens the path a counted drop instead.
+  heard.path_len = packet->path_len;
+  uint8_t path_bytes = packet->getPathByteLen();
+  if (path_bytes > twinoak::meshclient::kObsPathBytesMax) {
+    path_bytes = twinoak::meshclient::kObsPathBytesMax;  // the record then fails its own check
+  }
+  if (path_bytes > 0) memcpy(heard.path, packet->path, path_bytes);
+  // The advert's application data: flags, position and **the name a stranger chose**. It is
+  // copied and nothing else - never parsed and never printed (section 7, S-12). Mesh.cpp:269 has
+  // already held it to MAX_ADVERT_DATA_SIZE, which the static_assert above holds to the record's.
+  size_t app_len = app_data_len;
+  if (app_len > twinoak::meshclient::kObsAppDataMax) app_len = twinoak::meshclient::kObsAppDataMax;
+  if (app_len > 0) memcpy(heard.app_data, app_data, app_len);
+  heard.app_len = uint8_t(app_len);
+
+  // Into the ring, and section 8's reason 5 raised when the ring has just reached three quarters
+  // full with `obs.wake` on and the Walter believed asleep (src/link/BoardLink.cpp).
+  twinoak::link::noteAdvert(heard);
 }
 
 void TwinOakMesh::logRx(mesh::Packet* pkt, int len, float score) {
   MyMesh::logRx(pkt, len, score);
+  // The one moment the radio's "last RSSI" still belongs to this packet: Dispatcher::checkRecv
+  // calls this immediately after parsing the frame (src/Dispatcher.cpp:238) and only then decides
+  // whether to hold a flood packet back in the inbound queue, for up to MAX_RX_DELAY_MILLIS -
+  // 32 seconds - before onRecvPacket sees it (:243-253). So the number is noted here against the
+  // packet and taken back where the advert or the reply is made of it
+  // (src/meshclient/RssiNotes.h; the agent firmware's AgentMesh::logRx does the same).
+  rssi_notes_.note(pkt, int16_t(radio_driver.getLastRSSI()));
 }
 
 void TwinOakMesh::logTx(mesh::Packet* pkt, int len) {

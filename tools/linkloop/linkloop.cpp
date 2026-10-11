@@ -15,9 +15,9 @@
 //   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
-// a session with a board that has what phase 1's tasks 03 to 06 and phase 2's tasks 01 and 02
-// implement: caps 0x6f (CLI, POWER, ENV, MESH_CLIENT, ATTENTION, TIME_PERSIST), no observations.
-// Five things in it are the firmware's own code and not a stub:
+// a session with a board that has what phase 1's tasks 03 to 06 and phase 2's tasks 01 to 03
+// implement: caps 0x7f (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST).
+// Six things in it are the firmware's own code and not a stub:
 //
 //   - the **ClockKeeper** (src/clock/), with out/linkloop/clock where the board has its flash
 //     file, so `time` and `time set` exercise the rules the firmware will run; one run of this
@@ -36,7 +36,12 @@
 //     "unplug the B-board" case with no board at all;
 //   - the **mesh client** (src/meshclient/), the job and the five sends and the reply record,
 //     over a port where nothing is ever transmitted, so a send is answered as the firmware
-//     answers it and its wait ends in the silence event. `--job` begins a job at startup.
+//     answers it and its wait ends in the silence event. `--job` begins a job at startup;
+//   - the **observation ring** (src/meshclient/ObservationRing.h and LinkObservations.h), so
+//     `obs`, `status` and `counters` through the pipe read the firmware's own ring, its own
+//     payload fitting and its own counters. `--adverts <n>` hears that many synthetic adverts at
+//     startup - a ring is per-boot RAM, like a job - and `--obs-wake` turns the `obs.wake`
+//     setting on so that attention reason 5 can be watched with nothing but a laptop.
 //
 // What cannot be here is upstream's interpreter itself, so every other command line is answered
 // by the handful of canned lines below. POSIX only: the loop waits on stdin with select(), which
@@ -63,6 +68,8 @@
 #include "link/session/Session.h"
 #include "meshclient/Job.h"
 #include "meshclient/LinkMeshClient.h"
+#include "meshclient/LinkObservations.h"
+#include "meshclient/ObservationRing.h"
 #include "power/BatteryWatch.h"
 #include "power/Environment.h"
 #include "power/Ina3221.h"
@@ -156,6 +163,8 @@ class LoopUpstreamClock : public twinoak::clock::UpstreamClock {
 bool g_emitted = false;  // --emitted, in main() below
 bool g_wake = false;     // --wake
 bool g_begin_job = false;  // --job: begin a job at startup, so `path` reads a route back
+long g_adverts = 0;        // --adverts <n>: adverts heard at startup, so `obs` has records
+bool g_obs_wake = false;   // --obs-wake: the obs.wake setting on
 
 LoopSystem g_system;
 LoopIdentity g_identity;
@@ -213,6 +222,9 @@ class LoopSettingsHost : public twinoak::SettingsHost {
   uint16_t batteryCritMv() const override;
   bool setBatteryLowMv(uint16_t mv) override;
   bool setBatteryCritMv(uint16_t mv) override;
+  // Likewise out of line: the observation ring is declared below this class too.
+  bool obsWake() const override;
+  void setObsWake(bool on) override;
 };
 
 LoopSettingsHost g_settings_host;
@@ -404,6 +416,46 @@ LoopMeshPort g_mesh_port;
 twinoak::meshclient::Job g_job;
 twinoak::meshclient::LinkMeshClient g_mesh_client(g_job, g_mesh_port);
 
+// The observation ring, the firmware's own (src/meshclient/). Nothing here decodes an advert: a
+// record is the bytes of section 7 and the name inside app_data is a stranger's, so the ring is
+// filled with synthetic records by --adverts and read back by `obs`, which decodes the name on
+// the laptop and only with --names (tools/linkcli.py).
+twinoak::meshclient::ObservationRing g_ring;
+twinoak::meshclient::LinkObservations g_observations(g_ring);
+
+// One advert heard, as src/app/TwinOakMesh.cpp builds the record from a packet: the nth node of a
+// made-up neighbourhood, half of them direct neighbours with an RSSI and half two hops away with
+// none, and an app_data MeshCore's AdvertDataBuilder would have written (a flags byte with the
+// repeater type and a name).
+void hearAdvert(long n, uint32_t now_ms) {
+  twinoak::meshclient::HeardAdvert a;
+  for (uint8_t i = 0; i < twinoak::meshclient::kObsPubKeyLen; i++) {
+    a.pubkey[i] = uint8_t(0x11 * (n % 13) + i);
+  }
+  a.adv_ts = g_upstream.now() - uint32_t(60 * n);
+  a.heard_ms = now_ms > uint32_t(1000 * n) ? now_ms - uint32_t(1000 * n) : 0;
+  a.snr_q4 = int8_t(24 - (n % 40));
+  if (n % 2 == 0) {
+    a.rssi = int16_t(-80 - (n % 30));
+    a.path_len = 0;  // a direct neighbour: hops 0 and an RSSI, which is the bench's marker
+  } else {
+    a.rssi = twinoak::meshclient::kObsRssiUnknown;
+    a.path_len = twinoak::meshclient::encodePathLen(2, 2);
+    a.path[0] = 0xa1;
+    a.path[1] = 0xb2;
+    a.path[2] = 0x7f;
+    a.path[3] = 0x3a;
+  }
+  const char* name = "linkloop node";
+  a.app_data[0] = 0x82;  // ADV_TYPE_REPEATER with "a name follows"
+  size_t i = 0;
+  for (; name[i] != 0 && i + 1 < twinoak::meshclient::kObsAppDataMax; i++) {
+    a.app_data[i + 1] = uint8_t(name[i]);
+  }
+  a.app_len = uint8_t(i + 1);
+  g_observations.noteAdvert(a, g_attention.walterAsleep());
+}
+
 uint16_t LoopSettingsHost::batteryLowMv() const { return g_battery.lowMilliVolts(); }
 uint16_t LoopSettingsHost::batteryCritMv() const { return g_battery.critMilliVolts(); }
 bool LoopSettingsHost::setBatteryLowMv(uint16_t mv) {
@@ -412,6 +464,8 @@ bool LoopSettingsHost::setBatteryLowMv(uint16_t mv) {
 bool LoopSettingsHost::setBatteryCritMv(uint16_t mv) {
   return g_battery.setThresholds(g_battery.lowMilliVolts(), mv);
 }
+bool LoopSettingsHost::obsWake() const { return g_observations.wakeEnabled(); }
+void LoopSettingsHost::setObsWake(bool on) { g_observations.setWakeEnabled(on); }
 
 Firmware g_firmware;
 Services g_services;
@@ -431,7 +485,8 @@ void wire() {
   g_services.power = &g_link_power;
   g_services.env = &g_link_power;
   g_services.lpp = &g_link_power;
-  g_services.mesh = &g_mesh_client;  // => kCapMeshClient; caps is now 0x6f
+  g_services.mesh = &g_mesh_client;  // => kCapMeshClient
+  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0x7f
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule
@@ -471,6 +526,11 @@ int pump() {
     const uint8_t hashes[] = {0xa1, 0xb2, 0x7f, 0x3a};
     g_job.begin(key, twinoak::meshclient::kPathHops, 2, 2, hashes, sizeof hashes, nowMs());
   }
+
+  // A ring is per-boot RAM too, so --adverts fills one at startup the way ten minutes on a roof
+  // antenna would. More than the ring holds is how a loss count and `dropped` are watched.
+  if (g_obs_wake) g_observations.setWakeEnabled(true);
+  for (long n = 0; n < g_adverts; n++) hearAdvert(n, nowMs());
 
   // As TwinOakSensors::begin() does it (src/board/target.cpp).
   g_power_reader.begin(nowMs());
@@ -604,9 +664,15 @@ int main(int argc, char** argv) {
       g_bus.dropped = true;  // the bench's "unplug the B-board": `power` then answers valid 0
     } else if (strcmp(argv[i], "--job") == 0) {
       g_begin_job = true;
+    } else if (strcmp(argv[i], "--obs-wake") == 0) {
+      g_obs_wake = true;
+    } else if (strcmp(argv[i], "--adverts") == 0 && i + 1 < argc) {
+      g_adverts = strtol(argv[++i], nullptr, 10);
+      if (g_adverts < 0) g_adverts = 0;
     } else {
       fprintf(stderr,
-              "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina] [--job]\n");
+              "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina] [--job]"
+              " [--adverts <n>] [--obs-wake]\n");
       return 2;
     }
   }

@@ -20,7 +20,15 @@
 //     firmware's credential test does);
 //   - Reply: the right response; a response with another tag; a response while a text is
 //     awaited; a text while a response is awaited; a late reply after the timeout; two replies
-//     (the first wins); the timeout itself; and what a CLI reply's plaintext must look like.
+//     (the first wins); the timeout itself; and what a CLI reply's plaintext must look like;
+//   - the observation ring (task 03): fill, wrap, the loss counted twice, `age_s` measured on the
+//     millisecond clock and not on the epoch, and the record the ring refuses;
+//   - the pull: fewer than there are, more than there are, zero, and how many fit one payload -
+//     including a record with the longest path and the longest application data section 7
+//     allows, of which exactly one fits;
+//   - the RSSI note table: a pooled packet reused, and a note taken back once;
+//   - attention reason 5: off by default, on with `obs.wake`, and only while the Walter is
+//     believed asleep.
 
 #include <gtest/gtest.h>
 
@@ -28,9 +36,14 @@
 #include <cstring>
 #include <vector>
 
+#include "link/codec/Messages.h"
+#include "link/codec/Numbers.h"
 #include "meshclient/Job.h"
+#include "meshclient/LinkObservations.h"
+#include "meshclient/ObservationRing.h"
 #include "meshclient/PeerSlot.h"
 #include "meshclient/Reply.h"
+#include "meshclient/RssiNotes.h"
 
 namespace {
 
@@ -519,6 +532,370 @@ TEST(ReplyRecord, ATraceWithTheAwaitedTag) {
   shortr.arm(3, 0);
   const uint8_t three[] = {1, 2, 3};
   EXPECT_FALSE(shortr.takeResponse(kAwaitResponse, 0, three, 3, false, 0, 0, 10));
+}
+
+// ----------------------------------------------------------------------------- the ring
+
+// A record of section 7, with everything but the fields a test is about left plain.
+HeardAdvert advertOf(uint8_t key_byte, uint32_t adv_ts, uint32_t heard_ms) {
+  HeardAdvert a;
+  for (uint8_t i = 0; i < kObsPubKeyLen; i++) a.pubkey[i] = uint8_t(key_byte + i);
+  a.adv_ts = adv_ts;
+  a.heard_ms = heard_ms;
+  a.snr_q4 = 29;
+  a.rssi = -84;
+  a.path_len = 0;  // a direct neighbour: no hops
+  a.app_len = 3;
+  a.app_data[0] = 0x82;
+  a.app_data[1] = 'h';
+  a.app_data[2] = 'i';
+  return a;
+}
+
+TEST(TheRing, ThePathByteCountIsTheCodecsOwnForEveryPathLen) {
+  // The ring judges a record's path with the job's encoding and the codec encodes it with
+  // Numbers.h's. They are the same arithmetic, held together here for all 256 values so that
+  // neither can drift.
+  for (int i = 0; i < 256; i++) {
+    const uint8_t path_len = uint8_t(i);
+    EXPECT_EQ(twinoak::link::obsPathBytes(path_len), obsPathByteCount(path_len))
+        << "path_len " << i;
+  }
+}
+
+TEST(TheRing, FillWrapAndTheLossCountedTwice) {
+  ObservationRing ring;
+  EXPECT_TRUE(ring.empty());
+  EXPECT_EQ(0u, ring.size());
+  EXPECT_EQ(0u, ring.adverts());
+
+  // Fill it exactly: nothing is lost.
+  for (uint8_t i = 0; i < kObsCapacity; i++) {
+    EXPECT_TRUE(ring.push(advertOf(i, 1000u + i, 1000u * i)));
+  }
+  EXPECT_TRUE(ring.full());
+  EXPECT_EQ(kObsCapacity, ring.size());
+  EXPECT_EQ(uint32_t(kObsCapacity), ring.adverts());
+  EXPECT_EQ(0u, ring.observationsDropped());
+  EXPECT_EQ(0u, ring.droppedSincePull());
+  EXPECT_EQ(1000u, ring.at(0).adv_ts) << "0 is the oldest";
+  EXPECT_EQ(1000u + kObsCapacity - 1, ring.at(kObsCapacity - 1).adv_ts);
+
+  // Three more: the three oldest go, and the loss is counted since boot and since the last pull.
+  for (uint8_t i = 0; i < 3; i++) {
+    EXPECT_TRUE(ring.push(advertOf(uint8_t(0x80 + i), 2000u + i, 0)));
+  }
+  EXPECT_EQ(kObsCapacity, ring.size()) << "a full ring stays full";
+  EXPECT_EQ(3u, ring.observationsDropped());
+  EXPECT_EQ(3u, ring.droppedSincePull());
+  EXPECT_EQ(3u, ring.droppedSinceBootSaturating());
+  EXPECT_EQ(uint32_t(kObsCapacity) + 3u, ring.adverts());
+  EXPECT_EQ(1003u, ring.at(0).adv_ts) << "the three oldest were the ones overwritten";
+  EXPECT_EQ(2002u, ring.at(kObsCapacity - 1).adv_ts) << "and the newest is the last one in";
+
+  // A pull reads the since-last count and resets it; the since-boot count keeps going.
+  ring.notePulled();
+  EXPECT_EQ(0u, ring.droppedSincePull());
+  EXPECT_EQ(3u, ring.observationsDropped());
+
+  // Out of range is the oldest, as the agent firmware's at() answers it.
+  EXPECT_EQ(ring.at(0).adv_ts, ring.at(kObsCapacity).adv_ts);
+
+  // And the ring wraps cleanly: consume some, push some, the order holds.
+  ring.consume(10);
+  EXPECT_EQ(kObsCapacity - 10, ring.size());
+  EXPECT_EQ(1013u, ring.at(0).adv_ts);
+  for (uint8_t i = 0; i < 10; i++) EXPECT_TRUE(ring.push(advertOf(i, 3000u + i, 0)));
+  EXPECT_TRUE(ring.full());
+  EXPECT_EQ(1013u, ring.at(0).adv_ts);
+  EXPECT_EQ(3009u, ring.at(kObsCapacity - 1).adv_ts);
+  EXPECT_EQ(3u, ring.observationsDropped()) << "nothing more was lost";
+
+  // consume(more than there are) is all there are; clear() keeps the counters.
+  ring.consume(255);
+  EXPECT_TRUE(ring.empty());
+  ring.push(advertOf(1, 4000, 0));
+  ring.clear();
+  EXPECT_TRUE(ring.empty());
+  EXPECT_EQ(uint32_t(kObsCapacity) + 14u, ring.adverts()) << "it still heard what it heard";
+}
+
+TEST(TheRing, ARecordItCannotCarryIsCountedAndNotKept) {
+  ObservationRing ring;
+  // A path_len whose hash size is 4 - which MeshCore reserves and Dispatcher::tryParsePacket
+  // refuses, so it cannot arrive on this pin - would need 4 x 63 bytes of path. The ring refuses
+  // it, counts it as an advert dropped, and keeps nothing.
+  HeardAdvert bad = advertOf(1, 1000, 0);
+  bad.path_len = uint8_t(0xFF);
+  EXPECT_EQ(4u, pathHashSize(bad.path_len));
+  EXPECT_FALSE(ring.push(bad));
+  EXPECT_TRUE(ring.empty());
+  EXPECT_EQ(1u, ring.adverts());
+  EXPECT_EQ(1u, ring.advertsDropped());
+  EXPECT_EQ(0u, ring.observationsDropped()) << "a refused record is not a ring that overflowed";
+
+  // So is an app_len past section 7's cap.
+  HeardAdvert wide = advertOf(2, 1001, 0);
+  wide.app_len = kObsAppDataMax + 1;
+  EXPECT_FALSE(ring.push(wide));
+  EXPECT_EQ(2u, ring.advertsDropped());
+
+  // The longest record section 7 does allow is kept: 32 hops of two bytes, 32 bytes of app data.
+  HeardAdvert longest = advertOf(3, 1002, 0);
+  longest.path_len = encodePathLen(2, 32);
+  longest.app_len = kObsAppDataMax;
+  EXPECT_TRUE(ring.push(longest));
+  EXPECT_EQ(1u, ring.size());
+  EXPECT_EQ(kObsPathBytesMax, obsPathByteCount(longest.path_len));
+}
+
+TEST(TheRing, AgeIsMeasuredOnTheMillisecondClockAndNotOnTheEpoch) {
+  // "age_s: seconds since this node heard it - measured, so it is right whatever the clock said"
+  // (section 7). The record holds the advertiser's timestamp and the millisecond clock, and
+  // nothing in it moves when somebody sets the epoch.
+  HeardAdvert a = advertOf(1, 1791719000u, 10000u);
+  EXPECT_EQ(0u, ageSeconds(a, 10000u));
+  EXPECT_EQ(41u, ageSeconds(a, 10000u + 41999u)) << "whole seconds, rounded down";
+  EXPECT_EQ(300u, ageSeconds(a, 10000u + 300000u));
+  // A TIME_SET of years changes nothing here: there is no epoch in this arithmetic at all.
+  EXPECT_EQ(1791719000u, a.adv_ts);
+  EXPECT_EQ(300u, ageSeconds(a, 10000u + 300000u));
+  // And across a millis() wrap it is still one subtraction.
+  HeardAdvert late = advertOf(1, 1791719000u, 0xFFFFF000u);
+  EXPECT_EQ(8u, ageSeconds(late, 0xFFFFF000u + 8000u));
+}
+
+// ----------------------------------------------------------------------------- the pull
+
+// What encodeObsPullResponse() makes of a pull, so that the fitter is held against the encoder
+// and not against an arithmetic repeated in the test.
+size_t encodedSize(const twinoak::link::ObsPullResponse& out) {
+  uint8_t buf[twinoak::link::kMaxPayload];
+  return twinoak::link::encodeObsPullResponse(out, buf, sizeof(buf));
+}
+
+TEST(ThePull, TheHeaderIsTheFiveBytesTheFitterAssumes) {
+  twinoak::link::ObsPullResponse empty;
+  EXPECT_EQ(kObsPullHeaderBytes, encodedSize(empty))
+      << "status, remaining, dropped, count (section 7)";
+}
+
+TEST(ThePull, FewerThanThereAreMoreThanThereAreAndZero) {
+  ObservationRing ring;
+  LinkObservations obs(ring);
+  for (uint8_t i = 0; i < 7; i++) EXPECT_TRUE(ring.push(advertOf(i, 1000u + i, 1000u * i)));
+  EXPECT_EQ(7u, obs.pending());
+
+  // Zero: a pull that asks for nothing takes nothing and drains nothing - but it is still a pull,
+  // so `dropped` is reported and reset.
+  twinoak::link::ObsPullResponse none;
+  obs.pull(0, none, 10000u);
+  EXPECT_EQ(0u, none.count);
+  EXPECT_EQ(7u, none.remaining);
+  EXPECT_EQ(0u, none.dropped);
+  EXPECT_EQ(7u, obs.pending());
+
+  // Fewer than there are: the oldest three, oldest first, and they leave the ring.
+  twinoak::link::ObsPullResponse three;
+  obs.pull(3, three, 10000u);
+  ASSERT_EQ(3u, three.count);
+  EXPECT_EQ(1000u, three.records[0].adv_ts);
+  EXPECT_EQ(1001u, three.records[1].adv_ts);
+  EXPECT_EQ(1002u, three.records[2].adv_ts);
+  EXPECT_EQ(10u, three.records[0].age_s) << "heard at 0 ms, pulled at 10000 ms";
+  EXPECT_EQ(8u, three.records[2].age_s);
+  EXPECT_EQ(4u, three.remaining);
+  EXPECT_EQ(4u, obs.pending());
+  EXPECT_LE(encodedSize(three), size_t(twinoak::link::kMaxPayload));
+
+  // More than there are: what is left, and no more.
+  twinoak::link::ObsPullResponse many;
+  obs.pull(255, many, 10000u);
+  ASSERT_EQ(4u, many.count) << "four left, and four of these fit one payload";
+  EXPECT_EQ(1003u, many.records[0].adv_ts);
+  EXPECT_EQ(0u, many.remaining);
+  EXPECT_TRUE(ring.empty());
+
+  // An empty ring answers nothing and says so.
+  twinoak::link::ObsPullResponse after;
+  obs.pull(10, after, 11000u);
+  EXPECT_EQ(0u, after.count);
+  EXPECT_EQ(0u, after.remaining);
+}
+
+TEST(ThePull, NoMoreThanFitOnePayloadAndTheDroppedCountIsSinceTheLastPull) {
+  ObservationRing ring;
+  LinkObservations obs(ring);
+  // Every record as short as one gets (no path, no app data): five of them fill the payload.
+  for (uint8_t i = 0; i < 12; i++) {
+    HeardAdvert a = advertOf(i, 1000u + i, 0);
+    a.app_len = 0;
+    EXPECT_TRUE(ring.push(a));
+  }
+  twinoak::link::ObsPullResponse out;
+  obs.pull(255, out, 0);
+  EXPECT_EQ(kObsPullMaxRecords, out.count);
+  EXPECT_EQ(5u, out.count) << "235 bytes of payload over 45 bytes a record";
+  EXPECT_EQ(7u, out.remaining);
+  const size_t encoded = encodedSize(out);
+  EXPECT_LE(encoded, size_t(twinoak::link::kMaxPayload));
+  EXPECT_GT(encoded + kObsRecordFixedBytes, size_t(twinoak::link::kMaxPayload))
+      << "and one more of them would not have fitted";
+
+  // Overflow the ring between two pulls: `dropped` counts what was lost since the last one and
+  // then starts again.
+  for (uint8_t i = 0; i < kObsCapacity + 2; i++) {
+    HeardAdvert a = advertOf(i, 5000u + i, 0);
+    a.app_len = 0;
+    ring.push(a);
+  }
+  twinoak::link::ObsPullResponse second;
+  obs.pull(1, second, 0);
+  EXPECT_EQ(1u, second.count);
+  EXPECT_EQ(9u, second.dropped) << "seven left over plus two past the ring's own capacity";
+  twinoak::link::ObsPullResponse third;
+  obs.pull(1, third, 0);
+  EXPECT_EQ(0u, third.dropped) << "lost since the last OBS_PULL, and that was the last one";
+  EXPECT_EQ(9u, obs.observationsDropped()) << "the since-boot count is untouched by a pull";
+  EXPECT_EQ(9u, obs.droppedSinceBoot());
+}
+
+TEST(ThePull, OneRecordWithTheLongestPathAndTheLongestAppDataFitsAndOnlyOne) {
+  ObservationRing ring;
+  LinkObservations obs(ring);
+  // The longest record section 7 allows: 64 bytes of path (32 hops of two bytes) and 32 bytes of
+  // application data - 141 bytes encoded. Two of them would be 282, so one payload holds one.
+  for (uint8_t n = 0; n < 3; n++) {
+    HeardAdvert a = advertOf(n, 1000u + n, 0);
+    a.path_len = encodePathLen(2, 32);
+    for (uint8_t i = 0; i < kObsPathBytesMax; i++) a.path[i] = uint8_t(0xA0 + i);
+    a.app_len = kObsAppDataMax;
+    for (uint8_t i = 0; i < kObsAppDataMax; i++) a.app_data[i] = uint8_t(0x40 + i);
+    EXPECT_TRUE(ring.push(a));
+  }
+
+  twinoak::link::ObsPullResponse out;
+  obs.pull(255, out, 0);
+  ASSERT_EQ(1u, out.count) << "only one record this long fits a 240-byte payload";
+  EXPECT_EQ(2u, out.remaining);
+  EXPECT_EQ(kObsPathBytesMax, out.records[0].path.len);
+  EXPECT_EQ(kObsAppDataMax, out.records[0].app_data.len);
+  const size_t encoded = encodedSize(out);
+  EXPECT_EQ(kObsPullHeaderBytes + kObsRecordFixedBytes + kObsPathBytesMax + kObsAppDataMax,
+            encoded);
+  EXPECT_LE(encoded, size_t(twinoak::link::kMaxPayload));
+
+  // And the next pull hands out the next one, in order.
+  twinoak::link::ObsPullResponse next;
+  obs.pull(255, next, 0);
+  ASSERT_EQ(1u, next.count);
+  EXPECT_EQ(1001u, next.records[0].adv_ts);
+}
+
+// ----------------------------------------------------------------------------- the RSSI notes
+
+TEST(TheRssiNotes, APooledPacketReusedAndANoteTakenBackOnce) {
+  RssiNotes notes;
+  // The addresses stand for Packets; nothing here dereferences them, which is what makes the
+  // table portable (src/meshclient/RssiNotes.h).
+  uint8_t pool[kRssiNotes + 1] = {0};
+  EXPECT_EQ(0u, notes.held());
+
+  notes.note(&pool[0], -97);
+  notes.note(&pool[1], -84);
+  EXPECT_EQ(2u, notes.held());
+
+  int16_t rssi = 0;
+  EXPECT_TRUE(notes.take(&pool[1], rssi));
+  EXPECT_EQ(-84, rssi);
+  // Once: the pool will hand that Packet out again, and the next frame's note is the next
+  // frame's.
+  rssi = 0;
+  EXPECT_FALSE(notes.take(&pool[1], rssi));
+  EXPECT_EQ(0, rssi) << "and the caller's value is untouched";
+  EXPECT_EQ(1u, notes.held());
+
+  // A pooled packet reused: the same address noted again is the new frame's number, and the old
+  // note is not left behind as a second entry.
+  notes.note(&pool[0], -60);
+  EXPECT_EQ(1u, notes.held());
+  EXPECT_TRUE(notes.take(&pool[0], rssi));
+  EXPECT_EQ(-60, rssi);
+  EXPECT_EQ(0u, notes.held());
+
+  // A packet nobody noted has no note, and nullptr is not a packet.
+  EXPECT_FALSE(notes.take(&pool[5], rssi));
+  notes.note(nullptr, -1);
+  EXPECT_EQ(0u, notes.held());
+  EXPECT_FALSE(notes.take(nullptr, rssi));
+
+  // The table is as long as the packet pool. One frame more than that pushes out the oldest note,
+  // which is what makes a record say "not known" rather than say a wrong number.
+  for (uint8_t i = 0; i < kRssiNotes; i++) notes.note(&pool[i], int16_t(-100 + i));
+  EXPECT_EQ(kRssiNotes, notes.held());
+  notes.note(&pool[kRssiNotes], -50);
+  EXPECT_EQ(kRssiNotes, notes.held());
+  EXPECT_FALSE(notes.take(&pool[0], rssi)) << "the oldest note was the one pushed out";
+  EXPECT_TRUE(notes.take(&pool[kRssiNotes], rssi));
+  EXPECT_EQ(-50, rssi);
+  EXPECT_TRUE(notes.take(&pool[1], rssi));
+  EXPECT_EQ(-99, rssi);
+}
+
+// ----------------------------------------------------------------------------- reason 5
+
+TEST(TheWakeThreshold, OffByDefaultAndOnWithObsWake) {
+  ObservationRing ring;
+  LinkObservations obs(ring);
+  EXPECT_FALSE(obs.wakeEnabled()) << "obs.wake is off at boot (section 8, reason 5)";
+  EXPECT_EQ(48u, kObsWakeThreshold) << "three quarters of 64";
+
+  // Off: the ring fills right up and nothing is ever owed. "Collect them when the Walter is awake
+  // anyway" is the default on purpose - an attention costs the battery an LTE attach.
+  for (uint8_t i = 0; i < kObsCapacity; i++) {
+    EXPECT_FALSE(obs.noteAdvert(advertOf(i, 1000u + i, 0), true)) << "advert " << int(i);
+  }
+  EXPECT_TRUE(ring.full());
+
+  // On, with the ring already past the threshold: the next advert asks, once.
+  obs.setWakeEnabled(true);
+  EXPECT_TRUE(obs.noteAdvert(advertOf(1, 2000, 0), true));
+  EXPECT_EQ(kObsCapacity, obs.wakeWaiting()) << "EV_ATTENTION's detail";
+  EXPECT_FALSE(obs.noteAdvert(advertOf(2, 2001, 0), true)) << "and not again for this filling";
+}
+
+TEST(TheWakeThreshold, ItIsTheCrossingAndOnlyWhileTheWalterIsBelievedAsleep) {
+  ObservationRing ring;
+  LinkObservations obs(ring);
+  obs.setWakeEnabled(true);
+
+  // Below three quarters: nothing is owed however many arrive.
+  for (uint8_t i = 0; i < kObsWakeThreshold - 1; i++) {
+    EXPECT_FALSE(obs.noteAdvert(advertOf(i, 1000u + i, 0), true)) << "advert " << int(i);
+  }
+  EXPECT_EQ(kObsWakeThreshold - 1, obs.pending());
+
+  // The one that reaches it, while the Walter is believed awake: it collects them itself, so
+  // nothing is asked - and nothing is spent, so the ask is still owed.
+  EXPECT_FALSE(obs.noteAdvert(advertOf(50, 2000, 0), false));
+  EXPECT_EQ(kObsWakeThreshold, obs.pending());
+
+  // Then it sleeps: the next advert asks, with the records waiting as the detail.
+  EXPECT_TRUE(obs.noteAdvert(advertOf(51, 2001, 0), true));
+  EXPECT_EQ(kObsWakeThreshold + 1, obs.wakeWaiting());
+  // Once per filling, whatever else arrives.
+  for (uint8_t i = 0; i < 5; i++) {
+    EXPECT_FALSE(obs.noteAdvert(advertOf(i, 3000u + i, 0), true));
+  }
+
+  // A pull that takes it back below the threshold arms it again.
+  twinoak::link::ObsPullResponse out;
+  while (obs.pending() >= kObsWakeThreshold) obs.pull(kObsPullMaxRecords, out, 0);
+  EXPECT_LT(obs.pending(), kObsWakeThreshold);
+  while (obs.pending() + 1 < kObsWakeThreshold) {
+    EXPECT_FALSE(obs.noteAdvert(advertOf(7, 4000, 0), true));
+  }
+  EXPECT_TRUE(obs.noteAdvert(advertOf(8, 4001, 0), true)) << "a fresh filling, a fresh ask";
 }
 
 }  // namespace

@@ -44,6 +44,14 @@
 // upstream's result and nothing else - TwinOakMesh.cpp says so above each, and that sentence is
 // the proof that the repeater is undisturbed.
 //
+// **What the radio heard** (phase 2's task 03). Two overrides carry the observation ring:
+// `logRx`, which notes the radio's last RSSI against the packet while it is still that packet's
+// (src/meshclient/RssiNotes.h says why it has to be there and not later), and `onAdvertRecv`,
+// which **calls the base first** - upstream's neighbour table is the repeater's own and must see
+// every advert exactly as before - and then puts the record of section 7 into the ring
+// (src/meshclient/ObservationRing.h). The note taken in `logRx` is also what fills the `rssi` of
+// a reply, in the three overrides that take one.
+//
 // **The mesh client's sends and replies** (phase 2's task 02; src/meshclient/LinkMeshClient.h is
 // the client, src/meshclient/MeshPort.h the seam). This class is the board's half of that seam:
 // it builds one packet from the plaintext the client hands it, with upstream's own
@@ -65,6 +73,8 @@
 #include "../meshclient/Job.h"
 #include "../meshclient/LinkMeshClient.h"
 #include "../meshclient/MeshPort.h"
+#include "../meshclient/ObservationRing.h"
+#include "../meshclient/RssiNotes.h"
 #include "UpstreamMyMesh.h"
 
 class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
@@ -167,6 +177,7 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // without the override keyword, but virtual all the same through mesh::Mesh (src/Mesh.h:122).
   // Upstream (MyMesh.cpp:650) chains to Mesh and puts a zero-hop repeater advert in its
   // neighbour table. Called by Mesh::onRecvPacket (src/Mesh.cpp:284) once the signature verified.
+  // Ours: the base first, then the record of section 7 into the ring.
   void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp,
                     const uint8_t* app_data, size_t app_data_len) override;
 
@@ -174,6 +185,7 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // in MyMesh.h; virtual in mesh::Dispatcher (src/Dispatcher.h:161). Upstream (MyMesh.cpp:479)
   // appends a line to the packet log file when logging is on. Called while the packet is still
   // the one the radio just received, so its RSSI is this packet's (ARCHITECTURE section 7).
+  // Ours: the base first, then the radio's last RSSI noted against the packet.
   void logRx(mesh::Packet* pkt, int len, float score) override;
 
   // Declared `void logTx(mesh::Packet* pkt, int len) override;` under `protected:` in MyMesh.h;
@@ -199,9 +211,15 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   bool dispatch(mesh::Packet* pkt, const twinoak::meshclient::Route& route);
   // The reply's SNR as the record carries it: quarter-decibels, from the packet.
   static int8_t snrQ4Of(const mesh::Packet* pkt);
+  // The RSSI of this packet, from the note logRx took, or kRssiUnknown when there is none. Taken
+  // once: the note is removed, because the pool will hand that Packet out again.
+  int16_t rssiOf(const mesh::Packet* pkt);
 
   twinoak::meshclient::Job job_;
   twinoak::meshclient::LinkMeshClient client_{job_, *this};
+  // The radio's last RSSI, noted in logRx against the packet it belonged to and taken back when
+  // an advert or a reply is made of that packet (src/meshclient/RssiNotes.h).
+  twinoak::meshclient::RssiNotes rssi_notes_;
   // Whether the extra peer is in front for the packet Mesh::onRecvPacket is handling now: set by
   // searchPeersByHash() - the first of the four calls, every time - and read by the three that
   // follow it, exactly as upstream's own matching_peer_indexes[] is filled by its
