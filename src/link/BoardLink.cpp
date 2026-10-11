@@ -2,6 +2,8 @@
 
 #include "../app/Version.h"
 #include "../board/target.h"
+#include "../clock/BoardClock.h"
+#include "../clock/LinkClock.h"
 #include "SerialTransport.h"
 #include "session/Interfaces.h"
 #include "session/ResetReason.h"
@@ -51,6 +53,11 @@ class BoardSystem : public SystemAccess {
   }
 
   void restartNow(uint8_t mode) override {
+    // The clock's lower bound, before anything else: this is a restart the firmware asked for,
+    // so the file may keep the second it happens in (src/clock/ClockKeeper.h). board.reboot()
+    // below would do it too - TwinOakBoard overrides it - but modes 1 to 3 do not go through the
+    // board at all, so it is done here for all four.
+    twinoak::clock::saveBeforeRestart();
     // The response was handed to the UART a delay ago, but the DMA may still be running: flush
     // both consoles before the core pulls the interrupts down (section 5.5, "which leaves time
     // for the response to leave the UART").
@@ -99,6 +106,12 @@ class BoardIdentity : public IdentityAccess {
 BoardSystem g_system;
 BoardIdentity g_identity;
 
+// The clock keeper as ClockAccess: twenty lines in src/clock/LinkClock.h, and what puts
+// TIME_PERSIST in HELLO's caps. It binds a reference to the keeper of another translation unit,
+// whose constructor may not have run yet - which is safe because that is all it does with it;
+// nothing here calls the keeper before main().
+clock::LinkClock g_clock(clock::keeper());
+
 // What this image is, filled in by linkBegin(). Field by field and not by braces: a C++11 struct
 // with default member initialisers is not an aggregate, and the board builds as gnu++11
 // (tasks/phase-1/reports/02.md).
@@ -127,6 +140,7 @@ void linkBegin(MyMesh& mesh) {
   g_services.firmware = &g_firmware;
   g_services.system = &g_system;
   g_services.identity = &g_identity;
+  g_services.clock = &g_clock;  // => kCapTimePersist in HELLO's caps
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 

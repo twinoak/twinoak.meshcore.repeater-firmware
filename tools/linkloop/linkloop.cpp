@@ -9,14 +9,18 @@
 // It is not part of the firmware and not part of tools/verify.ps1: it needs a host compiler, and
 // on Windows that is the container tasks/RUNBOOK.md section 2 names. Build and use:
 //
-//   g++ -std=c++17 -O2 -Wall -Wextra -I src -o out/p1-03/linkloop tools/linkloop/linkloop.cpp
-//       src/link/codec/*.cpp src/link/session/*.cpp          (one command, on one line)
-//   python3 tools/linkcli.py --pipe out/p1-03/linkloop hello
-//   out/p1-03/linkloop --bench 2000        # the worst-case pass, timed
+//   g++ -std=c++17 -O2 -Wall -Wextra -I src -o out/linkloop/linkloop tools/linkloop/linkloop.cpp
+//       src/link/codec/*.cpp src/link/session/*.cpp src/clock/ClockKeeper.cpp   (one line)
+//   python3 tools/linkcli.py --pipe out/linkloop/linkloop hello
+//   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
-// a session with a board that has only the three interfaces this task implements: caps 0, the
-// clock unset, no observations.
+// a session with a board that has what phase 1's tasks 03 and 04 implement: caps 0x40
+// (TIME_PERSIST), no observations, no console. The clock is the **real** ClockKeeper
+// (src/clock/), with out/linkloop/clock where the board has its flash file, so `time` and
+// `time set` through the pipe exercise the rules the firmware will run and not a stub of them -
+// and a second run of this program is a reset, with the clock restored as the board restores it.
+// `--emitted` starts it as a node that has already put a timestamp on the air.
 
 #include <cstdint>
 #include <cstdio>
@@ -25,6 +29,8 @@
 #include <string>
 #include <vector>
 
+#include "clock/ClockKeeper.h"
+#include "clock/LinkClock.h"
 #include "link/codec/FrameWriter.h"
 #include "link/codec/Numbers.h"
 #include "link/session/Interfaces.h"
@@ -75,8 +81,63 @@ class LoopIdentity : public IdentityAccess {
   uint8_t key_[kPubKeyLen];
 };
 
+// The clock's file where a board has flash: ten bytes in a real file, so that a `time set`
+// through the pipe goes through the keeper's own save rules **and** survives this process. One
+// run of this program is one boot of the board, so a second run is a reset - which is how the
+// whole point of the clock keeper can be watched from a laptop with no board at all. Delete the
+// file and the next run is a node that has never been told the time.
+const char* const kClockPath = "out/linkloop/clock";
+
+class LoopFile : public twinoak::clock::ClockFile {
+ public:
+  bool load(twinoak::clock::SavedTime& out) override {
+    uint8_t bytes[twinoak::clock::kSavedTimeBytes] = {0};
+    FILE* f = fopen(kClockPath, "rb");
+    if (f == nullptr) return false;
+    const size_t n = fread(bytes, 1, sizeof(bytes), f);
+    fclose(f);
+    if (n != sizeof(bytes)) return false;
+    return twinoak::clock::decodeSavedTime(bytes, sizeof(bytes), out);
+  }
+  bool save(const twinoak::clock::SavedTime& in) override {
+    uint8_t bytes[twinoak::clock::kSavedTimeBytes] = {0};
+    twinoak::clock::encodeSavedTime(in, bytes);
+    FILE* f = fopen(kClockPath, "wb");
+    if (f == nullptr) return false;
+    const size_t n = fwrite(bytes, 1, sizeof(bytes), f);
+    fclose(f);
+    return n == sizeof(bytes);
+  }
+};
+
+class LoopUpstreamClock : public twinoak::clock::UpstreamClock {
+ public:
+  // Upstream's volatile clock: a fixed date in 2024 that advances with the millisecond clock.
+  uint32_t now() const override { return base_ + nowMs() / 1000u; }
+  void set(uint32_t epoch) override { base_ = epoch - nowMs() / 1000u; }
+
+ private:
+  uint32_t base_ = 1715770351;
+};
+
+bool g_emitted = false;  // --emitted, in main() below
+
 LoopSystem g_system;
 LoopIdentity g_identity;
+LoopUpstreamClock g_upstream;
+LoopFile g_file;
+
+twinoak::clock::ClockPorts makePorts() {
+  twinoak::clock::ClockPorts ports;
+  ports.upstream = &g_upstream;
+  ports.file = &g_file;
+  // No RTC and no surviving RAM, as the first-batch boards have neither.
+  return ports;
+}
+
+twinoak::clock::ClockPorts g_ports = makePorts();
+twinoak::clock::ClockKeeper g_keeper(g_ports);
+twinoak::clock::LinkClock g_clock(g_keeper);
 Firmware g_firmware;
 Services g_services;
 
@@ -89,11 +150,20 @@ void wire() {
   g_services.firmware = &g_firmware;
   g_services.system = &g_system;
   g_services.identity = &g_identity;
+  g_services.clock = &g_clock;
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule
 // (read until a request is waiting, poll once, write the whole frame).
 int pump() {
+  // As src/main.cpp does it: the clock first, then the link.
+  g_keeper.begin(nowMs(), /*software_reset=*/false);
+  // "Something carrying this node's clock has already gone on the air" - what src/main.cpp says
+  // when it has sent the boot advert. It is a flag here because a board decides it by doing
+  // something this program cannot do, and because it is the only way to watch a backwards
+  // TIME_SET be refused (spec/LINK-PROTOCOL.md section 5.4).
+  if (g_emitted) g_keeper.noteTimestampEmitted();
+
   Session session(g_services);
   session.begin(nowMs());
   if (session.hasOutgoing()) {
@@ -105,6 +175,7 @@ int pump() {
     const int c = fgetc(stdin);
     if (c == EOF) return 0;
     session.feedByte(uint8_t(c), nowMs());
+    g_keeper.loop(nowMs());
     session.poll(nowMs());
     if (session.hasOutgoing()) {
       fwrite(session.outgoing(), 1, session.outgoingSize(), stdout);
@@ -192,8 +263,12 @@ int main(int argc, char** argv) {
     const long passes = argc >= 3 ? strtol(argv[2], nullptr, 10) : 2000;
     return bench(passes < 2 ? 2 : passes);
   }
+  if (argc == 2 && strcmp(argv[1], "--emitted") == 0) {
+    g_emitted = true;
+    return pump();
+  }
   if (argc >= 2) {
-    fprintf(stderr, "usage: linkloop [--bench <passes>]\n");
+    fprintf(stderr, "usage: linkloop [--bench <passes>] [--emitted]\n");
     return 2;
   }
   return pump();

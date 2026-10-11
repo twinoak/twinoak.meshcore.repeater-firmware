@@ -7,9 +7,10 @@
 //     text;
 //   - a line of src/ that prints a packet's payload - any line that names `payload` beside a
 //     print-like call;
-//   - a line of src/link/codec/ or src/link/session/ that allocates or uses a string class: the
-//     box link's portable half is fed buffers and fills buffers, on a node that must repeat for
-//     months without a heap that fragments (tasks/phase-1/02-the-link-codec.md, 03);
+//   - a line of src/link/codec/, src/link/session/ or src/clock/ that allocates or uses a string
+//     class: the box link's portable half and the clock keeper are fed buffers and fill buffers,
+//     on a node that must repeat for months without a heap that fragments
+//     (tasks/phase-1/02-the-link-codec.md, 03, 04);
 //   - a board environment whose resolved build flags define ADMIN_PASSWORD as upstream's default,
 //     or do not define it at all (without the define upstream's MyMesh.cpp defaults it to that
 //     same word, which is how phase 0's stock image came to carry it).
@@ -276,20 +277,22 @@ TEST(Rails, NothingInSrcPrintsAPacketsPayload) {
   }
 }
 
-TEST(Rails, NothingUnderThePortableLinkAllocatesOrHoldsAString) {
+TEST(Rails, NothingUnderThePortableLinkOrTheClockAllocatesOrHoldsAString) {
   const fs::path root = projectRoot();
-  // The two portable layers of the box link (docs/ARCHITECTURE.md section 4). The transport above
-  // them is not here: it is the file that is allowed to know about Arduino.
-  const char* const kDirs[] = {"codec", "session"};
+  // The two portable layers of the box link (docs/ARCHITECTURE.md section 4) and the clock keeper
+  // (section 5). The link's transport is not here: it is the file that is allowed to know about
+  // Arduino. src/clock/ is here whole, BoardClock.cpp included - the file system's own
+  // allocation is the core's, inside File::open, and nothing of ours has a reason to add to it.
+  const char* const kDirs[] = {"link/codec", "link/session", "clock"};
   // The names, and whether a whole-identifier match is what to look for: `new` must not match
   // `renew`, where `std::string` is not an identifier at all.
   const std::pair<std::string, bool> kForbidden[] = {
       {"new", true},    {"malloc", true},      {"calloc", true}, {"realloc", true},
       {"String", true}, {"std::string", false}};
   for (const char* name : kDirs) {
-    const fs::path dir = root / "src" / "link" / name;
+    const fs::path dir = root / "src" / name;
     const std::vector<fs::path> files = filesUnder(dir);
-    EXPECT_GT(files.size(), 2u) << "almost nothing under src/link/" << name
+    EXPECT_GT(files.size(), 2u) << "almost nothing under src/" << name
                                 << " - is PROJECT_DIR right?";
     for (const fs::path& file : files) {
       std::ifstream in(file, std::ios::binary);
@@ -306,7 +309,7 @@ TEST(Rails, NothingUnderThePortableLinkAllocatesOrHoldsAString) {
                                             : code.find(forbidden.first) != std::string::npos;
           if (hit) {
             ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << forbidden.first
-                          << "' - the portable link is given its buffers and never allocates";
+                          << "' - this code is given its buffers and never allocates";
           }
         }
       }

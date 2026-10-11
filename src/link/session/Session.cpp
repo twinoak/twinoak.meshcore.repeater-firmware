@@ -153,6 +153,48 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       break;
     }
 
+    case kMsgTimeSet: {
+      // Section 5.4. Every rule about which values are acceptable is the clock keeper's
+      // (src/clock/ClockKeeper.cpp); the session carries the answer back and nothing more.
+      if (s_.clock == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      TimeSet m;
+      if (!decodeTimeSet(pkt.body, m)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      // `source` is which clock the Walter took the time from (1 the cellular network, 2 the
+      // server, 3 a person at a console). Nothing here behaves differently for it, and a value
+      // this firmware does not know is not a reason to refuse a time: a later minor version may
+      // add one (section 5.1, "Versions").
+      uint32_t prev = 0;
+      if (!s_.clock->setTime(m.epoch, (m.flags & kTimeForce) != 0, prev)) {
+        n = encodeStatus(kErrRange, resp_, sizeof(resp_));
+        break;
+      }
+      TimeSetResponse out;
+      out.prev_epoch = prev;
+      out.epoch = s_.clock->epoch();
+      out.time_state = s_.clock->timeState();
+      n = encodeTimeSetResponse(out, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgTimeGet: {
+      // Section 5.4: the clock and its state, and nothing else.
+      if (s_.clock == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      TimeGetResponse out;
+      out.epoch = s_.clock->epoch();
+      out.time_state = s_.clock->timeState();
+      n = encodeTimeGetResponse(out, resp_, sizeof(resp_));
+      break;
+    }
+
     case kMsgIdentity: {
       // Section 5.6: the node's MeshCore public key and its advert name.
       IdentityResponse out;

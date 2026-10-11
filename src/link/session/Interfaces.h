@@ -12,10 +12,11 @@
 //     about the board arrives through these interfaces, which is what lets test/test_link_session
 //     run the whole session against fakes.
 //
-// Only `firmware`, `system` and `identity` are implemented in phase 1's task 03. The others are
-// declared here with the methods STATUS and `caps` need of them today; the task that implements
-// one adds the methods its own messages need (task 04 the clock, 05 the console and attention, 06
-// power and environment, phase 2 the mesh client and the observation ring).
+// `firmware`, `system` and `identity` arrived with phase 1's task 03, and `clock` with its task
+// 04 (src/clock/LinkClock.h is what implements it). The rest are declared here with the methods
+// STATUS and `caps` need of them today; the task that implements one adds the methods its own
+// messages need (05 the console and attention, 06 power and environment, phase 2 the mesh client
+// and the observation ring).
 
 #pragma once
 
@@ -67,13 +68,19 @@ struct IdentityAccess {
   virtual const char* nodeName() const = 0;      // the advert name
 };
 
-// The clock keeper (phase 1's task 04). Present => kCapTimePersist.
+// The clock keeper (phase 1's task 04, src/clock/). Present => kCapTimePersist.
 struct ClockAccess {
   virtual ~ClockAccess() {}
 
   virtual uint32_t epoch() const = 0;       // Unix seconds
   virtual uint8_t timeState() const = 0;    // one of Numbers.h's TimeState values
   virtual bool advertsHeld() const = 0;     // STATUS flag bit 3
+
+  // TIME_SET (section 5.4). true: the clock moved, `prev_epoch` is what it said before and
+  // timeState() now says what it became. false: refused, which the session answers kErrRange.
+  // Whether a value is acceptable is the keeper's rule and not the session's: forward always,
+  // backwards only with `force` or while nothing with a timestamp has left this node.
+  virtual bool setTime(uint32_t epoch, bool force, uint32_t& prev_epoch) = 0;
 };
 
 // The firmware's own command interpreter (phase 1's task 05). Present => kCapCli.
