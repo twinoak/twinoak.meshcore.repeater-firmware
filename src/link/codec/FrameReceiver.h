@@ -70,6 +70,12 @@ class FrameReceiver {
   // that has reason to believe the line restarted.
   void reset();
 
+  // reset(), and every byte of both buffers overwritten with zero through a volatile pointer, so
+  // that the optimiser keeps the stores. For the session, after a request whose payload carried a
+  // password (LINK-PROTOCOL.md section 6: "wiped from every buffer the RAK copied them to as soon
+  // as the packet is built"). The packet on hand is gone with it.
+  void wipe();
+
  private:
   void countDrop(Drop reason);
   // Decodes, checks and publishes what the buffer holds. Called when a terminator arrives.

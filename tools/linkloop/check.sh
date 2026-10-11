@@ -33,7 +33,7 @@ echo "== build"
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/link/codec/*.cpp src/link/session/*.cpp \
   src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp \
-  src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp \
+  src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp src/meshclient/Reply.cpp \
   src/power/BatteryWatch.cpp src/power/Environment.cpp src/power/Ina3221.cpp \
   src/power/LinkPower.cpp src/power/PowerReader.cpp src/power/Prefs.cpp \
   src/power/Telemetry.cpp
@@ -142,8 +142,8 @@ echo "== power with the B-board unplugged: valid 0, every channel 0, and the nod
 python3 tools/linkcli.py --pipe "$out/linkloop --drop-ina" power
 
 echo
-echo "== the mesh client's job (6.1): begin a peer and a path, answered OK, and end it. Nothing"
-echo "   goes on the air - that is task 02's five sends; this is the state and the path codec."
+echo "== the mesh client's job (6.1): begin a peer and a path, answered OK, and end it. This is"
+echo "   the state and the path codec; nothing goes on the air through this program."
 $cli job begin a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90 --path a1b2,7f3a
 $cli job end
 
@@ -152,6 +152,40 @@ echo "== a job is per-boot RAM, so --job begins one at startup and this one invo
 echo "   route back and sees STATUS's job bit (0x0001) set - what a board holds across one boot"
 python3 tools/linkcli.py --pipe "$out/linkloop --job" path
 python3 tools/linkcli.py --pipe "$out/linkloop --job" status
+
+echo
+echo "== the five sends (6.2) through the firmware's own client. The port under this program"
+echo "   transmits nothing, so a send with a timeout is answered at once (send 2 = direct along"
+echo "   the job's path, tag, sender_ts) and its wait then ends in EV_MESH_REPLY state 2"
+echo "   (silence) - the send, the event path and the deadline, watched from a laptop. A real"
+echo "   repeater on the bench answers before the timeout (task 02's bench list). The exit code"
+echo "   of a send that times out is 1, which is expected here and not a failure of the link, so"
+echo "   each is run with '|| true'. The password is read from stdin, never the command line."
+echo "example-pw" | python3 tools/linkcli.py --pipe "$out/linkloop --job" login - --timeout-ms 400 || true
+python3 tools/linkcli.py --pipe "$out/linkloop --job" status-of-peer --timeout-ms 300 || true
+python3 tools/linkcli.py --pipe "$out/linkloop --job" send-cli "get name" --timeout-ms 300 || true
+
+echo
+echo "== discovery always floods (send 1), whatever path the job holds; a trace needs no job"
+python3 tools/linkcli.py --pipe "$out/linkloop --job" discover --timeout-ms 300 || true
+$cli trace 7f3aa1b27f3a46f6 --timeout-ms 300 || true
+
+echo
+echo "== refusals: no job is ERR_STATE; three-byte hashes in a trace are ERR_RANGE"
+if $cli request 1 --no-wait; then
+  echo "a send with no job should have been refused" >&2
+  exit 1
+fi
+if $cli trace 7f3aa1b27f3a --hash-size 3 --no-wait; then
+  echo "a trace with three-byte hashes should have been refused" >&2
+  exit 1
+fi
+echo "refused, as they should be"
+
+echo
+echo "== reply (nothing held on a fresh boot) and counters"
+$cli reply
+$cli counters
 
 echo
 echo "== sensor set walter.wake 1 - what a mesh admin sends - raises attention reason 4"

@@ -466,6 +466,36 @@ TEST(Rails, NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
   }
 }
 
+TEST(Rails, NothingUnderTheMeshClientPrintsOrLogs) {
+  // The mesh client's portable half (src/meshclient/) holds, for the length of a send, the one
+  // plaintext copy of a password a Walter asked it to log in with, and afterwards the bytes a
+  // repeater answered - a CLI reply that can echo a password back. So, as for src/link/, the
+  // whole directory is held to one rule: **it does not print**, and it names no packet bytes
+  // beside a print-like call (tasks/phase-2/02-the-five-sends.md, the rails-test line; S-12).
+  const fs::path root = projectRoot();
+  const char* const kPrintLike[] = {"print", "Print", "cout", "puts(", "fputs", "LOG_",
+                                    "Serial"};
+  const std::vector<fs::path> files = filesUnder(root / "src" / "meshclient");
+  EXPECT_GT(files.size(), 5u) << "almost nothing under src/meshclient - is PROJECT_DIR right?";
+  for (const fs::path& file : files) {
+    std::ifstream in(file, std::ios::binary);
+    std::string line;
+    int n = 0;
+    while (std::getline(in, line)) {
+      n++;
+      const size_t comment = line.find("//");
+      const std::string code = comment == std::string::npos ? line : line.substr(0, comment);
+      for (const char* p : kPrintLike) {
+        if (code.find(p) != std::string::npos) {
+          ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << p
+                        << "' - nothing under the mesh client prints: it holds a password for"
+                           " the length of a send and a repeater's reply after it (S-12)";
+        }
+      }
+    }
+  }
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

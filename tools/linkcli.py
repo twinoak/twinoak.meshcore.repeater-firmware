@@ -33,12 +33,28 @@ the tool is exercised with no board: `tools/linkloop/` is the firmware's own ses
     python3 tools/linkcli.py --port COM7 job end
 
 The mesh client's job (phase 2's task 01): name a peer and a path, read the path back, end the
-job. Nothing is sent on the mesh yet - that is task 02's five sends. Later tasks add the rest of
-their own sub-commands here.
+job.
+
+    python3 tools/linkcli.py --port COM7 login                 # the ACL login, no password
+    python3 tools/linkcli.py --port COM7 login -               # read a password from a prompt
+    python3 tools/linkcli.py --port COM7 request 1             # a raw request, a type and hex data
+    python3 tools/linkcli.py --port COM7 status-of-peer        # request type 1, reply decoded
+    python3 tools/linkcli.py --port COM7 neighbours-of-peer    # request type 6, reply decoded
+    python3 tools/linkcli.py --port COM7 send-cli "get name"
+    python3 tools/linkcli.py --port COM7 discover
+    python3 tools/linkcli.py --port COM7 trace 7f3aa1b27f3a46f6
+    python3 tools/linkcli.py --port COM7 reply                 # the reply record as it stands
+    python3 tools/linkcli.py --port COM7 counters              # MESH_COUNTERS
+
+The five sends (phase 2's task 02): on the job's behalf the RAK logs in to its peer, asks it
+something, sends it a CLI line, floods a discovery or traces a path, and reports the reply as an
+`EV_MESH_REPLY` event (which `listen` shows) and on `reply`. Each send is one packet on the air.
+A password is read from a prompt, never the command line, and printed as stars.
 Requires `pyserial` for `--port` and nothing at all for `--pipe` or `--help`.
 """
 
 import argparse
+import getpass
 import os
 import queue
 import shlex
@@ -119,6 +135,17 @@ TIME_FORCE = 0x01  # TIME_SET's flags, bit 0 (LINK-PROTOCOL.md 5.4)
 REBOOT_MODE_NAMES = {
     0: "restart the application", 1: "UF2 bootloader", 2: "serial DFU", 3: "over-the-air DFU",
 }
+# A send response's `send` (LINK-PROTOCOL.md 6.2) and a reply record's `state` (6.3).
+SEND_RESULT_NAMES = {0: "nothing sent", 1: "sent as a flood", 2: "sent direct"}
+REPLY_STATE_NAMES = {
+    0: "none", 1: "pending", 2: "timeout", 3: "response", 4: "text", 5: "trace",
+}
+SEND_CLI_SENSITIVE = 0x01  # SEND_CLI's flags, bit 0 (the line holds a password)
+# The repeater request types an exit node asks (examples/simple_repeater/MyMesh.cpp at the pin):
+# REQ_TYPE_GET_STATUS and REQ_TYPE_GET_NEIGHBOURS, the two `status-of-peer` and `neighbours-of-peer`
+# decode for the person at the bench.
+REQ_TYPE_GET_STATUS = 0x01
+REQ_TYPE_GET_NEIGHBOURS = 0x06
 
 
 def utc(epoch):
@@ -277,6 +304,7 @@ class Link:
         self.wire = wire
         self._seq = 0
         self.events = []
+        self.last_status = None  # the status byte of the last response, for a caller's messages
 
     def _next_seq(self):
         # "The Walter picks seq for each new request, any value different from the previous
@@ -309,7 +337,9 @@ class Link:
                 if got_type != want or got_seq != seq:
                     print("ignored type 0x%02x seq %d" % (got_type, got_seq), file=sys.stderr)
                     continue
-                return ref.decode("response", msg_type, got_payload)
+                fields = ref.decode("response", msg_type, got_payload)
+                self.last_status = fields.get("status")
+                return fields
         raise SystemExit(
             "the link is down: %d attempts at %s went unanswered"
             % (attempts, ref.NAMES.get(msg_type, "0x%02x" % msg_type))
@@ -430,6 +460,25 @@ def print_fields(msg_type, f, indent=""):
     elif msg_type == ref.LPP_GET:
         print("%s%d byte(s): %s" % (indent, len(f["lpp"]) // 2, f["lpp"]))
         print_lpp(f["lpp"], indent)
+    elif msg_type in (ref.SEND_LOGIN, ref.SEND_REQUEST, ref.SEND_CLI, ref.SEND_DISCOVERY,
+                      ref.SEND_TRACE):
+        print("%ssend          %d (%s)"
+              % (indent, f["send"], SEND_RESULT_NAMES.get(f["send"], "?")))
+        print("%stag           0x%08x%s"
+              % (indent, f["tag"], "  (the next reply from the peer)" if f["tag"] == 0 else ""))
+        print("%ssender_ts     %d (%s)" % (indent, f["sender_ts"], utc(f["sender_ts"])))
+    elif msg_type in (ref.REPLY_GET, ref.EV_MESH_REPLY):
+        print_reply(f, indent)
+    elif msg_type == ref.MESH_COUNTERS:
+        print("%srx            %d" % (indent, f["rx"]))
+        print("%stx            %d" % (indent, f["tx"]))
+        print("%sclient_tx     %d  (packets the mesh client originated)" % (indent, f["client_tx"]))
+        print("%sadverts       %d" % (indent, f["adverts"]))
+        print("%sadverts_drop  %d" % (indent, f["adverts_dropped"]))
+        print("%sobs_dropped   %d" % (indent, f["obs_dropped"]))
+        print("%snoise_floor   %d dBm" % (indent, f["noise_floor"]))
+        print("%slast_rssi     %d dBm" % (indent, f["last_rssi"]))
+        print("%slast_snr      %.2f dB" % (indent, f["last_snr_q4"] / 4.0))
     elif msg_type == ref.EV_ATTENTION:
         reason, detail = ATTENTION_REASON_NAMES.get(f["reason"], ("?", "?"))
         print("%sreason        %d (%s)" % (indent, f["reason"], reason))
@@ -438,6 +487,37 @@ def print_fields(msg_type, f, indent=""):
     else:
         for key in sorted(f):
             print("%s%-13s %s" % (indent, key, f[key]))
+
+
+def print_reply(f, indent=""):
+    """A reply record (LINK-PROTOCOL.md 6.3): REPLY_GET's body and EV_MESH_REPLY's payload."""
+    state = f["state"]
+    print("%sstate         %d (%s)" % (indent, state, REPLY_STATE_NAMES.get(state, "?")))
+    if state == ref.REPLY_NONE:
+        return
+    print("%stag           0x%08x" % (indent, f["tag"]))
+    if f.get("via_path"):
+        print("%svia_path      1  (the reply came back inside a returned path)" % indent)
+    rssi = f["rssi"]
+    print("%ssnr           %.2f dB" % (indent, f["snr_q4"] / 4.0))
+    print("%srssi          %s" % (indent, "unknown" if rssi == 0x7FFF else "%d dBm" % rssi))
+    print("%selapsed_ms    %d" % (indent, f["elapsed_ms"]))
+    if state == ref.REPLY_RESPONSE:
+        print("%sdata          %s" % (indent, f["data"] or "(none)"))
+    elif state == ref.REPLY_TEXT:
+        for piece in f["text"].split("\n"):
+            print("%s%s" % (indent, piece))
+    elif state == ref.REPLY_TRACE:
+        size = 1 << (f["trace_flags"] & 0x03)
+        hashes = f["hashes"]
+        snrs = bytes.fromhex(f["snrs"])
+        hops = [hashes[i:i + size * 2] for i in range(0, len(hashes), size * 2)]
+        print("%strace_flags   0x%02x  (%d-byte hashes)" % (indent, f["trace_flags"], size))
+        print("%sfinal_snr     %.2f dB" % (indent, f["final_snr_q4"] / 4.0))
+        for i, hop in enumerate(hops):
+            snr = "" if i >= len(snrs) else "  snr %.2f dB" % (
+                (snrs[i] - 256 if snrs[i] > 127 else snrs[i]) / 4.0)
+            print("%s  hop %-2d %s%s" % (indent, i, hop, snr))
 
 
 def print_lpp(data, indent=""):
@@ -719,6 +799,163 @@ def cmd_path(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+def _send_result(link, msg_type, fields, name):
+    """One of the five sends: print the answer, and - unless --no-wait - the reply when it comes."""
+    f = link.request(msg_type, fields)
+    print(name)
+    print_fields(msg_type, f, indent="  ")
+    if f.get("status") != ref.OK:
+        if f.get("status") == ref.ERR_STATE:
+            print("no job: `job begin <key>` first (6.2)", file=sys.stderr)
+        elif f.get("status") == ref.ERR_BUSY:
+            print("a reply is still awaited; `reply` reads it, or wait for it (6.2)",
+                  file=sys.stderr)
+        return 1
+    return 0
+
+
+def _await_reply(link, args):
+    """Poll REPLY_GET until the record leaves `pending`, or the timeout plus a margin passes
+    (6.3: the Walter runs its own timer and asks with REPLY_GET if the event did not come)."""
+    if args.timeout_ms == 0 or args.no_wait:
+        return 0
+    deadline = time.monotonic() + args.timeout_ms / 1000.0 + 1.0
+    while time.monotonic() < deadline:
+        f = link.request(ref.REPLY_GET, {})
+        if f.get("status") == ref.OK and f.get("state") != ref.REPLY_PENDING:
+            print("REPLY")
+            print_fields(ref.REPLY_GET, f, indent="  ")
+            return 0 if f.get("state") not in (ref.REPLY_NONE, ref.REPLY_TIMEOUT) else 1
+        time.sleep(0.2)
+    print("no reply within the timeout; `reply` reads the record", file=sys.stderr)
+    return 1
+
+
+def cmd_login(link, args):
+    """A login as ourselves (6.2): the ACL login with no password, or a guest/admin login with
+    one read from a prompt when the argument is `-`."""
+    password = ""
+    if args.password == "-":
+        password = getpass.getpass("peer password (not echoed): ")
+    elif args.password is not None:
+        password = args.password
+    data = password.encode("utf-8")
+    if len(data) > 15:
+        print("a password is at most 15 bytes (6.2)", file=sys.stderr)
+        return 2
+    shown = "(the ACL login, no password)" if not data else "*" * len(data)
+    print("SEND_LOGIN %s" % shown)
+    rc = _send_result(link, ref.SEND_LOGIN,
+                      {"timeout_ms": args.timeout_ms, "password": data.hex()}, "")
+    return rc or _await_reply(link, args)
+
+
+def cmd_request(link, args):
+    """A raw request to the peer (6.2): a type and optional hex data, the reply matched by the
+    timestamp."""
+    data = args.data or ""
+    try:
+        bytes.fromhex(data)
+    except ValueError:
+        print("data is hex bytes, e.g. 00090000080011223344", file=sys.stderr)
+        return 2
+    print("SEND_REQUEST type %d" % args.type)
+    rc = _send_result(link, ref.SEND_REQUEST,
+                      {"timeout_ms": args.timeout_ms, "req_type": args.type, "data": data}, "")
+    return rc or _await_reply(link, args)
+
+
+def cmd_status_of_peer(link, args):
+    """A convenience: request type 1 (REQ_TYPE_GET_STATUS) and the reply read as a repeater's
+    stats block (6.2)."""
+    print("SEND_REQUEST status-of-peer (type 1)")
+    rc = _send_result(link, ref.SEND_REQUEST,
+                      {"timeout_ms": args.timeout_ms, "req_type": REQ_TYPE_GET_STATUS, "data": ""},
+                      "")
+    if rc:
+        return rc
+    return _await_reply(link, args)
+
+
+def cmd_neighbours_of_peer(link, args):
+    """A convenience: request type 6 (REQ_TYPE_GET_NEIGHBOURS) with the page params the companion
+    sends, and the reply (6.2)."""
+    # count 9, offset 0, order newest-first, an eight-byte prefix, and a four-byte random blob.
+    data = "09" + "0000" + "00" + "08" + "11223344"
+    print("SEND_REQUEST neighbours-of-peer (type 6)")
+    rc = _send_result(link, ref.SEND_REQUEST,
+                      {"timeout_ms": args.timeout_ms, "req_type": REQ_TYPE_GET_NEIGHBOURS,
+                       "data": data}, "")
+    if rc:
+        return rc
+    return _await_reply(link, args)
+
+
+def cmd_send_cli(link, args):
+    """One CLI line to the peer (6.2), run on *it* with the session's privileges. --sensitive
+    flags a line that holds a password so the RAK wipes it; `reply` carries the peer's answer."""
+    line = " ".join(args.words).strip()
+    if not line:
+        print('usage: send-cli "<command line>"', file=sys.stderr)
+        return 2
+    encoded = line.encode("utf-8")
+    if len(encoded) > 148:
+        print("that line is %d bytes; a mesh CLI line takes 148 (6.2)" % len(encoded),
+              file=sys.stderr)
+        return 2
+    flags = SEND_CLI_SENSITIVE if args.sensitive else 0
+    print("SEND_CLI %s%s" % ("(sensitive) " if args.sensitive else "", line))
+    rc = _send_result(link, ref.SEND_CLI,
+                      {"timeout_ms": args.timeout_ms, "flags": flags, "text": line}, "")
+    return rc or _await_reply(link, args)
+
+
+def cmd_discover(link, args):
+    """A path discovery (6.2): a base-telemetry request, always flooded, whose reply comes back as
+    a returned path and teaches the route. `path` reads it afterwards."""
+    print("SEND_DISCOVERY")
+    rc = _send_result(link, ref.SEND_DISCOVERY, {"timeout_ms": args.timeout_ms}, "")
+    return rc or _await_reply(link, args)
+
+
+def cmd_trace(link, args):
+    """A trace along a round-trip path (6.2), always direct, that comes back with an SNR per hop.
+    The hashes are hex, each hop 1, 2, 4 or 8 bytes - never 3, which a trace cannot encode."""
+    hashes = (args.hashes or "").strip()
+    try:
+        raw = bytes.fromhex(hashes)
+    except ValueError:
+        print("the hashes are hex bytes of the round-trip path", file=sys.stderr)
+        return 2
+    if not raw or len(raw) % args.hash_size != 0:
+        print("the hashes must be whole %d-byte hops" % args.hash_size, file=sys.stderr)
+        return 2
+    print("SEND_TRACE %d-byte hops: %s" % (args.hash_size, hashes))
+    rc = _send_result(link, ref.SEND_TRACE,
+                      {"timeout_ms": args.timeout_ms, "hash_size": args.hash_size,
+                       "hashes": hashes}, "")
+    if rc and link.last_status == ref.ERR_RANGE and args.hash_size == 3:
+        print("a trace cannot carry three-byte hashes (6.2)", file=sys.stderr)
+    return rc or _await_reply(link, args)
+
+
+def cmd_reply(link, args):
+    """The reply record as it stands (6.3): pending, an outcome, or nothing held."""
+    f = link.request(ref.REPLY_GET, {})
+    print("REPLY_GET")
+    print_fields(ref.REPLY_GET, f, indent="  ")
+    return 0 if f.get("status") == ref.OK else 1
+
+
+def cmd_counters(link, args):
+    """MESH_COUNTERS (6.4): what the radio sent and received, what the client originated, and the
+    noise floor and last RSSI/SNR."""
+    f = link.request(ref.MESH_COUNTERS, {})
+    print("MESH_COUNTERS")
+    print_fields(ref.MESH_COUNTERS, f, indent="  ")
+    return 0 if f.get("status") == ref.OK else 1
+
+
 def cmd_listen(link, args):
     if args.seconds:
         print("listening for %d s" % args.seconds)
@@ -807,6 +1044,62 @@ def build_parser():
                           "the default with neither flag is a flood")
     job.set_defaults(run=cmd_job)
     subs.add_parser("path", help="the path the job holds now (6.1)").set_defaults(run=cmd_path)
+
+    # The five sends (6.2), the reply (6.3) and the counters (6.4). Each send shares a
+    # --timeout-ms and a --no-wait: the RAK awaits for timeout_ms and reports the reply, and the
+    # tool polls REPLY_GET until it comes (or --no-wait leaves after the send's own answer).
+    def add_send_args(sp):
+        sp.add_argument("--timeout-ms", type=int, default=8000, dest="timeout_ms",
+                        help="how long the RAK awaits the reply; 0 awaits nothing")
+        sp.add_argument("--no-wait", action="store_true", dest="no_wait",
+                        help="print the send's own answer and stop, not polling for the reply")
+
+    login = subs.add_parser("login", help="log in to the job's peer as ourselves (6.2)")
+    login.add_argument("password", nargs="?", default=None,
+                       help="the peer's password; `-` reads it from a prompt; omitted is the ACL "
+                            "login with no password")
+    add_send_args(login)
+    login.set_defaults(run=cmd_login)
+
+    request = subs.add_parser("request", help="a raw request to the peer (6.2)")
+    request.add_argument("type", type=lambda v: int(v, 0), help="the request type (e.g. 1)")
+    request.add_argument("data", nargs="?", default="", help="request data as hex bytes")
+    add_send_args(request)
+    request.set_defaults(run=cmd_request)
+
+    sop = subs.add_parser("status-of-peer", help="request type 1 and decode the reply (6.2)")
+    add_send_args(sop)
+    sop.set_defaults(run=cmd_status_of_peer)
+
+    nop = subs.add_parser("neighbours-of-peer", help="request type 6 and decode the reply (6.2)")
+    add_send_args(nop)
+    nop.set_defaults(run=cmd_neighbours_of_peer)
+
+    scli = subs.add_parser("send-cli", help="run one CLI line on the peer (6.2)")
+    scli.add_argument("words", nargs=argparse.REMAINDER, metavar='"<command line>"',
+                      help="the line, run on the peer with the session's privileges")
+    scli.add_argument("--sensitive", action="store_true",
+                      help="the line holds a password: the RAK wipes it after the send")
+    add_send_args(scli)
+    scli.set_defaults(run=cmd_send_cli)
+
+    discover = subs.add_parser("discover", help="flood a path discovery to the peer (6.2)")
+    add_send_args(discover)
+    discover.set_defaults(run=cmd_discover)
+
+    trace = subs.add_parser("trace", help="trace a round-trip path (6.2)")
+    trace.add_argument("hashes", help="the round-trip hops as hex, each hop --hash-size bytes")
+    trace.add_argument("--hash-size", type=int, choices=[1, 2, 3, 4, 8], default=2,
+                       dest="hash_size",
+                       help="bytes per hop; 3 is refused (ERR_RANGE), to show a trace cannot "
+                            "carry it")
+    add_send_args(trace)
+    trace.set_defaults(run=cmd_trace)
+
+    subs.add_parser("reply", help="the reply record as it stands (6.3)").set_defaults(
+        run=cmd_reply)
+    subs.add_parser("counters", help="the mesh counters (6.4)").set_defaults(run=cmd_counters)
+
     listen = subs.add_parser("listen", help="print the events the node sends")
     listen.add_argument("seconds", type=int, nargs="?", default=0,
                         help="how long; 0 (the default) is for ever")

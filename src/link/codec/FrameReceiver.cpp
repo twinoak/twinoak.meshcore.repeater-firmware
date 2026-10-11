@@ -80,5 +80,15 @@ void FrameReceiver::reset() {
   packet_ = ParsedPacket();
 }
 
+void FrameReceiver::wipe() {
+  volatile uint8_t* f = frame_;
+  volatile uint8_t* p = packet_bytes_;
+  for (size_t i = 0; i < kReceiveBuffer; i++) {
+    f[i] = 0;
+    p[i] = 0;
+  }
+  reset();
+}
+
 }  // namespace link
 }  // namespace twinoak

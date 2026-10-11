@@ -15,9 +15,9 @@
 //   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
-// a session with a board that has what phase 1's tasks 03 to 06 implement: caps 0x67 (CLI, POWER,
-// ENV, ATTENTION, TIME_PERSIST), no observations, no mesh client. Four things in it are the
-// firmware's own code and not a stub:
+// a session with a board that has what phase 1's tasks 03 to 06 and phase 2's tasks 01 and 02
+// implement: caps 0x6f (CLI, POWER, ENV, MESH_CLIENT, ATTENTION, TIME_PERSIST), no observations.
+// Five things in it are the firmware's own code and not a stub:
 //
 //   - the **ClockKeeper** (src/clock/), with out/linkloop/clock where the board has its flash
 //     file, so `time` and `time set` exercise the rules the firmware will run; one run of this
@@ -33,7 +33,10 @@
 //   - the **power and environment readers** (src/power/), driven over a fake I2C bus that answers
 //     real INA3221 register values - so `power`, `env` and `lpp` go through the firmware's own
 //     conversion, its own cache and its own Cayenne-LPP, and `--drop-ina` is the bench's
-//     "unplug the B-board" case with no board at all.
+//     "unplug the B-board" case with no board at all;
+//   - the **mesh client** (src/meshclient/), the job and the five sends and the reply record,
+//     over a port where nothing is ever transmitted, so a send is answered as the firmware
+//     answers it and its wait ends in the silence event. `--job` begins a job at startup.
 //
 // What cannot be here is upstream's interpreter itself, so every other command line is answered
 // by the handful of canned lines below. POSIX only: the loop waits on stdin with select(), which
@@ -353,12 +356,53 @@ class LoopTelemetry : public twinoak::power::TelemetrySource {
 LoopTelemetry g_telemetry;
 twinoak::power::LinkPower g_link_power(g_telemetry);
 
-// The mesh client's job and the box link's view of it (src/meshclient/), so that `job begin`,
-// `job end` and `path` through the pipe go through the firmware's own Job - the same state a
-// board runs. No radio here, so nothing is ever awaited and no reply ever arrives; what this
-// exercises is the job state, the path codec and the 120-second silence rule.
+// The mesh client's job, its sends and its reply, and the box link's view of them
+// (src/meshclient/), so that `job begin`, `job end`, `path`, the five sends, `reply` and
+// `counters` through the pipe go through the firmware's own client - the same code a board runs.
+// Where the board builds a MeshCore packet there is this port: every send "succeeds" and nothing
+// goes anywhere, so a send with a timeout ends in EV_MESH_REPLY state 2 (silence) when the time
+// is up - which is the event path, the deadline and REPLY_GET's fallback watched from a laptop.
+class LoopMeshPort : public twinoak::meshclient::MeshPort {
+ public:
+  uint32_t sends = 0;
+
+  uint32_t uniqueTime() override {
+    // MeshCore's unique-time rule (RTCClock::getCurrentTimeUnique): never the same second twice.
+    const uint32_t t = g_upstream.now();
+    last_unique_ = t <= last_unique_ ? last_unique_ + 1 : t;
+    return last_unique_;
+  }
+  void randomBytes(uint8_t* dest, size_t len) override {
+    for (size_t i = 0; i < len; i++) dest[i] = uint8_t(rand() & 0xFF);
+  }
+  bool sendAnonRequest(const uint8_t*, size_t, const twinoak::meshclient::Route&) override {
+    sends++;
+    return true;
+  }
+  bool sendDatagram(uint8_t, const uint8_t*, size_t, const twinoak::meshclient::Route&) override {
+    sends++;
+    return true;
+  }
+  bool sendTrace(uint32_t, uint32_t, uint8_t, const uint8_t*, uint8_t) override {
+    sends++;
+    return true;
+  }
+  void radioCounters(twinoak::meshclient::RadioCounters& out) override {
+    // The numbers docs/link.md quotes for a node that has been up a while.
+    out.rx = 12345;
+    out.tx = 6789 + sends;
+    out.noise_floor = -112;
+    out.last_rssi = -97;
+    out.last_snr_q4 = 25;
+  }
+
+ private:
+  uint32_t last_unique_ = 0;
+};
+
+LoopMeshPort g_mesh_port;
 twinoak::meshclient::Job g_job;
-twinoak::meshclient::LinkMeshClient g_mesh_client(g_job);
+twinoak::meshclient::LinkMeshClient g_mesh_client(g_job, g_mesh_port);
 
 uint16_t LoopSettingsHost::batteryLowMv() const { return g_battery.lowMilliVolts(); }
 uint16_t LoopSettingsHost::batteryCritMv() const { return g_battery.critMilliVolts(); }
@@ -447,7 +491,9 @@ int pump() {
       session.feedByte(byte, nowMs());
     }
     g_keeper.loop(nowMs());
-    g_mesh_client.loop(nowMs());  // the job's 120-second silence rule (src/meshclient/Job.cpp)
+    // The job's 120-second silence rule and the reply's deadline (src/meshclient/LinkMeshClient.cpp),
+    // once a pass as src/link/BoardLink.cpp's linkLoop() does it.
+    g_mesh_client.loop(nowMs());
     // As TwinOakSensors::loop() does it, once a pass: one INA3221 channel, one BME280 sample,
     // and the battery thresholds looked at with whatever channel 2 last said.
     {

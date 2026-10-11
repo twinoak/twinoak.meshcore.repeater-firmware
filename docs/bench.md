@@ -287,10 +287,10 @@ of them is the exit criterion of the whole phase.
 
 ## 6. The mesh client
 
-`docs/link.md` §2e is the page: the job, its path, and what the extra peer is
-for. Phase 2's task 01 is the state only — a peer and a path — so there is one
-bench line, and it is about what must **not** change. The five sends that put a
-packet on the air, and the second radio they need, arrive with task 02.
+`docs/link.md` §2e and §2f are the pages: the job, its path, the extra peer, and
+the five sends. Task 01 is the state; task 02 puts packets on the air, so its
+walk needs a **second repeater** (any stock MeshCore repeater on the bench
+channel) and a **companion as an observer**.
 
 - [ ] **p2-01** **With a job begun and nothing sent, the repeater behaves
   exactly as before.** `job begin <any 64-hex key>` over the link, then from a
@@ -300,3 +300,31 @@ packet on the air, and the second radio they need, arrive with task 02.
   yet cause (no send), so none of the repeater's own admin or routing is
   touched. `status` shows flag bit 0 (`job begun`) set and bit 1 clear, and the
   job ends itself after 120 s with no further request on the link.
+- [ ] **p2-02** **A login.** `job begin <its key>`, `login` (blank): answered at
+  guest if the second repeater has no guest password, silence if it has one —
+  both are right, and `reply` says which (state 3, a response, or state 2,
+  timeout).
+- [ ] **p2-02** **An admin session.** `login -` with its admin password:
+  answered. Then `status-of-peer`, `neighbours-of-peer` and `send-cli "get
+  name"` are each answered (`reply` shows state 3, 3 and 4), and `path` now
+  shows the route the first reply came back by — the flood taught it.
+- [ ] **p2-02** **One packet per send.** The observer counts **exactly one**
+  packet from this unit for each of the sends above, and a login's packet is not
+  readable as a password (it is an anonymous request whose body is ciphertext).
+  `counters` shows `client_tx` rising by one per send and by nothing else.
+- [ ] **p2-02** **A trace.** `trace <the learned path>` comes back with an SNR
+  per hop (`reply` state 5), and `trace ... --hash-size 3` is refused
+  `ERR_RANGE` before anything leaves.
+- [ ] **p2-02** **Repeating is unaffected throughout.** While all of the above
+  runs, a message through the unit from another node still arrives, and a phone
+  can still log in to the unit itself and read its `status` — the extra peer is
+  in front only for the seconds a reply is awaited.
+- [ ] **p2-02** **A peer that is also an admin of this unit.** `job begin` with
+  the key of a repeater that is also in this unit's own ACL as an admin: its CLI
+  reply is read as the job's **reply** and nothing is executed on this unit
+  (`docs/ARCHITECTURE.md` §2, the reason the peer is in front). This is the one
+  that would go wrong if the extra peer were behind upstream's own.
+- [ ] **p2-02** **The RSSI of a reply reads unknown until task 03.** `reply` and
+  `EV_MESH_REPLY` carry `rssi` `0x7FFF` (shown as *unknown*) and a real SNR: the
+  note `logRx` takes is task 03's, and until then only the SNR, which is the
+  packet's own, is known. Worth seeing once so it is not read as a fault.

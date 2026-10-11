@@ -45,6 +45,8 @@
 #include "link/session/Session.h"
 #include "meshclient/Job.h"
 #include "meshclient/LinkMeshClient.h"
+#include "meshclient/MeshPort.h"
+#include "meshclient/Reply.h"
 
 #ifndef FIXTURES_DIR
 #error "FIXTURES_DIR must be defined; platformio.ini's [env:native] does it"
@@ -335,8 +337,9 @@ class FakeMeshClient : public MeshClientAccess {
   bool jobBegun() const override { return job; }
   bool replyAwaited() const override { return awaiting; }
 
-  // The generic sweep only reads the two bits above (for STATUS); the four job requests are
-  // driven against the real src/meshclient/ further down, so these answer plainly.
+  // The generic sweep only reads the two bits above (for STATUS); the job requests, the sends,
+  // the reply and the counters are driven against the real src/meshclient/ further down, so
+  // these answer plainly.
   uint8_t beginJob(const JobBegin&, uint32_t) override {
     job = true;
     return kOk;
@@ -351,6 +354,92 @@ class FakeMeshClient : public MeshClientAccess {
     return job ? kOk : kErrState;
   }
   void noteLinkRequest(uint32_t) override { link_requests++; }
+  uint8_t sendLogin(const SendLogin&, SendResponse&, uint32_t) override { return kErrState; }
+  uint8_t sendRequest(const SendRequest&, SendResponse&, uint32_t) override { return kErrState; }
+  uint8_t sendCli(const SendCli&, SendResponse&, uint32_t) override { return kErrState; }
+  uint8_t sendDiscovery(const SendDiscovery&, SendResponse&, uint32_t) override {
+    return kErrState;
+  }
+  uint8_t sendTrace(const SendTrace&, SendResponse&, uint32_t) override { return kErrState; }
+  void getReply(ReplyRecord& out, uint32_t) override { out = ReplyRecord(); }
+  bool takeReplyEvent(ReplyRecord&, uint32_t) override { return false; }
+  void getCounters(MeshCountersResponse&) override {}
+};
+
+// The board's half of the five sends (src/meshclient/MeshPort.h), as a fake that records what it
+// was asked to put on the air - the plaintext, the route, the trace's fields - and answers the
+// time and the radio's counters with whatever the test set. It builds no packet: what MeshCore
+// makes of the plaintext is upstream's, and src/app/TwinOakMesh.cpp cites it against the pin.
+class FakeMeshPort : public twinoak::meshclient::MeshPort {
+ public:
+  struct Sent {
+    enum Kind : uint8_t { kAnon, kDatagram, kTrace } kind = kAnon;
+    uint8_t payload_type = 0xFF;
+    std::vector<uint8_t> plain;  // the test's own copy, for checking the layout
+    bool direct = false;
+    std::vector<uint8_t> path;
+    uint8_t path_len = 0;
+    uint32_t tag = 0;
+    uint32_t auth = 0;
+    uint8_t flags = 0;
+  };
+
+  uint32_t time = 1791720050;  // the unique second the next send gets; counts up
+  uint8_t random_fill = 0x5a;  // what randomBytes() writes
+  bool fail = false;           // "the pool is empty": no packet can be built
+  std::vector<Sent> sent;
+  twinoak::meshclient::RadioCounters counters;
+
+  uint32_t uniqueTime() override { return time++; }
+  void randomBytes(uint8_t* dest, size_t len) override {
+    for (size_t i = 0; i < len; i++) dest[i] = random_fill;
+  }
+  bool sendAnonRequest(const uint8_t* plain, size_t len,
+                       const twinoak::meshclient::Route& route) override {
+    if (fail) return false;
+    Sent s;
+    s.kind = Sent::kAnon;
+    s.plain.assign(plain, plain + len);
+    record(s, route);
+    return true;
+  }
+  bool sendDatagram(uint8_t payload_type, const uint8_t* plain, size_t len,
+                    const twinoak::meshclient::Route& route) override {
+    if (fail) return false;
+    Sent s;
+    s.kind = Sent::kDatagram;
+    s.payload_type = payload_type;
+    s.plain.assign(plain, plain + len);
+    record(s, route);
+    return true;
+  }
+  bool sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags, const uint8_t* path,
+                 uint8_t path_bytes) override {
+    if (fail) return false;
+    Sent s;
+    s.kind = Sent::kTrace;
+    s.direct = true;
+    s.tag = tag;
+    s.auth = auth_code;
+    s.flags = flags;
+    s.path.assign(path, path + path_bytes);
+    s.path_len = path_bytes;
+    sent.push_back(s);
+    return true;
+  }
+  void radioCounters(twinoak::meshclient::RadioCounters& out) override { out = counters; }
+
+ private:
+  void record(Sent& s, const twinoak::meshclient::Route& route) {
+    s.direct = route.direct;
+    s.path_len = route.path_len;
+    const size_t bytes = size_t(twinoak::meshclient::pathHashSize(route.path_len)) *
+                         twinoak::meshclient::pathHopCount(route.path_len);
+    if (route.path != nullptr && route.path_len != 0) {
+      s.path.assign(route.path, route.path + bytes);
+    }
+    sent.push_back(s);
+  }
 };
 
 class FakeObservations : public ObservationAccess {
@@ -1658,7 +1747,8 @@ TEST(TheMeshClient, TheFourJobRequestsAreTheFixturesFrames) {
   {
     Harness h;
     twinoak::meshclient::Job job;
-    twinoak::meshclient::LinkMeshClient client(job);
+    FakeMeshPort port;
+    twinoak::meshclient::LinkMeshClient client(job, port);
     const Case* req = findCase("request", kMsgJobBegin, 18);
     const Case* resp = findCase("response", kMsgJobBegin, 18);
     ASSERT_NE(nullptr, req);
@@ -1672,7 +1762,8 @@ TEST(TheMeshClient, TheFourJobRequestsAreTheFixturesFrames) {
   {
     Harness h;
     twinoak::meshclient::Job job;
-    twinoak::meshclient::LinkMeshClient client(job);
+    FakeMeshPort port;
+    twinoak::meshclient::LinkMeshClient client(job, port);
     const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {0x11};
     ASSERT_TRUE(job.begin(key, twinoak::meshclient::kPathNone, 0, 0, nullptr, 0, 0));
     const Case* req = findCase("request", kMsgJobEnd, 19);
@@ -1687,7 +1778,8 @@ TEST(TheMeshClient, TheFourJobRequestsAreTheFixturesFrames) {
   {
     Harness h;
     twinoak::meshclient::Job job;
-    twinoak::meshclient::LinkMeshClient client(job);
+    FakeMeshPort port;
+    twinoak::meshclient::LinkMeshClient client(job, port);
     const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {0x22};
     const uint8_t hashes[] = {0x7f, 0x3a};
     ASSERT_TRUE(job.begin(key, twinoak::meshclient::kPathHops, 2, 1, hashes, sizeof hashes, 0));
@@ -1703,7 +1795,8 @@ TEST(TheMeshClient, JobBeginFloodAndDirectBothSucceed) {
   for (uint8_t seq : {16, 17}) {  // flood (seq 16) and direct neighbour (seq 17)
     Harness h;
     twinoak::meshclient::Job job;
-    twinoak::meshclient::LinkMeshClient client(job);
+    FakeMeshPort port;
+    twinoak::meshclient::LinkMeshClient client(job, port);
     const Case* req = findCase("request", kMsgJobBegin, seq);
     ASSERT_NE(nullptr, req) << "seq " << int(seq);
     const std::string frame = answerWithClient(h, client, req->frame);
@@ -1729,7 +1822,8 @@ TEST(TheMeshClient, PathSetForgetIsOkWithAJobAndErrStateWithout) {
   {
     Harness h;
     twinoak::meshclient::Job job;
-    twinoak::meshclient::LinkMeshClient client(job);
+    FakeMeshPort port;
+    twinoak::meshclient::LinkMeshClient client(job, port);
     const std::string frame = answerWithClient(h, client, req->frame);
     FrameReceiver rx;
     for (uint8_t b : fromHex(frame)) rx.feedByte(b);
@@ -1741,7 +1835,8 @@ TEST(TheMeshClient, PathSetForgetIsOkWithAJobAndErrStateWithout) {
   {
     Harness h;
     twinoak::meshclient::Job job;
-    twinoak::meshclient::LinkMeshClient client(job);
+    FakeMeshPort port;
+    twinoak::meshclient::LinkMeshClient client(job, port);
     const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {0x33};
     const uint8_t hashes[] = {0x7f, 0x3a};
     ASSERT_TRUE(job.begin(key, twinoak::meshclient::kPathHops, 2, 1, hashes, sizeof hashes, 0));
@@ -1758,7 +1853,8 @@ TEST(TheMeshClient, PathSetForgetIsOkWithAJobAndErrStateWithout) {
 TEST(TheMeshClient, AnIllegalPathInJobBeginIsMalformedAndChangesNothing) {
   Harness h;
   twinoak::meshclient::Job job;
-  twinoak::meshclient::LinkMeshClient client(job);
+  FakeMeshPort port;
+  twinoak::meshclient::LinkMeshClient client(job, port);
   // A path 6.1 does not allow: hops, size 2, two hops, but only three bytes of hashes. The codec
   // refuses it, so the session answers ERR_MALFORMED and the client is never asked.
   std::vector<uint8_t> body(kPubKeyLen, 0x44);
@@ -1780,7 +1876,8 @@ TEST(TheMeshClient, AnIllegalPathInJobBeginIsMalformedAndChangesNothing) {
 TEST(TheMeshClient, ASecondJobBeginEndsTheFirstThroughTheSession) {
   Harness h;
   twinoak::meshclient::Job job;
-  twinoak::meshclient::LinkMeshClient client(job);
+  FakeMeshPort port;
+  twinoak::meshclient::LinkMeshClient client(job, port);
   const Case* first = findCase("request", kMsgJobBegin, 18);   // two hops
   const Case* second = findCase("request", kMsgJobBegin, 16);  // flood
   ASSERT_NE(nullptr, first);
@@ -1795,7 +1892,8 @@ TEST(TheMeshClient, ASecondJobBeginEndsTheFirstThroughTheSession) {
 TEST(TheMeshClient, AnyRequestRestartsTheJobsSilenceCountThroughTheSession) {
   Harness h;
   twinoak::meshclient::Job job;
-  twinoak::meshclient::LinkMeshClient client(job);
+  FakeMeshPort port;
+  twinoak::meshclient::LinkMeshClient client(job, port);
   h.services.mesh = &client;
   h.now = 1000;
 
@@ -1820,6 +1918,796 @@ TEST(TheMeshClient, AnyRequestRestartsTheJobsSilenceCountThroughTheSession) {
   h.now += twinoak::meshclient::kIdleEndMs;  // now silent again for the full span
   client.loop(h.now);
   EXPECT_FALSE(job.begun()) << "120 s of silence after the last request ends the job";
+}
+
+// ----------------------------------------------------------------------------- the five sends
+
+// The five sends, the reply and the counters of sections 6.2 to 6.4 driven against the **real**
+// src/meshclient/ - a LinkMeshClient over a real Job and a real Reply - through a real Session,
+// with a FakeMeshPort where the board builds the packet. What goes to the port is the plaintext
+// the agent firmware's AgentMesh builds (tasks/phase-2/02-the-five-sends.md); what comes back on
+// the link is held against spec/fixtures/link/link-v1.json byte for byte.
+namespace {
+
+using twinoak::meshclient::Job;
+using twinoak::meshclient::LinkMeshClient;
+
+struct ClientRig {
+  Harness h;
+  Job job;
+  FakeMeshPort port;
+  LinkMeshClient client;
+
+  ClientRig() : client(job, port) { h.services.mesh = &client; }
+
+  // Begins a job with the fixture's peer key and the path mode asked for.
+  void beginJob(uint8_t mode, const std::vector<uint8_t>& hashes = {}, uint8_t hash_size = 2) {
+    const uint8_t key[kPubKeyLen] = {0xa1, 0xb2, 0xc3, 0xd4};
+    const uint8_t hops = uint8_t(hashes.empty() ? 0 : hashes.size() / hash_size);
+    ASSERT_TRUE(job.begin(key, mode, hashes.empty() ? 0 : hash_size, hops,
+                          hashes.empty() ? nullptr : hashes.data(), hashes.size(), h.now));
+  }
+
+  // Feeds one request frame and returns the one answer.
+  std::string answer(const std::vector<uint8_t>& frame) {
+    h.sent.clear();
+    h.feed(frame);
+    h.run();
+    EXPECT_EQ(1u, h.sent.size());
+    return h.lastFrame();
+  }
+
+  // The status byte of the last answer.
+  uint8_t lastStatus() {
+    uint8_t type = 0, seq = 0;
+    return answeredStatus(h, type, seq);
+  }
+};
+
+// The fixture's request frame of this type and seq, with the seq changed: the payload is the
+// case's, the seq is the test's.
+std::vector<uint8_t> requestFrame(uint8_t type, uint8_t fixture_seq, uint8_t seq) {
+  const Case* c = findCase("request", type, fixture_seq);
+  EXPECT_NE(nullptr, c) << "type 0x" << std::hex << int(type) << " seq " << std::dec
+                        << int(fixture_seq);
+  if (c == nullptr) return {};
+  return frameOf(type, seq, c->payload);
+}
+
+// A SEND_* payload built by hand: timeout_ms, then the body.
+std::vector<uint8_t> sendPayload(uint32_t timeout_ms, const std::vector<uint8_t>& body) {
+  std::vector<uint8_t> p = {uint8_t(timeout_ms), uint8_t(timeout_ms >> 8),
+                            uint8_t(timeout_ms >> 16), uint8_t(timeout_ms >> 24)};
+  p.insert(p.end(), body.begin(), body.end());
+  return p;
+}
+
+std::vector<uint8_t> le32(uint32_t v) {
+  return {uint8_t(v), uint8_t(v >> 8), uint8_t(v >> 16), uint8_t(v >> 24)};
+}
+
+// The body of the last frame the session sent, through the codec.
+std::vector<uint8_t> lastBody(Harness& h, uint8_t& type, uint8_t& seq) {
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(h.lastFrame())) rx.feedByte(b);
+  EXPECT_TRUE(rx.hasPacket());
+  type = rx.packet().type;
+  seq = rx.packet().seq;
+  return std::vector<uint8_t>(rx.packet().body.ptr, rx.packet().body.ptr + rx.packet().body.len);
+}
+
+// Whether `needle` occurs anywhere in the `size` bytes of memory at `obj`: the search the wipe
+// test makes over the objects the session and the client are.
+bool holdsBytes(const void* obj, size_t size, const std::vector<uint8_t>& needle) {
+  const uint8_t* p = static_cast<const uint8_t*>(obj);
+  if (needle.empty() || size < needle.size()) return false;
+  for (size_t i = 0; i + needle.size() <= size; i++) {
+    if (memcmp(p + i, needle.data(), needle.size()) == 0) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+TEST(TheFiveSends, LoginIsTheFixturesFramesAndThePlaintextIsTheAgentsLayout) {
+  // "login with a password" (seq 23), with a job and no path: sent as a flood at the fixture's
+  // sender_ts, tag 0. The fixture's own password is a test string of the specification's.
+  ClientRig r;
+  r.beginJob(kPathNone);
+  r.port.time = 1791720050;
+  const Case* req = findCase("request", kMsgSendLogin, 23);
+  const Case* resp = findCase("response", kMsgSendLogin, 23);
+  ASSERT_NE(nullptr, req);
+  ASSERT_NE(nullptr, resp);
+  EXPECT_EQ(toHex(resp->frame), r.answer(req->frame));
+
+  ASSERT_EQ(1u, r.port.sent.size()) << "one packet per send";
+  const FakeMeshPort::Sent& s = r.port.sent[0];
+  EXPECT_EQ(FakeMeshPort::Sent::kAnon, s.kind) << "a login is an anonymous request";
+  EXPECT_FALSE(s.direct) << "no path: a flood";
+  // The plaintext BaseChatMesh::sendLogin builds: the timestamp, then the password's bytes.
+  std::vector<uint8_t> want = le32(1791720050);
+  const std::vector<uint8_t> pw = fromHex(req->fields["password"].as<std::string>());
+  want.insert(want.end(), pw.begin(), pw.end());
+  EXPECT_EQ(toHex(want), toHex(s.plain));
+  EXPECT_EQ(1u, r.client.clientTx());
+  EXPECT_TRUE(r.job.awaiting()) << "timeout_ms 12000: a response is awaited";
+  EXPECT_EQ(twinoak::meshclient::kAwaitResponse, r.job.awaitKind());
+  EXPECT_EQ(0u, r.job.awaitTag()) << "a login reply carries the repeater's timestamp, not ours";
+  EXPECT_EQ(twinoak::meshclient::kReplyPending, r.client.reply().state());
+
+  // "login with no password (the acl login)" (seq 22): four bytes of timestamp and nothing else.
+  ClientRig acl;
+  acl.beginJob(kPathDirect);
+  acl.port.time = 77;
+  const Case* blank = findCase("request", kMsgSendLogin, 22);
+  ASSERT_NE(nullptr, blank);
+  acl.answer(blank->frame);
+  EXPECT_EQ(kOk, acl.lastStatus());
+  ASSERT_EQ(1u, acl.port.sent.size());
+  EXPECT_EQ(toHex(le32(77)), toHex(acl.port.sent[0].plain)) << "the ACL login: the key alone";
+  EXPECT_TRUE(acl.port.sent[0].direct) << "a direct neighbour: sent direct, zero hops";
+  EXPECT_EQ(0u, acl.port.sent[0].path_len);
+}
+
+TEST(TheFiveSends, RefusedWithoutAJobAndWhileAReplyIsAwaited) {
+  // "send refused: no job" (SEND_LOGIN, seq 24) and "send refused: a reply is still awaited"
+  // (SEND_REQUEST, seq 25) - the fixture's two refusal frames, and nothing reaches the port.
+  ClientRig r;
+  const Case* no_job = findCase("response", kMsgSendLogin, 24);
+  ASSERT_NE(nullptr, no_job);
+  EXPECT_EQ(toHex(no_job->frame), r.answer(requestFrame(kMsgSendLogin, 23, 24)));
+  EXPECT_TRUE(r.port.sent.empty());
+  EXPECT_EQ(0u, r.client.clientTx()) << "a refused send is not counted";
+
+  r.beginJob(kPathNone);
+  r.answer(requestFrame(kMsgSendLogin, 23, 40));
+  EXPECT_EQ(kOk, r.lastStatus());
+  EXPECT_TRUE(r.job.awaiting());
+  const Case* busy = findCase("response", kMsgSendRequest, 25);
+  ASSERT_NE(nullptr, busy);
+  EXPECT_EQ(toHex(busy->frame), r.answer(requestFrame(kMsgSendRequest, 26, 25)));
+  EXPECT_EQ(1u, r.port.sent.size()) << "the second send put nothing on the air";
+  EXPECT_EQ(1u, r.client.clientTx());
+
+  // Every other send is busy too while the reply is awaited - a trace included, which needs no
+  // job but still waits its turn.
+  r.answer(requestFrame(kMsgSendCli, 28, 41));
+  EXPECT_EQ(kErrBusy, r.lastStatus());
+  r.answer(requestFrame(kMsgSendDiscovery, 30, 42));
+  EXPECT_EQ(kErrBusy, r.lastStatus());
+  r.answer(requestFrame(kMsgSendTrace, 31, 43));
+  EXPECT_EQ(kErrBusy, r.lastStatus());
+  EXPECT_EQ(1u, r.port.sent.size());
+
+  // Without a job, the other three are ERR_STATE and a trace is not.
+  ClientRig t;
+  t.answer(requestFrame(kMsgSendRequest, 26, 1));
+  EXPECT_EQ(kErrState, t.lastStatus());
+  t.answer(requestFrame(kMsgSendCli, 28, 2));
+  EXPECT_EQ(kErrState, t.lastStatus());
+  t.answer(requestFrame(kMsgSendDiscovery, 30, 3));
+  EXPECT_EQ(kErrState, t.lastStatus());
+  EXPECT_TRUE(t.port.sent.empty());
+  t.answer(requestFrame(kMsgSendTrace, 31, 4));
+  EXPECT_EQ(kOk, t.lastStatus()) << "a trace needs no job (6.2)";
+  EXPECT_EQ(1u, t.port.sent.size());
+}
+
+TEST(TheFiveSends, RequestCliDiscoveryAndTraceAreTheFixturesFrames) {
+  // "request sent direct" (seq 27, the neighbours request) with a direct path.
+  {
+    ClientRig r;
+    r.beginJob(kPathHops, {0x7f, 0x3a}, 2);
+    r.port.time = 1791720051;
+    const Case* req = findCase("request", kMsgSendRequest, 27);
+    const Case* resp = findCase("response", kMsgSendRequest, 27);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), r.answer(req->frame));
+    ASSERT_EQ(1u, r.port.sent.size());
+    const FakeMeshPort::Sent& s = r.port.sent[0];
+    EXPECT_EQ(FakeMeshPort::Sent::kDatagram, s.kind);
+    EXPECT_EQ(twinoak::meshclient::kPayloadTypeReq, s.payload_type);
+    EXPECT_TRUE(s.direct);
+    EXPECT_EQ("7f3a", toHex(s.path)) << "along the job's path";
+    EXPECT_EQ(twinoak::meshclient::encodePathLen(2, 1), s.path_len);
+    // AgentMesh::sendRequest: the tag, the type, the data.
+    std::vector<uint8_t> want = le32(1791720051);
+    want.push_back(0x06);
+    const std::vector<uint8_t> data = fromHex(req->fields["data"].as<std::string>());
+    want.insert(want.end(), data.begin(), data.end());
+    EXPECT_EQ(toHex(want), toHex(s.plain));
+    EXPECT_EQ(1791720051u, r.job.awaitTag()) << "the reply is matched by the timestamp";
+  }
+  // "status request to the peer" (seq 26): type 1 and no data, answered kOk.
+  {
+    ClientRig r;
+    r.beginJob(kPathNone);
+    r.answer(requestFrame(kMsgSendRequest, 26, 26));
+    EXPECT_EQ(kOk, r.lastStatus());
+    ASSERT_EQ(1u, r.port.sent.size());
+    EXPECT_EQ(5u, r.port.sent[0].plain.size());
+    EXPECT_EQ(0x01, r.port.sent[0].plain[4]);
+    EXPECT_FALSE(r.port.sent[0].direct);
+  }
+  // "cli line sent" (seq 29, the line flagged sensitive) with a direct path: tag 0.
+  {
+    ClientRig r;
+    r.beginJob(kPathDirect);
+    r.port.time = 1791720052;
+    const Case* req = findCase("request", kMsgSendCli, 29);
+    const Case* resp = findCase("response", kMsgSendCli, 29);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), r.answer(req->frame));
+    ASSERT_EQ(1u, r.port.sent.size());
+    const FakeMeshPort::Sent& s = r.port.sent[0];
+    EXPECT_EQ(twinoak::meshclient::kPayloadTypeTxtMsg, s.payload_type);
+    EXPECT_TRUE(s.direct);
+    EXPECT_EQ(0u, s.path_len) << "zero hops";
+    // BaseChatMesh::sendCommandData's shape: timestamp, TXT_TYPE_CLI_DATA << 2, the line.
+    std::vector<uint8_t> want = le32(1791720052);
+    want.push_back(0x04);
+    const std::string text = req->fields["text"].as<std::string>();
+    want.insert(want.end(), text.begin(), text.end());
+    EXPECT_EQ(toHex(want), toHex(s.plain));
+    EXPECT_EQ(twinoak::meshclient::kAwaitText, r.job.awaitKind());
+    EXPECT_EQ(0u, r.job.awaitTag()) << "a CLI reply carries no tag";
+  }
+  // "discovery sent" (seq 30): always a flood, even with a direct path in the job.
+  {
+    ClientRig r;
+    r.beginJob(kPathHops, {0x7f, 0x3a}, 2);
+    r.port.time = 1791720053;
+    r.port.random_fill = 0xc3;
+    const Case* req = findCase("request", kMsgSendDiscovery, 30);
+    const Case* resp = findCase("response", kMsgSendDiscovery, 30);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), r.answer(req->frame));
+    ASSERT_EQ(1u, r.port.sent.size());
+    const FakeMeshPort::Sent& s = r.port.sent[0];
+    EXPECT_EQ(twinoak::meshclient::kPayloadTypeReq, s.payload_type);
+    EXPECT_FALSE(s.direct) << "discovery always floods, whatever path the job holds";
+    // The companion's path-discovery request: the telemetry type, the inverse base mask, three
+    // reserved bytes, four random ones.
+    std::vector<uint8_t> want = le32(1791720053);
+    const uint8_t tail[] = {0x03, 0xfe, 0, 0, 0, 0xc3, 0xc3, 0xc3, 0xc3};
+    want.insert(want.end(), tail, tail + sizeof tail);
+    EXPECT_EQ(toHex(want), toHex(s.plain));
+  }
+  // "trace over a two-byte round trip" (seq 31): direct, flags 1, the hashes as the path, the
+  // tag the timestamp; and "trace refused: three-byte hashes" (seq 32).
+  {
+    ClientRig r;
+    r.port.time = 1791720054;
+    r.port.random_fill = 0x11;
+    const Case* req = findCase("request", kMsgSendTrace, 31);
+    ASSERT_NE(nullptr, req);
+    r.answer(req->frame);
+    uint8_t type = 0, seq = 0;
+    const std::vector<uint8_t> body = lastBody(r.h, type, seq);
+    ASSERT_EQ(10u, body.size());
+    EXPECT_EQ(kOk, body[0]);
+    EXPECT_EQ(kSendDirect, body[1]) << "a trace is always direct";
+    EXPECT_EQ(toHex(le32(1791720054)), toHex(std::vector<uint8_t>(body.begin() + 2, body.begin() + 6)))
+        << "tag";
+    EXPECT_EQ(toHex(le32(1791720054)), toHex(std::vector<uint8_t>(body.begin() + 6, body.end())))
+        << "sender_ts";
+    ASSERT_EQ(1u, r.port.sent.size());
+    const FakeMeshPort::Sent& s = r.port.sent[0];
+    EXPECT_EQ(FakeMeshPort::Sent::kTrace, s.kind);
+    EXPECT_EQ(1791720054u, s.tag);
+    EXPECT_EQ(0x11111111u, s.auth) << "four random bytes";
+    EXPECT_EQ(1, s.flags) << "two-byte hashes: the exponent 1";
+    EXPECT_EQ("7f3aa1b27f3a46f6", toHex(s.path));
+    EXPECT_EQ(twinoak::meshclient::kAwaitTrace, r.job.awaitKind());
+
+    ClientRig three;
+    const Case* refused = findCase("response", kMsgSendTrace, 32);
+    ASSERT_NE(nullptr, refused);
+    std::vector<uint8_t> payload = req->payload;
+    payload[4] = 3;  // hash_size
+    payload.push_back(0x00);
+    payload.push_back(0x00);
+    payload.push_back(0x00);
+    payload.push_back(0x00);  // 12 bytes: four three-byte hops
+    EXPECT_EQ(toHex(refused->frame), three.answer(frameOf(kMsgSendTrace, 32, payload)));
+    EXPECT_TRUE(three.port.sent.empty());
+  }
+}
+
+TEST(TheFiveSends, WhatCannotBeSentIsRefusedBeforeAnythingIsBuilt) {
+  ClientRig r;
+  r.beginJob(kPathNone);
+  struct Bad {
+    const char* what;
+    uint8_t type;
+    std::vector<uint8_t> payload;
+    uint8_t status;
+  };
+  const std::vector<Bad> bad = {
+      {"a password of 16 bytes", kMsgSendLogin,
+       sendPayload(1000, std::vector<uint8_t>(16, 'p')), kErrMalformed},
+      {"a CLI line of 149 bytes", kMsgSendCli,
+       sendPayload(1000, [] {
+         std::vector<uint8_t> b = {0x00};
+         b.insert(b.end(), 149, 'x');
+         return b;
+       }()),
+       kErrMalformed},
+      {"an empty CLI line", kMsgSendCli, sendPayload(1000, {0x00}), kErrMalformed},
+      {"request data of 163 bytes", kMsgSendRequest,
+       sendPayload(1000, [] {
+         std::vector<uint8_t> b = {0x01};
+         b.insert(b.end(), 163, 0xab);
+         return b;
+       }()),
+       kErrRange},
+      {"a trace with hash_size 5", kMsgSendTrace, sendPayload(1000, {5, 1, 2, 3, 4, 5}),
+       kErrMalformed},
+      {"a trace with hash_size 0", kMsgSendTrace, sendPayload(1000, {0, 1, 2}), kErrMalformed},
+      {"a trace with no hops", kMsgSendTrace, sendPayload(1000, {2}), kErrMalformed},
+      {"a trace whose bytes are not whole hops", kMsgSendTrace, sendPayload(1000, {2, 1, 2, 3}),
+       kErrMalformed},
+      {"a trace of 176 bytes of hashes", kMsgSendTrace,
+       sendPayload(1000, [] {
+         std::vector<uint8_t> b = {1};
+         b.insert(b.end(), 176, 0x7f);
+         return b;
+       }()),
+       kErrRange},
+      {"a send three bytes short of its timeout", kMsgSendDiscovery, {0x01, 0x02, 0x03},
+       kErrMalformed},
+  };
+  uint8_t seq = 50;
+  for (const Bad& b : bad) {
+    r.answer(frameOf(b.type, seq++, b.payload));
+    EXPECT_EQ(b.status, r.lastStatus()) << b.what;
+  }
+  EXPECT_TRUE(r.port.sent.empty()) << "nothing reached the port";
+  EXPECT_EQ(0u, r.client.clientTx());
+  EXPECT_FALSE(r.job.awaiting());
+
+  // And the two that are legal and nearly were not: 148 bytes of line, 162 bytes of data.
+  std::vector<uint8_t> line = {0x00};
+  line.insert(line.end(), 148, 'y');
+  r.answer(frameOf(kMsgSendCli, 70, sendPayload(0, line)));
+  EXPECT_EQ(kOk, r.lastStatus());
+  std::vector<uint8_t> data = {0x01};
+  data.insert(data.end(), 162, 0xab);
+  r.answer(frameOf(kMsgSendRequest, 71, sendPayload(0, data)));
+  EXPECT_EQ(kOk, r.lastStatus());
+  EXPECT_EQ(2u, r.port.sent.size());
+  EXPECT_EQ(167u, r.port.sent[1].plain.size()) << "the longest plaintext a datagram carries";
+
+  // A pool with no packet left is ERR_FAILED: tried and failed, nothing counted, nothing awaited.
+  r.port.fail = true;
+  r.answer(requestFrame(kMsgSendLogin, 23, 72));
+  EXPECT_EQ(kErrFailed, r.lastStatus());
+  EXPECT_EQ(2u, r.client.clientTx());
+  EXPECT_FALSE(r.job.awaiting());
+}
+
+TEST(TheFiveSends, ARetriedSendTransmitsNothingAndAnswersTheSame) {
+  // Section 3's one-entry memory, where it matters most: "a lost response must never become a
+  // second transmission".
+  ClientRig r;
+  r.beginJob(kPathNone);
+  const std::vector<uint8_t> frame = requestFrame(kMsgSendRequest, 26, 90);
+  const std::string first = r.answer(frame);
+  EXPECT_EQ(kOk, r.lastStatus());
+  EXPECT_EQ(1u, r.port.sent.size());
+  EXPECT_EQ(1u, r.h.session.executed());
+
+  r.port.time += 100;  // the clock moved on; the remembered answer did not
+  EXPECT_EQ(first, r.answer(frame)) << "the remembered response, byte for byte";
+  EXPECT_EQ(1u, r.port.sent.size()) << "one call into the mesh";
+  EXPECT_EQ(1u, r.client.clientTx()) << "client_tx rose by exactly one for the two frames";
+  EXPECT_EQ(1u, r.h.session.executed());
+}
+
+TEST(TheFiveSends, NoBufferTheSessionOrTheClientOwnsHoldsThePasswordAfterwards) {
+  // The two sends that carry a password: a login, and a CLI line flagged sensitive. After each,
+  // the bytes of the password are searched for in the whole of the Session, the client, the job
+  // and the reply record - and in the receiver's buffers the request arrived in - and found
+  // nowhere. The fake port's own copy of the plaintext is the test's and is what proves the
+  // password *did* go into the packet.
+  {
+    ClientRig r;
+    r.beginJob(kPathNone);
+    const Case* req = findCase("request", kMsgSendLogin, 23);
+    ASSERT_NE(nullptr, req);
+    const std::vector<uint8_t> pw = fromHex(req->fields["password"].as<std::string>());
+    ASSERT_GE(pw.size(), 4u);
+    r.answer(req->frame);
+    EXPECT_EQ(kOk, r.lastStatus());
+    ASSERT_EQ(1u, r.port.sent.size());
+    EXPECT_TRUE(holdsBytes(r.port.sent[0].plain.data(), r.port.sent[0].plain.size(), pw))
+        << "the plaintext handed to the board carried it";
+    EXPECT_FALSE(holdsBytes(&r.h.session, sizeof(r.h.session), pw)) << "the session";
+    EXPECT_FALSE(holdsBytes(&r.client, sizeof(r.client), pw)) << "the client and its reply";
+    EXPECT_FALSE(holdsBytes(&r.job, sizeof(r.job), pw)) << "the job";
+    // The retry memory holds the response and not the request: a retry answers the same
+    // without the password ever having been kept.
+    const std::string first = r.h.lastFrame();
+    EXPECT_EQ(first, r.answer(req->frame));
+    EXPECT_FALSE(holdsBytes(&r.h.session, sizeof(r.h.session), pw));
+  }
+  {
+    ClientRig r;
+    r.beginJob(kPathDirect);
+    const Case* req = findCase("request", kMsgSendCli, 29);  // "cli line made from a password"
+    ASSERT_NE(nullptr, req);
+    const std::string text = req->fields["text"].as<std::string>();
+    const std::vector<uint8_t> line(text.begin(), text.end());
+    EXPECT_EQ(1, req->fields["flags"].as<int>()) << "flagged sensitive";
+    r.answer(req->frame);
+    EXPECT_EQ(kOk, r.lastStatus());
+    ASSERT_EQ(1u, r.port.sent.size());
+    EXPECT_TRUE(holdsBytes(r.port.sent[0].plain.data(), r.port.sent[0].plain.size(), line));
+    EXPECT_FALSE(holdsBytes(&r.h.session, sizeof(r.h.session), line)) << "the session";
+    EXPECT_FALSE(holdsBytes(&r.client, sizeof(r.client), line)) << "the client";
+    EXPECT_FALSE(holdsBytes(&r.job, sizeof(r.job), line)) << "the job";
+    // Eight bytes of the line - the password's own - are not there either, in case the whole
+    // line was merely split.
+    const std::vector<uint8_t> tail(line.end() - 8, line.end());
+    EXPECT_FALSE(holdsBytes(&r.h.session, sizeof(r.h.session), tail));
+    EXPECT_FALSE(holdsBytes(&r.client, sizeof(r.client), tail));
+  }
+  // And the receiver itself: fed a frame and wiped, its bytes are zero.
+  {
+    FrameReceiver rx;
+    const std::vector<uint8_t> frame = frameOf(kMsgPing, 1, {0x11, 0x22, 0x33, 0x44});
+    for (uint8_t b : frame) rx.feedByte(b);
+    ASSERT_TRUE(rx.hasPacket());
+    EXPECT_TRUE(holdsBytes(&rx, sizeof(rx), {0x11, 0x22, 0x33, 0x44}));
+    rx.wipe();
+    EXPECT_FALSE(rx.hasPacket());
+    EXPECT_FALSE(holdsBytes(&rx, sizeof(rx), {0x11, 0x22, 0x33, 0x44}));
+    EXPECT_EQ(0, rx.drops()) << "the counters are kept";
+  }
+}
+
+// ----------------------------------------------------------------------------- the reply
+
+TEST(TheReply, ReplyGetIsTheFixturesFramesWhileWaitingAndWhenNothingIsHeld) {
+  // "reply get: still waiting" (seq 33): the neighbours request of seq 27 sent 1200 ms ago.
+  {
+    ClientRig r;
+    r.beginJob(kPathHops, {0x7f, 0x3a}, 2);
+    r.port.time = 1791720051;
+    r.answer(requestFrame(kMsgSendRequest, 27, 27));
+    EXPECT_EQ(kOk, r.lastStatus());
+    r.h.now += 1200;
+    const Case* req = findCase("request", kMsgReplyGet, 33);
+    const Case* resp = findCase("response", kMsgReplyGet, 33);
+    ASSERT_NE(nullptr, req);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), r.answer(req->frame));
+  }
+  // "reply get: nothing held" (seq 34).
+  {
+    ClientRig r;
+    const Case* resp = findCase("response", kMsgReplyGet, 34);
+    ASSERT_NE(nullptr, resp);
+    EXPECT_EQ(toHex(resp->frame), r.answer(frameOf(kMsgReplyGet, 34, {})));
+  }
+}
+
+TEST(TheReply, TheFourEventsOfTheFixtureByteForByte) {
+  // Each event's payload, with the arrival scripted the way the board's peer overrides would
+  // report it (src/app/TwinOakMesh.cpp). The frames are compared by payload: the fixture's events
+  // carry a seq of their own and the session counts its own from 0.
+  //
+  // "a response that came back as a path": a flooded request answered with a returned path, the
+  // response riding in it; the path is learned before the event is sent.
+  {
+    ClientRig r;
+    r.beginJob(kPathNone);
+    r.port.time = 1791720051;
+    const uint32_t sent_at = r.h.now;
+    r.answer(requestFrame(kMsgSendRequest, 27, 27));
+    EXPECT_EQ(kOk, r.lastStatus());
+    const Case* want = findCaseNamed("mesh reply: a response that came back as a path");
+    ASSERT_NE(nullptr, want);
+    r.h.now = sent_at + want->fields["elapsed_ms"].as<uint32_t>();
+    const uint8_t hops[] = {0x7f, 0x3a};
+    EXPECT_TRUE(r.client.onReturnedPath(twinoak::meshclient::encodePathLen(2, 1), hops));
+    std::vector<uint8_t> plain = le32(want->fields["tag"].as<uint32_t>());
+    const std::vector<uint8_t> data = fromHex(want->fields["data"].as<std::string>());
+    plain.insert(plain.end(), data.begin(), data.end());
+    EXPECT_TRUE(r.client.onResponse(plain.data(), plain.size(), /*via_path=*/true,
+                                    want->fields["snr_q4"].as<int8_t>(),
+                                    want->fields["rssi"].as<int16_t>(), r.h.now));
+    EXPECT_FALSE(r.job.awaiting()) << "the reply arrived: the extra peer leaves the front";
+    EXPECT_EQ(kPathHops, r.job.pathMode()) << "the returned path is the job's now";
+    EXPECT_EQ(1u, r.job.pathHopCount());
+
+    r.h.sent.clear();
+    r.h.run();
+    ASSERT_EQ(1u, r.h.sent.size()) << "one EV_MESH_REPLY";
+    uint8_t type = 0, seq = 0;
+    EXPECT_EQ(toHex(want->payload), toHex(lastBody(r.h, type, seq)));
+    EXPECT_EQ(kMsgEvMeshReply, type);
+    r.h.run();
+    EXPECT_EQ(1u, r.h.sent.size()) << "and only one";
+
+    // REPLY_GET afterwards is the same record, and PATH_GET reads the learned route.
+    r.answer(frameOf(kMsgReplyGet, 60, {}));
+    std::vector<uint8_t> body = lastBody(r.h, type, seq);
+    ASSERT_GE(body.size(), 2u);
+    EXPECT_EQ(kOk, body[0]);
+    EXPECT_EQ(kReplyResponse, body[1]);
+    EXPECT_EQ(toHex(want->payload), toHex(std::vector<uint8_t>(body.begin() + 1, body.end())));
+    r.answer(frameOf(kMsgPathGet, 61, {}));
+    body = lastBody(r.h, type, seq);
+    EXPECT_EQ("000202017f3a", toHex(body)) << "OK; hops, size 2, one hop, 7f3a";
+  }
+  // "a cli reply": the first text of CLI data from the peer while a text is awaited.
+  {
+    ClientRig r;
+    r.beginJob(kPathDirect);
+    const uint32_t sent_at = r.h.now;
+    r.answer(requestFrame(kMsgSendCli, 28, 28));
+    EXPECT_EQ(kOk, r.lastStatus());
+    const Case* want = findCaseNamed("mesh reply: a cli reply");
+    ASSERT_NE(nullptr, want);
+    r.h.now = sent_at + want->fields["elapsed_ms"].as<uint32_t>();
+    // The repeater's TXT_MSG: its own timestamp, TXT_TYPE_CLI_DATA << 2, the text, and the
+    // zero padding MeshCore adds to a cipher block.
+    std::vector<uint8_t> plain = le32(1791720099);
+    plain.push_back(0x04);
+    const std::string text = want->fields["text"].as<std::string>();
+    plain.insert(plain.end(), text.begin(), text.end());
+    while (plain.size() % 16 != 0) plain.push_back(0);
+    EXPECT_TRUE(r.client.onText(plain.data(), plain.size(), want->fields["snr_q4"].as<int8_t>(),
+                                want->fields["rssi"].as<int16_t>(), r.h.now));
+    r.h.sent.clear();
+    r.h.run();
+    ASSERT_EQ(1u, r.h.sent.size());
+    uint8_t type = 0, seq = 0;
+    EXPECT_EQ(toHex(want->payload), toHex(lastBody(r.h, type, seq)));
+    EXPECT_EQ(kMsgEvMeshReply, type);
+  }
+  // "a trace": the completed trace with the awaited tag, one SNR per hop.
+  {
+    ClientRig r;
+    r.port.time = 1791720054;
+    const uint32_t sent_at = r.h.now;
+    r.answer(requestFrame(kMsgSendTrace, 31, 31));
+    EXPECT_EQ(kOk, r.lastStatus());
+    const Case* want = findCaseNamed("mesh reply: a trace");
+    ASSERT_NE(nullptr, want);
+    r.h.now = sent_at + want->fields["elapsed_ms"].as<uint32_t>();
+    const std::vector<uint8_t> hashes = fromHex(want->fields["hashes"].as<std::string>());
+    const std::vector<uint8_t> snrs = fromHex(want->fields["snrs"].as<std::string>());
+    EXPECT_TRUE(r.client.onTrace(want->fields["tag"].as<uint32_t>(),
+                                 want->fields["trace_flags"].as<uint8_t>(), hashes.data(),
+                                 hashes.size(), snrs.data(), snrs.size(),
+                                 want->fields["final_snr_q4"].as<int8_t>(),
+                                 want->fields["rssi"].as<int16_t>(), r.h.now));
+    r.h.sent.clear();
+    r.h.run();
+    ASSERT_EQ(1u, r.h.sent.size());
+    uint8_t type = 0, seq = 0;
+    EXPECT_EQ(toHex(want->payload), toHex(lastBody(r.h, type, seq)));
+  }
+  // "silence": the wait ran out, found by the loop and not by a reply.
+  {
+    ClientRig r;
+    r.beginJob(kPathNone);
+    r.port.time = 1791720055;
+    const Case* want = findCaseNamed("mesh reply: silence");
+    ASSERT_NE(nullptr, want);
+    const uint32_t timeout = want->fields["elapsed_ms"].as<uint32_t>();
+    r.answer(frameOf(kMsgSendRequest, 35, sendPayload(timeout, {0x01})));
+    EXPECT_EQ(kOk, r.lastStatus());
+    r.h.now += timeout - 1;
+    r.h.sent.clear();
+    r.h.run();
+    EXPECT_TRUE(r.h.sent.empty()) << "one millisecond short";
+    EXPECT_TRUE(r.job.awaiting());
+    r.h.now += 1;
+    r.h.run();
+    ASSERT_EQ(1u, r.h.sent.size());
+    uint8_t type = 0, seq = 0;
+    EXPECT_EQ(toHex(want->payload), toHex(lastBody(r.h, type, seq)));
+    EXPECT_EQ(kMsgEvMeshReply, type);
+    EXPECT_FALSE(r.job.awaiting());
+    EXPECT_EQ(kReplyTimeout, r.client.reply().state());
+    // A reply that arrives late is dropped: the record is no longer pending.
+    const std::vector<uint8_t> late = le32(1791720055);
+    EXPECT_FALSE(r.client.onResponse(late.data(), late.size(), false, 0, 0, r.h.now));
+    EXPECT_EQ(kReplyTimeout, r.client.reply().state());
+  }
+}
+
+TEST(TheReply, WhatIsNotTheAwaitedReplyIsDroppedThroughTheClient) {
+  ClientRig r;
+  r.beginJob(kPathNone);
+  r.port.time = 1000;
+  r.answer(requestFrame(kMsgSendRequest, 26, 26));  // awaits a response tagged 1000
+  EXPECT_EQ(kOk, r.lastStatus());
+  const std::vector<uint8_t> other = le32(999);
+  EXPECT_FALSE(r.client.onResponse(other.data(), other.size(), false, 0, 0, r.h.now))
+      << "another tag";
+  std::vector<uint8_t> text = le32(5);
+  text.push_back(0x04);
+  text.push_back('x');
+  EXPECT_FALSE(r.client.onText(text.data(), text.size(), 0, 0, r.h.now))
+      << "a text while a response is awaited";
+  EXPECT_FALSE(r.client.onTrace(1000, 1, nullptr, 0, nullptr, 0, 0, 0, r.h.now))
+      << "a trace while a response is awaited";
+  EXPECT_TRUE(r.job.awaiting());
+  EXPECT_EQ(kReplyPending, r.client.reply().state());
+  const std::vector<uint8_t> right = le32(1000);
+  EXPECT_TRUE(r.client.onResponse(right.data(), right.size(), false, 0, 0, r.h.now));
+  EXPECT_FALSE(r.client.onResponse(right.data(), right.size(), false, 0, 0, r.h.now))
+      << "the first wins";
+
+  // A CLI line: a response is dropped, a text of another type is dropped.
+  r.h.sent.clear();
+  r.h.run();  // the event goes
+  r.answer(requestFrame(kMsgSendCli, 28, 28));
+  EXPECT_EQ(kOk, r.lastStatus());
+  EXPECT_FALSE(r.client.onResponse(right.data(), right.size(), false, 0, 0, r.h.now))
+      << "a response while a text is awaited";
+  text[4] = uint8_t(2 << 2);  // TXT_TYPE_SIGNED_PLAIN
+  EXPECT_FALSE(r.client.onText(text.data(), text.size(), 0, 0, r.h.now))
+      << "a text that is not CLI data";
+  text[4] = 0x04;
+  EXPECT_TRUE(r.client.onText(text.data(), text.size(), 0, 0, r.h.now));
+  EXPECT_EQ(kReplyText, r.client.reply().state());
+}
+
+TEST(TheReply, WhileTheWalterSleepsTheEventIsHeldAndReplyGetIsTheFallback) {
+  ClientRig r;
+  r.beginJob(kPathNone);
+  r.port.time = 2000;
+  r.answer(requestFrame(kMsgSendRequest, 26, 26));
+  r.h.attention.asleep = true;  // a SLEEP_NOTICE arrived meanwhile
+  const std::vector<uint8_t> reply = le32(2000);
+  EXPECT_TRUE(r.client.onResponse(reply.data(), reply.size(), false, 8, -90, r.h.now));
+  r.h.sent.clear();
+  r.h.run();
+  EXPECT_TRUE(r.h.sent.empty()) << "no event leaves while the Walter is believed asleep";
+  r.h.attention.asleep = false;
+  r.h.run();
+  EXPECT_TRUE(r.h.sent.empty()) << "and the outcome is reported once: it is not sent later";
+  r.answer(frameOf(kMsgReplyGet, 5, {}));
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(r.h, type, seq);
+  ASSERT_GE(body.size(), 2u);
+  EXPECT_EQ(kOk, body[0]);
+  EXPECT_EQ(kReplyResponse, body[1]) << "REPLY_GET has the record";
+}
+
+TEST(TheReply, TheRecordIsLetGoByTheNextSendJobBeginAndJobEnd) {
+  ClientRig r;
+  r.beginJob(kPathNone);
+  r.port.time = 3000;
+  r.answer(requestFrame(kMsgSendRequest, 26, 26));
+  const std::vector<uint8_t> reply = le32(3000);
+  EXPECT_TRUE(r.client.onResponse(reply.data(), reply.size(), false, 0, 0, r.h.now));
+  r.h.run();
+  EXPECT_EQ(kReplyResponse, r.client.reply().state());
+
+  // A send with timeout 0 awaits nothing and lets the record go.
+  r.answer(frameOf(kMsgSendRequest, 27, sendPayload(0, {0x01})));
+  EXPECT_EQ(kOk, r.lastStatus());
+  EXPECT_FALSE(r.job.awaiting());
+  EXPECT_EQ(kReplyNone, r.client.reply().state());
+  EXPECT_EQ(2u, r.client.clientTx()) << "counted all the same";
+
+  // JOB_END while a reply is awaited: nothing awaited, nothing held, no event.
+  r.answer(frameOf(kMsgSendRequest, 28, sendPayload(5000, {0x01})));
+  EXPECT_TRUE(r.job.awaiting());
+  r.answer(frameOf(kMsgJobEnd, 29, {}));
+  EXPECT_FALSE(r.job.awaiting());
+  EXPECT_EQ(kReplyNone, r.client.reply().state());
+  r.h.now += 10000;
+  r.h.sent.clear();
+  r.h.run();
+  EXPECT_TRUE(r.h.sent.empty()) << "no timeout event for a wait JOB_END ended";
+
+  // JOB_BEGIN likewise.
+  r.beginJob(kPathNone);
+  r.answer(frameOf(kMsgSendRequest, 30, sendPayload(5000, {0x01})));
+  EXPECT_TRUE(r.job.awaiting());
+  r.answer(requestFrame(kMsgJobBegin, 16, 31));
+  EXPECT_EQ(kOk, r.lastStatus());
+  EXPECT_FALSE(r.job.awaiting());
+  EXPECT_EQ(kReplyNone, r.client.reply().state());
+
+  // And the silence rule, which ends the job by itself.
+  r.answer(frameOf(kMsgSendRequest, 32, sendPayload(500000, {0x01})));
+  EXPECT_TRUE(r.job.awaiting());
+  r.h.now += twinoak::meshclient::kIdleEndMs;
+  r.client.loop(r.h.now);
+  EXPECT_FALSE(r.job.begun());
+  EXPECT_FALSE(r.job.awaiting());
+  EXPECT_EQ(kReplyNone, r.client.reply().state());
+}
+
+TEST(TheReply, AReturnedPathOfZeroHopsIsTheDirectMode) {
+  ClientRig r;
+  r.beginJob(kPathNone);
+  EXPECT_TRUE(r.client.onReturnedPath(0, nullptr));
+  EXPECT_EQ(kPathDirect, r.job.pathMode()) << "a direct neighbour answered";
+  const uint8_t three[] = {1, 2, 3, 4, 5, 6};
+  EXPECT_TRUE(r.client.onReturnedPath(twinoak::meshclient::encodePathLen(3, 2), three));
+  EXPECT_EQ(kPathHops, r.job.pathMode());
+  EXPECT_EQ(3u, r.job.pathHashSize());
+  // A hash size the link does not allow (4, reserved upstream too) leaves the path as it was.
+  EXPECT_FALSE(r.client.onReturnedPath(twinoak::meshclient::encodePathLen(4, 1), three));
+  EXPECT_EQ(3u, r.job.pathHashSize());
+  EXPECT_EQ(2u, r.job.pathHopCount());
+}
+
+// ----------------------------------------------------------------------------- the counters
+
+TEST(TheCounters, MeshCountersReadsTheRadioTheClientAndTheRing) {
+  // The fixture's "mesh counters response" (seq 37), field by field: rx, tx, noise floor, RSSI
+  // and SNR are the radio's and the fake port answers them; client_tx is this client's and is
+  // made to happen with 42 sends; obs_dropped is the ring's count STATUS carries too. The two
+  // advert counts are the observation ring's (task 03) and read 0 until it exists, which is why
+  // this is a comparison of fields and not of the frame.
+  const Case* want = findCase("response", kMsgMeshCounters, 37);
+  ASSERT_NE(nullptr, want);
+  JsonObject f = want->fields;
+
+  ClientRig r;
+  r.beginJob(kPathNone);
+  r.port.counters.rx = f["rx"].as<uint32_t>();
+  r.port.counters.tx = f["tx"].as<uint32_t>();
+  r.port.counters.noise_floor = f["noise_floor"].as<int16_t>();
+  r.port.counters.last_rssi = f["last_rssi"].as<int16_t>();
+  r.port.counters.last_snr_q4 = f["last_snr_q4"].as<int8_t>();
+  r.h.observations.lost = f["obs_dropped"].as<uint16_t>();
+  const uint32_t sends = f["client_tx"].as<uint32_t>();
+  for (uint32_t i = 0; i < sends; i++) {
+    r.answer(frameOf(kMsgSendRequest, uint8_t(100 + i), sendPayload(0, {0x01})));
+    ASSERT_EQ(kOk, r.lastStatus()) << "send " << i;
+  }
+  EXPECT_EQ(sends, r.client.clientTx());
+  EXPECT_EQ(size_t(sends), r.port.sent.size());
+
+  r.answer(frameOf(kMsgMeshCounters, 37, {}));
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(r.h, type, seq);
+  EXPECT_EQ(responseType(kMsgMeshCounters), type);
+  Reader rd(body.data(), body.size());
+  EXPECT_EQ(kOk, rd.u8());
+  EXPECT_EQ(f["rx"].as<uint32_t>(), rd.u32());
+  EXPECT_EQ(f["tx"].as<uint32_t>(), rd.u32());
+  EXPECT_EQ(f["client_tx"].as<uint32_t>(), rd.u32());
+  EXPECT_EQ(0u, rd.u32()) << "adverts: the ring's, task 03";
+  EXPECT_EQ(0u, rd.u32()) << "adverts_dropped: the ring's, task 03";
+  EXPECT_EQ(f["obs_dropped"].as<uint32_t>(), rd.u32());
+  EXPECT_EQ(f["noise_floor"].as<int16_t>(), rd.i16());
+  EXPECT_EQ(f["last_rssi"].as<int16_t>(), rd.i16());
+  EXPECT_EQ(f["last_snr_q4"].as<int8_t>(), rd.i8());
+  EXPECT_TRUE(rd.ok());
+  EXPECT_EQ(0u, rd.remaining());
+  EXPECT_EQ(want->payload.size(), body.size()) << "the same shape as the fixture's";
+}
+
+TEST(TheCounters, WithNoMeshClientTheEightAreUnsupported) {
+  Harness h;
+  h.services.mesh = nullptr;
+  const uint8_t types[] = {kMsgSendLogin, kMsgSendRequest, kMsgSendCli, kMsgSendDiscovery,
+                           kMsgSendTrace, kMsgReplyGet, kMsgMeshCounters};
+  uint8_t seq = 1;
+  for (uint8_t type : types) {
+    h.feed(frameOf(type, seq, sendPayload(0, {0x01, 0x02})));
+    h.run();
+    EXPECT_EQ(toHex(frameOf(responseType(type), seq, {kErrUnsupported})), h.lastFrame())
+        << "type 0x" << std::hex << int(type);
+    seq++;
+  }
+  EXPECT_EQ(7u, h.sent.size());
 }
 
 int main(int argc, char** argv) {
