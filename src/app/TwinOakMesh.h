@@ -4,8 +4,29 @@
 // MyMesh is MeshCore's examples/simple_repeater/MyMesh.{h,cpp}, compiled from the pin by
 // build_as_lib.py (-D BUILD_EXAMPLE=simple_repeater) with only its main.cpp left out
 // (-D EXCLUDE_FROM_EXAMPLE=main.cpp). Not one line of it is edited: everything of ours hangs on the
-// protected virtuals below, each of which calls its base and nothing else in this task. The link,
-// the clock, local management, power and the mesh client (phases 1 and 2) are added here later.
+// virtuals below. Local management, power and the mesh client are added here later.
+//
+// What they do today is tell the clock keeper that something carrying this node's clock has gone,
+// or may have gone, on the air - which is what makes a backwards TIME_SET unsafe
+// (spec/LINK-PROTOCOL.md section 5.4, src/clock/ClockKeeper.h). The four places are the four
+// places upstream can put our clock into a packet, and each calls its base and nothing else:
+//
+//   - `sendSelfAdvertisement`, which createAdvert() stamps with getCurrentTime()
+//     (src/Mesh.cpp:418). Ours is the main.cpp that sends the boot advert, so that one comes
+//     through here too, and so does a console `advert` / `advert.zerohop`
+//     (src/helpers/CommonCLI.cpp).
+//   - `onAnonDataRecv`, `onPeerDataRecv` and `onPeerPathRecv`: a packet addressed to us that
+//     verified, which upstream answers with a reply that carries our clock - the login reply and
+//     the path return take it from getCurrentTimeUnique() (MyMesh.cpp:135 and :743), the anonymous
+//     regions / owner / clock replies from getCurrentTime() (MyMesh.cpp:148-200), and
+//     handleRequest's own telemetry from the sensors. Upstream decides whether to reply at all,
+//     so these three are deliberately read as "may have": a packet from a stranger that upstream
+//     rate-limits away still counts, which errs towards refusing a backwards set.
+//
+// Upstream's *periodic* adverts are upstream's own (MyMesh::loop, MyMesh.cpp:1294-1305) and are
+// not hooked: the first of them cannot fire before two minutes (updateAdvertTimer at the default
+// advert_interval of 1, which is 2 minutes, and 47 hours for the flood one), by which time the
+// advert hold has lifted and the boot advert has already said so.
 //
 // Every override below carries `override`, so a pin bump that makes one of these private, renames
 // it or changes its signature is a compile error on the bump's own pull request and not a method
@@ -70,6 +91,14 @@ class TwinOakMesh : public MyMesh {
                    const uint8_t* path_snrs, const uint8_t* path_hashes,
                    uint8_t path_len) override;
 
+  // Declared `void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const
+  // mesh::Identity& sender, uint8_t* data, size_t len) override;` under `protected:` in MyMesh.h;
+  // virtual in mesh::Mesh (src/Mesh.h:130). Upstream (MyMesh.cpp:571) runs an anonymous request -
+  // a login, or the regions / owner / clock requests a stranger may ask - and answers it with a
+  // reply that carries our clock.
+  void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender,
+                      uint8_t* data, size_t len) override;
+
   // --- what the radio hears and sends ---------------------------------------------------------
 
   // Declared `void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t
@@ -89,4 +118,12 @@ class TwinOakMesh : public MyMesh {
   // Declared `void logTx(mesh::Packet* pkt, int len) override;` under `protected:` in MyMesh.h;
   // virtual in mesh::Dispatcher (src/Dispatcher.h:162). Upstream (MyMesh.cpp:505) logs likewise.
   void logTx(mesh::Packet* pkt, int len) override;
+
+ public:
+  // Declared `void sendSelfAdvertisement(int delay_millis, bool flood) override;` under
+  // `public:` in MyMesh.h; pure virtual in CommonCLICallbacks (src/helpers/CommonCLI.h:204).
+  // Upstream
+  // (MyMesh.cpp:1031) builds the advert with createSelfAdvert() - which stamps it with the
+  // clock - and sends it zero-hop or flooded.
+  void sendSelfAdvertisement(int delay_millis, bool flood) override;
 };

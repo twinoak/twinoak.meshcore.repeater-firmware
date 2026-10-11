@@ -23,19 +23,29 @@
 #include <stdint.h>
 
 // Upstream's RAK4631Board (variants/rak4631/RAK4631Board.{h,cpp}, compiled from the pin) with the
-// I2C clock pinned to 100 kHz after begin(). getBattMilliVolts() stays upstream's ADC reading
-// until task 06 puts the INA3221's channel 2 behind it.
+// I2C clock pinned to 100 kHz after begin(), and with the two ways this firmware stops running
+// on purpose routed through the clock keeper first. getBattMilliVolts() stays upstream's ADC
+// reading until task 06 puts the INA3221's channel 2 behind it.
 class TwinOakBoard : public RAK4631Board {
  public:
   TwinOakBoard();
   void begin() override;
+
+  // mesh::MainBoard::reboot() and powerOff() are both virtual (src/MeshCore.h:54 and :55 at the
+  // pin d9296435; NRF52Board.h implements them as NVIC_SystemReset and SYSTEMOFF). Every restart
+  // this firmware performs goes through one of them - the console's `poweroff`/`shutdown`,
+  // `reboot` and `clkreboot` (src/helpers/CommonCLI.cpp:184, :186 and :190) as well as the box
+  // link's REBOOT - so overriding them is how "the file is written on a restart the firmware
+  // itself asks for" is kept without touching a line of upstream's (spec/LINK-PROTOCOL.md 5.4).
+  void reboot() override;
+  void powerOff() override;
 };
 
 // Upstream's EnvironmentSensorManager - which finds the BME280 at 0x76 by itself - with the
 // settings seam (SensorManager::getNumSettings/getSettingName/getSettingValue/setSettingValue,
 // src/helpers/SensorManager.h) overridden so that our keys follow upstream's in `sensor list`,
-// `sensor get` and `sensor set` (src/helpers/CommonCLI.cpp). One key for now: fw.version,
-// read-only, our version string. Tasks 05 and 06 add theirs here.
+// `sensor get` and `sensor set` (src/helpers/CommonCLI.cpp). Read-only so far: fw.version, the
+// box link's two counters, and the clock's state. Tasks 05 and 06 add theirs here.
 class TwinOakSensors : public EnvironmentSensorManager {
  public:
   int getNumSettings() const override;

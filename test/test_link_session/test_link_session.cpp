@@ -16,6 +16,8 @@
 //   - two frames in one read, a frame split over three reads, noise between frames;
 //   - a request that completes while the writer still holds an unsent response: neither is lost
 //     and nothing blocks;
+//   - TIME_SET and TIME_GET: the fixture's frames, a refusal answered kErrRange, and both
+//     answered kErrUnsupported when there is no clock interface at all;
 //   - the reset-reason mapping;
 //   - a capability whose interface is absent is not advertised, and the field of STATUS it owns
 //     reads zero.
@@ -179,15 +181,29 @@ class FakeIdentity : public IdentityAccess {
   const char* nodeName() const override { return name.c_str(); }
 };
 
+// The clock keeper's own rules - which values it accepts and what it saves - are
+// test/test_clock's, with the real ClockKeeper behind a real session. Here the clock only has to
+// answer, so TIME_SET moves it when `accept` says so and refuses when it does not.
 class FakeClock : public ClockAccess {
  public:
   uint32_t epoch_s = 0;
   uint8_t state = kTimeUnset;
   bool held = false;
+  bool accept = true;
+  int sets = 0;
 
   uint32_t epoch() const override { return epoch_s; }
   uint8_t timeState() const override { return state; }
   bool advertsHeld() const override { return held; }
+  bool setTime(uint32_t epoch, bool force, uint32_t& prev_epoch) override {
+    (void)force;
+    prev_epoch = epoch_s;
+    sets++;
+    if (!accept) return false;
+    epoch_s = epoch;
+    state = kTimeSet;
+    return true;
+  }
 };
 
 class FakeCli : public CliAccess {
@@ -391,6 +407,16 @@ void arrange(Harness& h, const Case& response) {
       EXPECT_TRUE(h.sent.empty()) << "a dropped frame is never answered";
       break;
     }
+    case kMsgTimeSet:
+      // The clock the fixture's prev_epoch says the node had; the keeper's own rules about which
+      // values it accepts are test/test_clock's.
+      h.clock.epoch_s = f["prev_epoch"].as<uint32_t>();
+      h.clock.accept = true;
+      break;
+    case kMsgTimeGet:
+      h.clock.epoch_s = f["epoch"].as<uint32_t>();
+      h.clock.state = f["time_state"].as<uint8_t>();
+      break;
     case kMsgIdentity: {
       const std::vector<uint8_t> key = fromHex(f["pubkey"].as<std::string>());
       ASSERT_EQ(size_t(kPubKeyLen), key.size());
@@ -406,10 +432,10 @@ void arrange(Harness& h, const Case& response) {
   }
 }
 
-// The five request types this task answers.
+// The request types this firmware answers: task 03's five, and task 04's two.
 bool handledHere(uint8_t type) {
   return type == kMsgHello || type == kMsgPing || type == kMsgStatus || type == kMsgIdentity ||
-         type == kMsgReboot;
+         type == kMsgReboot || type == kMsgTimeSet || type == kMsgTimeGet;
 }
 
 }  // namespace
@@ -435,7 +461,7 @@ TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
     EXPECT_EQ(1u, h.session.executed()) << c.name << ": one handler call";
     n++;
   }
-  EXPECT_EQ(5, n) << "HELLO, PING, STATUS, IDENTITY and REBOOT are what this task answers";
+  EXPECT_EQ(7, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET and TIME_GET";
 }
 
 TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
@@ -892,6 +918,56 @@ TEST(WalterSeen, CountsFromTheLastValidRequestAndNotFromNoise) {
   EXPECT_TRUE(h.session.everSawRequest());
   EXPECT_EQ(0u, h.session.secondsSinceRequest(h.now));
   EXPECT_EQ(90u, h.session.secondsSinceRequest(h.now + 90500));
+}
+
+// ----------------------------------------------------------------------------- the clock
+
+TEST(TheClock, ARefusedTimeSetIsTheFixturesErrRange) {
+  const Case* want = findCaseNamed("time set refused: backwards without force");
+  ASSERT_NE(nullptr, want);
+  const Case* req = findCase("request", kMsgTimeSet, 5);
+  ASSERT_NE(nullptr, req);
+
+  Harness h;
+  h.clock.epoch_s = 1791720000;
+  h.clock.accept = false;  // what the keeper answers for a backwards set without force
+
+  h.feed(frameOf(kMsgTimeSet, want->seq, req->payload));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame());
+  EXPECT_EQ(1, h.clock.sets) << "the keeper was asked, and said no";
+}
+
+TEST(TheClock, WithNoClockInterfaceBothAreUnsupported) {
+  // "A capability is an interface that is there": a build with no clock keeper does not
+  // advertise TIME_PERSIST and answers kErrUnsupported for the two messages that need one.
+  const Case* req = findCase("request", kMsgTimeSet, 5);
+  ASSERT_NE(nullptr, req);
+
+  Harness h;
+  h.services.clock = nullptr;
+
+  h.feed(frameOf(kMsgTimeSet, 11, req->payload));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgTimeSet), 11, {kErrUnsupported})), h.lastFrame());
+
+  h.feed(frameOf(kMsgTimeGet, 12, {}));
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgTimeGet), 12, {kErrUnsupported})), h.lastFrame());
+
+  EXPECT_EQ(0u, uint32_t(capsOf(h.services) & kCapTimePersist));
+}
+
+TEST(TheClock, AMalformedTimeSetIsMalformedAndTheClockIsNotAsked) {
+  Harness h;
+  h.feed(frameOf(kMsgTimeSet, 13, {0x01, 0x02, 0x03}));  // five bytes short of a payload
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgTimeSet), 13, {kErrMalformed})), h.lastFrame());
+  EXPECT_EQ(0, h.clock.sets);
 }
 
 // ----------------------------------------------------------------------------- the reset reason

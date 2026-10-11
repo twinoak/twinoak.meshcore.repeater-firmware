@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "app/Version.h"
+#include "clock/BoardClock.h"
 #include "link/BoardLink.h"
 
 // --- the board --------------------------------------------------------------------------------
@@ -18,6 +19,21 @@ TwinOakBoard::TwinOakBoard() : NRF52Board(const_cast<char*>("RAK4631_OTA")) {}
 void TwinOakBoard::begin() {
   RAK4631Board::begin();   // DC/DC, Wire.setPins(SDA 13, SCL 14) + Wire.begin(), SX126X_POWER_EN
   Wire.setClock(100000);   // 100 kHz: 1 k pull-ups through the bulkhead filter (INTERCONNECT.md)
+}
+
+// Both of these are a restart this firmware asked for, so the clock's lower bound is written
+// first and the next boot can carry on from this second rather than from an hour ahead of it
+// (src/clock/ClockKeeper.h). Neither returns. During begin()'s own boot-voltage protection -
+// which can call powerOff() before the file system is attached - the write simply fails and
+// nothing is changed, which is why that path needs no guard of its own.
+void TwinOakBoard::reboot() {
+  twinoak::clock::saveBeforeRestart();
+  RAK4631Board::reboot();
+}
+
+void TwinOakBoard::powerOff() {
+  twinoak::clock::saveBeforeRestart();
+  RAK4631Board::powerOff();
 }
 
 TwinOakBoard board;
@@ -44,9 +60,9 @@ struct Setting {
 
 const char* fwVersion() { return twinoak::versionString(); }
 
-// The box link's two read-only keys (docs/ARCHITECTURE.md section 4). They are here and not only
-// on the link so that they can be read from the USB console and, over the mesh, by an admin -
-// which is how a unit whose Walter is silent is diagnosed without opening the box.
+// The read-only keys of docs/ARCHITECTURE.md section 4. They are here and not only on the link so
+// that they can be read from the USB console and, over the mesh, by an admin - which is how a
+// unit whose Walter is silent is diagnosed without opening the box.
 const char* linkErrorsValue() {
   static char buf[8];
   snprintf(buf, sizeof(buf), "%u", unsigned(twinoak::link::linkErrors()));
@@ -60,12 +76,18 @@ const char* walterSeenValue() {
   return buf;
 }
 
+// Where the clock came from: `unset`, `restored`, `set` or `rtc` (spec/LINK-PROTOCOL.md section
+// 5.4's time_state, by name). The one key of the four here that a bench or a mesh admin reads to
+// tell "the Walter set my clock" from "I am an hour ahead of the truth".
+const char* clockStateValue() { return twinoak::clock::stateName(); }
+
 // Ours, after upstream's own (which on this board are none unless a GPS is detected - and there is
 // no GPS). Read-only for now; a `set` of one of these is refused.
 const Setting kSettings[] = {
     {"fw.version", fwVersion},
     {"link.errors", linkErrorsValue},
     {"walter.seen", walterSeenValue},
+    {"clock.state", clockStateValue},
 };
 const int kNumSettings = sizeof(kSettings) / sizeof(kSettings[0]);
 

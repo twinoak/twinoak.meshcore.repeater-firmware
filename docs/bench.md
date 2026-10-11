@@ -57,9 +57,10 @@ fails goes back to the task's follow-ups.
   after `erase` - one more line, `First boot: a random admin password was set
   (not shown; …)`. `ver` says `v1.17.1 (Build: 14 Aug 2026)`, upstream's.
   `board` says `RAK 4631`. `get radio` says `869.618,62.5,8,8`. `sensor list`
-  says `1 vars` and `fw.version=twinoak-repeater 0.0.0-dev on MeshCore
-  repeater-v1.17.1 (d9296435)` (a release build says its version instead);
-  `sensor get fw.version` the same string; `sensor set fw.version x` is
+  says `4 vars` - `fw.version=twinoak-repeater 0.0.0-dev on MeshCore
+  repeater-v1.17.1 (d9296435)` (a release build says its version instead), and
+  `link.errors`, `walter.seen` and `clock.state`, which tasks 03 and 04 added;
+  `sensor get fw.version` is the same string; `sensor set fw.version x` is
   refused (`can't find custom var`, upstream's wording for a key that took no
   value).
 - [ ] **p1-01** It hears adverts (`neighbors` after a few minutes on the roof
@@ -86,8 +87,9 @@ is put the bytes on a real UART through real filters.
 - [ ] **p1-03** **A 3.3 V USB-UART dongle on the adapter's link pins** (J4/J5
   on 1–2; dongle TX to P0.15, dongle RX to P0.16, grounds together).
   `linkcli.py --port <port> hello` prints `protocol 1.0`, `role 1 (repeater)`,
-  `slot 0`, `max_payload 240`, `caps 0x00` (nothing else of the protocol is
-  implemented yet, on purpose), a non-zero `boot_id`, `fw_version 0.0.0-dev`,
+  `slot 0`, `max_payload 240`, `caps 0x40` (`TIME_PERSIST`, task 04's clock; the
+  rest of the protocol is not implemented yet, on purpose), a non-zero
+  `boot_id`, `fw_version 0.0.0-dev`,
   `board rak4630-single` and `upstream repeater-v1.17.1+d9296435`.
 - [ ] **p1-03** `ping` answers and echoes the nonce; `status` shows the uptime
   and `reset_reason` — **1 (power-on)** after a power cycle, **2 (reset pin)**
@@ -121,7 +123,45 @@ is put the bytes on a real UART through real filters.
 
 ## 3. The clock
 
-(phase 1, task 04)
+`docs/link.md` §2a is the page: what each `time_state` means and when a
+backwards set is accepted. Nothing below has ever run on a board — the rules are
+native tests and the commands ran against the firmware's own session behind a
+pipe (`tools/linkloop/`), but no clock has ever ticked on a RAK4630.
+
+- [ ] **p1-04** `linkcli.py time` on a node that was just flashed says
+  `time_state 0 (unset)` and an epoch in **May 2024** (upstream's built-in
+  date), and `status` has **flag bit 3** set (`adverts held`).
+- [ ] **p1-04** `time set`, then `reboot 0`: after the restart `time` says
+  `time_state 1 (restored)` and an epoch **a few seconds** on from the set —
+  not 2024, and not an hour on, because the firmware wrote its file in the
+  second it restarted. `status` then shows bit 3 set again until the next
+  `time set`.
+- [ ] **p1-04** The same after **pressing the reset switch**, and after a
+  **watchdog reset** if one can be provoked: `restored`, but **up to an hour
+  ahead** of the real time rather than a few seconds — those two resets give
+  the firmware no chance to write its file, and this board has no surviving-RAM
+  copy (`tasks/phase-1/reports/04.md`). A `time set` to the real time is
+  accepted, because nothing has left the node yet.
+- [ ] **p1-04** **Power off for a minute and on again**: `restored`, the saved
+  time plus an hour or less, and `reset_reason 1 (power-on)`. A `time set` to
+  the real time is accepted.
+- [ ] **p1-04** **With no laptop attached**, a nearby companion sees this
+  repeater's advert about **a minute** after boot and not before (the hold); with
+  `time set` sent within a second of `EV_BOOT`, at once. Upstream's own periodic
+  advert is later still — two minutes at the default `adv_int`.
+- [ ] **p1-04** **A nearby companion that saw this repeater's adverts before a
+  power cycle still accepts its adverts after it** — the whole point of the
+  keeper. The way to see it fail is `clkreboot` on the USB console, which sets
+  the clock back to 2024 deliberately; this firmware restores the saved time on
+  the boot that follows, so even that does not put the node behind itself.
+- [ ] **p1-04** On the USB console: `sensor get clock.state` says `unset`,
+  `restored`, `set` or `rtc`, matching `status`; upstream's own `time <epoch>`
+  and `clock sync` still work and move the state to `set` within one pass of
+  `loop()` (the keeper polls for a clock somebody else moved).
+- [ ] **p1-04** **An RV-3028 hand-fitted** (a later batch, or a bench part on
+  `0x52`): `time` says `time_state 3 (rtc)` after a power cycle, `status` never
+  holds the adverts back, and a `time set` is written through to the part. No
+  session could check a path that needs a part nobody has.
 
 ## 4. Management over the link
 

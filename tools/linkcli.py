@@ -14,6 +14,8 @@ cannot drift from the specification without the specification moving. It identif
     python3 tools/linkcli.py --port COM7 hello
     python3 tools/linkcli.py --port /dev/ttyUSB0 ping
     python3 tools/linkcli.py --port COM7 status
+    python3 tools/linkcli.py --port COM7 time
+    python3 tools/linkcli.py --port COM7 time set
     python3 tools/linkcli.py --port COM7 identity
     python3 tools/linkcli.py --port COM7 reboot 0
     python3 tools/linkcli.py --port COM7 listen
@@ -21,7 +23,7 @@ cannot drift from the specification without the specification moving. It identif
 `--pipe <program>` puts a program's stdin and stdout where the serial port would be, which is how
 the tool is exercised with no board: `tools/linkloop/` is the firmware's own session behind a pipe.
 
-Later tasks add their own sub-commands here (04 the clock, 05 the console, 06 telemetry).
+Later tasks add their own sub-commands here (05 the console, 06 telemetry).
 Requires `pyserial` for `--port` and nothing at all for `--pipe` or `--help`.
 """
 
@@ -67,9 +69,16 @@ STATUS_FLAG_NAMES = [
     (0x0001, "job begun"), (0x0002, "reply awaited"), (0x0004, "walter asleep"),
     (0x0008, "adverts held"), (0x0010, "radio up"),
 ]
+TIME_SOURCE_NAMES = {1: "the cellular network", 2: "the server", 3: "a person at a console"}
+TIME_FORCE = 0x01  # TIME_SET's flags, bit 0 (LINK-PROTOCOL.md 5.4)
 REBOOT_MODE_NAMES = {
     0: "restart the application", 1: "UF2 bootloader", 2: "serial DFU", 3: "over-the-air DFU",
 }
+
+
+def utc(epoch):
+    """An epoch as a date, for a person reading a clock."""
+    return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(epoch))
 
 
 def bits(value, names):
@@ -324,6 +333,15 @@ def print_fields(msg_type, f, indent=""):
         print("%sobs_dropped   %d" % (indent, f["obs_dropped"]))
         print("%slink_errors   %d" % (indent, f["link_errors"]))
         print("%sattention     %d" % (indent, f["attention"]))
+    elif msg_type == ref.TIME_GET:
+        print("%sepoch         %d (%s)" % (indent, f["epoch"], utc(f["epoch"])))
+        print("%stime_state    %d (%s)"
+              % (indent, f["time_state"], TIME_STATE_NAMES.get(f["time_state"], "?")))
+    elif msg_type == ref.TIME_SET:
+        print("%sprev_epoch    %d (%s)" % (indent, f["prev_epoch"], utc(f["prev_epoch"])))
+        print("%sepoch         %d (%s)" % (indent, f["epoch"], utc(f["epoch"])))
+        print("%stime_state    %d (%s)"
+              % (indent, f["time_state"], TIME_STATE_NAMES.get(f["time_state"], "?")))
     elif msg_type == ref.IDENTITY:
         print("%spubkey        %s" % (indent, f["pubkey"]))
         print("%sname          %s" % (indent, f["name"]))
@@ -383,6 +401,59 @@ def cmd_status(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+TIME_USAGE = "usage: time [set [epoch]] [--force] [--source 1|2|3]"
+
+
+def cmd_time(link, args):
+    # The flags, from wherever they are in the list (see build_parser).
+    words = []
+    force = args.force
+    source = args.source
+    rest = list(args.words)
+    while rest:
+        word = rest.pop(0)
+        if word == "--force":
+            force = True
+        elif word == "--source" and rest:
+            source = int(rest.pop(0), 0)
+        elif word in ("-h", "--help"):
+            print(TIME_USAGE)
+            return 0
+        else:
+            words.append(word)
+
+    if len(words) > 2 or (words and words[0] != "set"):
+        print(TIME_USAGE, file=sys.stderr)
+        return 2
+    if source not in (1, 2, 3):
+        print("--source is 1 (the cellular network), 2 (the server) or 3 (a person at a console)",
+              file=sys.stderr)
+        return 2
+
+    if not words:
+        if force:
+            print("--force is for `time set`, which this is not", file=sys.stderr)
+            return 2
+        f = link.request(ref.TIME_GET, {})
+        print("TIME_GET")
+        print_fields(ref.TIME_GET, f, indent="  ")
+        return 0 if f.get("status") == ref.OK else 1
+
+    epoch = int(words[1], 0) if len(words) == 2 else int(time.time())
+    flags = TIME_FORCE if force else 0
+    f = link.request(ref.TIME_SET, {"epoch": epoch, "source": source, "flags": flags})
+    print("TIME_SET %d (%s), source %d (%s)%s"
+          % (epoch, utc(epoch), source, TIME_SOURCE_NAMES.get(source, "?"),
+             ", forced" if force else ""))
+    print_fields(ref.TIME_SET, f, indent="  ")
+    if f.get("status") == ref.ERR_RANGE:
+        print("the node refuses a clock that would go backwards unless the state is unset or "
+              "restored and nothing with a timestamp has left it since it booted; `--force` is "
+              "the override, and it is for a person's instruction (LINK-PROTOCOL.md 5.4)",
+              file=sys.stderr)
+    return 0 if f.get("status") == ref.OK else 1
+
+
 def cmd_identity(link, args):
     f = link.request(ref.IDENTITY, {})
     print("IDENTITY")
@@ -438,6 +509,22 @@ def build_parser():
     ping.set_defaults(run=cmd_ping)
     subs.add_parser("status", help="uptime, reset reason, counters (5.3)").set_defaults(
         run=cmd_status)
+    t = subs.add_parser("time", help="read the clock, or set it (5.4)")
+    # Everything after `time` is taken as one list and read by cmd_time, because argparse fills a
+    # second positional only from the arguments *before* an option: with `epoch` declared as a
+    # positional, `time set --force <epoch>` - the form docs/link.md documents - would lose the
+    # epoch. The two options below are declared all the same, so that `--help` lists them, and
+    # cmd_time accepts them wherever they appear.
+    t.add_argument("words", nargs=argparse.REMAINDER, metavar="[set [epoch]]",
+                   help="nothing reads the clock; `set` sets it, to the epoch given or to this "
+                        "laptop's clock")
+    t.add_argument("--force", action="store_true",
+                   help="let the clock go backwards - a person's instruction, not a Walter's "
+                        "(5.4)")
+    t.add_argument("--source", type=int, choices=[1, 2, 3], default=3,
+                   help="where the time came from: 1 the cellular network, 2 the server, "
+                        "3 a person at a console (the default from here)")
+    t.set_defaults(run=cmd_time)
     subs.add_parser("identity", help="the node's public key and advert name (5.6)").set_defaults(
         run=cmd_identity)
     reboot = subs.add_parser("reboot", help="restart the node (5.5)")

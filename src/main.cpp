@@ -10,7 +10,11 @@
 //   - the first-boot admin password after the_mesh.begin() (src/app/FirstBoot.h, S-13);
 //   - `len` in the console loop a size_t, so that -Werror accepts the comparison with
 //     sizeof(command) that upstream writes with an int;
-//   - the box link on Serial1, one call in each (src/link/BoardLink.h, docs/ARCHITECTURE.md 4).
+//   - the box link on Serial1, one call in each (src/link/BoardLink.h, docs/ARCHITECTURE.md 4);
+//   - the clock keeper, one call in each, before the mesh's own, and one rtc_clock.tick() in
+//     setup() ahead of it (src/clock/BoardClock.h, and the comment where it is called);
+//   - the boot advert moved out of setup() and into loop(), where it waits for a clock
+//     (docs/ARCHITECTURE.md 5; upstream sends it in setup() with a 16-second delay).
 // The USB serial console - the read loop, the 160-byte command and reply, handleCommand(0, ...),
 // the "  -> " echo - is upstream's, unchanged. A pin bump re-reads upstream's main.cpp against
 // this file (docs/upstream.md).
@@ -21,6 +25,7 @@
 // (src/board/UpstreamHeaders.h says why).
 #include "app/FirstBoot.h"
 #include "app/TwinOakMesh.h"
+#include "clock/BoardClock.h"
 #include "link/BoardLink.h"
 
 StdRNG fast_rng;
@@ -70,6 +75,19 @@ void setup() {
 
   sensors.begin();
 
+  // One tick before the clock keeper looks: VolatileRTCClock accumulates millis() between ticks
+  // and its prev_millis was set when the global was constructed, so without this the first tick
+  // of loop() would hand the keeper the whole of setup() at once - a second or three - and its
+  // poll would read that as somebody setting the clock (src/helpers/ArduinoHelpers.h at the pin,
+  // VolatileRTCClock::tick; upstream's main.cpp ticks only in loop()).
+  rtc_clock.tick();
+
+  // The clock, before begin() and before loop(), so that nothing of upstream's can stamp a
+  // packet or a preference with the 2024 date its volatile clock starts at: a hardware RTC if one
+  // answered, otherwise the newest time this node knows (src/clock/, ARCHITECTURE section 5).
+  // After radio_init(), which is where rtc_clock.begin(Wire) probes the bus for that RTC.
+  twinoak::clock::begin(InternalFS);
+
   // Decided before begin() runs loadPrefs, acted on after it: a node with no saved preferences
   // gets a random admin password, which begin()'s savePrefs() path never sees and the next boot
   // loads. The password itself is never printed.
@@ -83,10 +101,7 @@ void setup() {
   // begin() (the advert name IDENTITY reports comes from the loaded preferences).
   twinoak::link::linkBegin(the_mesh);
 
-  // send out initial zero hop Advertisement to the mesh
-#if ENABLE_ADVERT_ON_BOOT == 1
-  the_mesh.sendSelfAdvertisement(16000, false);
-#endif
+  // The boot advert is not sent here: it waits for a clock, in loop() below.
 
   board.onBootComplete();
 }
@@ -119,6 +134,23 @@ void loop() {
 
     command[0] = 0;  // reset command buffer
   }
+
+  // Before the mesh's own pass: a clock the console just set is noticed in the same pass that
+  // set it, and the advert below is decided with this pass's state.
+  twinoak::clock::loop();
+
+  // Upstream sends this in setup() with a 16-second delay; ours waits instead until the clock is
+  // set or the hold times out (spec/LINK-PROTOCOL.md section 5.4, ARCHITECTURE section 5), and
+  // then sends it zero-hop as upstream does, with the 1500 ms delay upstream's own `advert`
+  // command uses. Upstream's periodic adverts stay upstream's: the first of those cannot fire
+  // before two minutes (MyMesh::updateAdvertTimer, advert_interval 1 = 2 minutes for a new
+  // install), which is after this hold.
+#if ENABLE_ADVERT_ON_BOOT == 1
+  if (twinoak::clock::bootAdvertDue()) {
+    the_mesh.sendSelfAdvertisement(1500, false);
+    twinoak::clock::noteBootAdvertSent();
+  }
+#endif
 
   the_mesh.loop();
   twinoak::link::linkLoop();
