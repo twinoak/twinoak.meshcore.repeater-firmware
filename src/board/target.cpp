@@ -1,8 +1,10 @@
 #include "target.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "app/Version.h"
+#include "link/BoardLink.h"
 
 // --- the board --------------------------------------------------------------------------------
 
@@ -42,10 +44,28 @@ struct Setting {
 
 const char* fwVersion() { return twinoak::versionString(); }
 
+// The box link's two read-only keys (docs/ARCHITECTURE.md section 4). They are here and not only
+// on the link so that they can be read from the USB console and, over the mesh, by an admin -
+// which is how a unit whose Walter is silent is diagnosed without opening the box.
+const char* linkErrorsValue() {
+  static char buf[8];
+  snprintf(buf, sizeof(buf), "%u", unsigned(twinoak::link::linkErrors()));
+  return buf;
+}
+
+const char* walterSeenValue() {
+  static char buf[16];
+  if (!twinoak::link::walterEverSeen()) return "never";
+  snprintf(buf, sizeof(buf), "%lu", (unsigned long)twinoak::link::walterSeenSecondsAgo());
+  return buf;
+}
+
 // Ours, after upstream's own (which on this board are none unless a GPS is detected - and there is
 // no GPS). Read-only for now; a `set` of one of these is refused.
 const Setting kSettings[] = {
     {"fw.version", fwVersion},
+    {"link.errors", linkErrorsValue},
+    {"walter.seen", walterSeenValue},
 };
 const int kNumSettings = sizeof(kSettings) / sizeof(kSettings[0]);
 

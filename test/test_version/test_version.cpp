@@ -38,6 +38,33 @@ TEST(Version, ThisBuildSaysThePinOfPlatformioIni) {
   EXPECT_EQ(twinoak::versionString(), twinoak::versionString());  // one static buffer, built once
 }
 
+// The box link's `upstream` field (spec/LINK-PROTOCOL.md 5.1): the tag, a '+', eight digits of
+// the pin. HELLO carries this, where `fw_version` carries the release's version alone.
+TEST(Upstream, FormatsTheTagAndEightDigitsOfThePin) {
+  char buf[48];
+  size_t n = twinoak::formatUpstream(buf, sizeof(buf), "repeater-v1.17.1",
+                                     "d92964352441e53b93e8667b802e04f6e072b39e");
+  EXPECT_STREQ("repeater-v1.17.1+d9296435", buf);
+  EXPECT_EQ(strlen(buf), n);
+
+  twinoak::formatUpstream(buf, sizeof(buf), "t", "abc");
+  EXPECT_STREQ("t+abc", buf);
+}
+
+TEST(Upstream, TruncatesAndSaysSo) {
+  char buf[8];
+  size_t n = twinoak::formatUpstream(buf, sizeof(buf), "repeater-v1.17.1", "d9296435");
+  EXPECT_STREQ("repeate", buf);
+  EXPECT_GT(n, sizeof(buf));
+}
+
+TEST(Upstream, ThisBuildSaysThePinOfPlatformioIni) {
+  // The same two defines as the version string's, and the same reason a bump arrives red
+  // (docs/upstream.md, "What a bump costs today").
+  EXPECT_STREQ("repeater-v1.17.1+d9296435", twinoak::upstreamString());
+  EXPECT_EQ(twinoak::upstreamString(), twinoak::upstreamString());
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
