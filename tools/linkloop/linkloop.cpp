@@ -15,22 +15,41 @@
 //   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
-// a session with a board that has what phase 1's tasks 03 and 04 implement: caps 0x40
-// (TIME_PERSIST), no observations, no console. The clock is the **real** ClockKeeper
-// (src/clock/), with out/linkloop/clock where the board has its flash file, so `time` and
-// `time set` through the pipe exercise the rules the firmware will run and not a stub of them -
-// and a second run of this program is a reset, with the clock restored as the board restores it.
-// `--emitted` starts it as a node that has already put a timestamp on the air.
+// a session with a board that has what phase 1's tasks 03 to 05 implement: caps 0x61 (CLI,
+// ATTENTION, TIME_PERSIST), no observations, no telemetry. Three things in it are the firmware's
+// own code and not a stub:
+//
+//   - the **ClockKeeper** (src/clock/), with out/linkloop/clock where the board has its flash
+//     file, so `time` and `time set` exercise the rules the firmware will run; one run of this
+//     program is one boot, so a second run is a reset. `--emitted` starts it as a node that has
+//     already put a timestamp on the air;
+//   - the **AttentionMachine** (src/link/attention/), so the 300 ms gap, the ten sends a second
+//     apart and the hourly limit are watched from a laptop with no box at all. `--wake` raises
+//     one at startup (reason 4), and `sensor set walter.wake 1` through `cli` raises it the way
+//     a mesh admin does;
+//   - the **settings table** (src/app/Settings.*), behind a `sensor list/get/set` that is a
+//     miniature of upstream's own CommonCLI branch - including its 134-byte paging rule, so that
+//     what `cli "sensor list"` prints here is what the console prints on the board.
+//
+// What cannot be here is upstream's interpreter itself, so every other command line is answered
+// by the handful of canned lines below. POSIX only: the loop waits on stdin with select(), which
+// is what lets it emit an attention on time while nothing is being asked of it.
+
+#include <sys/select.h>
+#include <unistd.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <chrono>
 #include <string>
 #include <vector>
 
+#include "app/Settings.h"
 #include "clock/ClockKeeper.h"
 #include "clock/LinkClock.h"
+#include "link/attention/Attention.h"
 #include "link/codec/FrameWriter.h"
 #include "link/codec/Numbers.h"
 #include "link/session/Interfaces.h"
@@ -121,11 +140,13 @@ class LoopUpstreamClock : public twinoak::clock::UpstreamClock {
 };
 
 bool g_emitted = false;  // --emitted, in main() below
+bool g_wake = false;     // --wake
 
 LoopSystem g_system;
 LoopIdentity g_identity;
 LoopUpstreamClock g_upstream;
 LoopFile g_file;
+AttentionMachine g_attention;
 
 twinoak::clock::ClockPorts makePorts() {
   twinoak::clock::ClockPorts ports;
@@ -138,6 +159,108 @@ twinoak::clock::ClockPorts makePorts() {
 twinoak::clock::ClockPorts g_ports = makePorts();
 twinoak::clock::ClockKeeper g_keeper(g_ports);
 twinoak::clock::LinkClock g_clock(g_keeper);
+
+// The settings, with the real table over a host of fakes - except `walter.wake`, which really
+// does raise an attention on the real machine.
+class LoopSettingsHost : public twinoak::SettingsHost {
+ public:
+  const char* fwVersion() const override {
+    return "twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)";
+  }
+  uint16_t linkErrors() const override { return 0; }
+  bool walterEverSeen() const override { return true; }
+  uint32_t walterSeenSecondsAgo() const override { return 0; }
+  // The words src/clock/BoardClock.cpp's stateName() uses; that function reads the board's own
+  // keeper, so the mapping is repeated here over this program's.
+  const char* clockStateName() const override {
+    switch (g_keeper.timeState()) {
+      case twinoak::clock::kRestored:
+        return "restored";
+      case twinoak::clock::kSet:
+        return "set";
+      case twinoak::clock::kRtc:
+        return "rtc";
+      case twinoak::clock::kUnset:
+      default:
+        return "unset";
+    }
+  }
+  bool attentionPending() const override {
+    return g_attention.pendingReason() != kAttentionNone;
+  }
+  bool raiseWalterWake() override {
+    return g_attention.raise(kAttentionPersonAsked, 0, nowMs());
+  }
+};
+
+LoopSettingsHost g_settings_host;
+twinoak::Settings g_settings(g_settings_host);
+
+// A stand-in for upstream's command interpreter, which no host build can have: upstream's own
+// `sensor list/get/set` branch (src/helpers/CommonCLI.cpp at the pin d9296435, including its
+// 134-byte cut-off) over the firmware's real settings table, a few canned lines, and the four
+// commands that restart the node and never answer - which here really do end the process, so
+// that `cli "reboot"` through the pipe behaves as it does on a board.
+class LoopCli : public CliAccess {
+ public:
+  size_t runCommand(char* line, char* reply, size_t reply_cap) override {
+    std::string out;
+    const std::string in(line);
+    if (in == "reboot" || in == "poweroff" || in == "shutdown" || in == "clkreboot") {
+      fprintf(stderr, "linkloop: `%s` - a board would not answer this one\n", line);
+      fflush(stdout);
+      _exit(0);
+    } else if (in.rfind("sensor list", 0) == 0) {
+      out = sensorList(in.size() > 12 ? atoi(in.c_str() + 12) : 0);
+    } else if (in.rfind("sensor get ", 0) == 0) {
+      const char* value = byKey(in.substr(11));
+      out = value == nullptr ? "null" : std::string("> ") + value;
+    } else if (in.rfind("sensor set ", 0) == 0) {
+      const std::string rest = in.substr(11);
+      const size_t sp = rest.find(' ');
+      const std::string key = rest.substr(0, sp);
+      const std::string value = sp == std::string::npos ? "null" : rest.substr(sp + 1);
+      out = g_settings.set(key.c_str(), value.c_str()) ? "ok" : "can't find custom var";
+    } else if (in == "get radio") {
+      out = "> 869.618,62.5,8,8";
+    } else if (in == "ver") {
+      out = "v1.17.1 (Build: 14 Aug 2026)";
+    } else if (in == "neighbors") {
+      out = "-none-";
+    } else if (in == "get acl") {
+      out = "";  // upstream prints the ACL on the console and answers nothing
+    } else {
+      out = "Unknown command";  // and so does upstream, for anything it does not know
+    }
+    const size_t n = out.size() < reply_cap - 1 ? out.size() : reply_cap - 1;
+    memcpy(reply, out.data(), n);
+    reply[n] = 0;
+    return n;
+  }
+
+ private:
+  static const char* byKey(const std::string& key) {
+    for (int i = 0; i < twinoak::Settings::count(); i++) {
+      if (key == twinoak::Settings::name(i)) return g_settings.value(i);
+    }
+    return nullptr;
+  }
+
+  static std::string sensorList(int start) {
+    const int end = twinoak::Settings::count();
+    if (start >= end) return "no custom var";
+    std::string out = std::to_string(end) + " vars\n";
+    int i = start;
+    for (; i < end && out.size() < 134; i++) {
+      out += std::string(twinoak::Settings::name(i)) + "=" + g_settings.value(i) + "\n";
+    }
+    if (i < end) return out + "... next:" + std::to_string(i);
+    out.resize(out.size() - 1);
+    return out;
+  }
+};
+
+LoopCli g_cli;
 Firmware g_firmware;
 Services g_services;
 
@@ -151,10 +274,14 @@ void wire() {
   g_services.system = &g_system;
   g_services.identity = &g_identity;
   g_services.clock = &g_clock;
+  g_services.cli = &g_cli;
+  g_services.attention = &g_attention;
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule
-// (read until a request is waiting, poll once, write the whole frame).
+// (read until a request is waiting, poll once, write the whole frame). It waits on stdin for at
+// most ten milliseconds at a time, so that an attention's 300 ms gap and its 1000 ms repeats are
+// kept while nothing at all is being asked.
 int pump() {
   // As src/main.cpp does it: the clock first, then the link.
   g_keeper.begin(nowMs(), /*software_reset=*/false);
@@ -171,10 +298,24 @@ int pump() {
     fflush(stdout);
     session.outgoingSent(nowMs());
   }
+  // The restart attention, as src/link/BoardLink.cpp raises it: only for a Walter that was
+  // believed asleep, which no board can know - so here it is the --wake flag's business instead.
+  if (g_wake) g_attention.raise(kAttentionPersonAsked, 0, nowMs());
+
   for (;;) {
-    const int c = fgetc(stdin);
-    if (c == EOF) return 0;
-    session.feedByte(uint8_t(c), nowMs());
+    // read() and not fgetc(), because select() knows nothing about a stdio buffer.
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(STDIN_FILENO, &readable);
+    timeval wait;
+    wait.tv_sec = 0;
+    wait.tv_usec = 10000;  // 10 ms, which is finer than anything the protocol times
+    if (select(STDIN_FILENO + 1, &readable, nullptr, nullptr, &wait) > 0) {
+      uint8_t byte = 0;
+      const ssize_t n = read(STDIN_FILENO, &byte, 1);
+      if (n <= 0) return 0;  // the other end closed the pipe
+      session.feedByte(byte, nowMs());
+    }
     g_keeper.loop(nowMs());
     session.poll(nowMs());
     if (session.hasOutgoing()) {
@@ -263,13 +404,15 @@ int main(int argc, char** argv) {
     const long passes = argc >= 3 ? strtol(argv[2], nullptr, 10) : 2000;
     return bench(passes < 2 ? 2 : passes);
   }
-  if (argc == 2 && strcmp(argv[1], "--emitted") == 0) {
-    g_emitted = true;
-    return pump();
-  }
-  if (argc >= 2) {
-    fprintf(stderr, "usage: linkloop [--bench <passes>] [--emitted]\n");
-    return 2;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--emitted") == 0) {
+      g_emitted = true;
+    } else if (strcmp(argv[i], "--wake") == 0) {
+      g_wake = true;
+    } else {
+      fprintf(stderr, "usage: linkloop [--bench <passes>] [--emitted] [--wake]\n");
+      return 2;
+    }
   }
   return pump();
 }

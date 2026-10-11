@@ -7,6 +7,9 @@
 //     text;
 //   - a line of src/ that prints a packet's payload - any line that names `payload` beside a
 //     print-like call;
+//   - a print-like call anywhere under src/link/, or a use of `Serial` that is not the framing
+//     or the flush before a restart: a CLI line over the link is a console command and can be
+//     `password <new>`, whose reply echoes it back (tasks/phase-1/05-local-management.md);
 //   - a line of src/link/codec/, src/link/session/ or src/clock/ that allocates or uses a string
 //     class: the box link's portable half and the clock keeper are fed buffers and fill buffers,
 //     on a node that must repeat for months without a heap that fragments
@@ -312,6 +315,66 @@ TEST(Rails, NothingUnderThePortableLinkOrTheClockAllocatesOrHoldsAString) {
                           << "' - this code is given its buffers and never allocates";
           }
         }
+      }
+    }
+  }
+}
+
+TEST(Rails, NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
+  // A CLI line over the link is a console command, so it can be `password <new>` - and the reply
+  // to that one is `password now: <it>`, because upstream echoes it back to be sure
+  // (src/helpers/CommonCLI.cpp at the pin d9296435, the `password ` branch). `get prv.key` is
+  // another. So the whole of src/link/ is held to one rule: **it does not print**. The only
+  // thing that directory writes is a frame, to Serial1, and the only other thing it does with a
+  // UART is flush it before a restart - so the allowlist below is the whole of its business with
+  // a console, and a print-like call anywhere under it is a failure whatever it prints.
+  const fs::path root = projectRoot();
+  const char* const kPrintLike[] = {"print", "Print", "cout", "puts(", "fputs"};
+  const char* const kAllowedSerial[] = {
+      "Serial1.begin(", "Serial1.available(", "Serial1.availableForWrite(", "Serial1.read(",
+      "Serial1.write(", "Serial1.flush(",     "Serial.flush(",
+  };
+
+  const std::vector<fs::path> files = filesUnder(root / "src" / "link");
+  EXPECT_GT(files.size(), 5u) << "almost nothing under src/link - is PROJECT_DIR right?";
+  for (const fs::path& file : files) {
+    std::ifstream in(file, std::ios::binary);
+    std::string line;
+    int n = 0;
+    while (std::getline(in, line)) {
+      n++;
+      // A comment may name any of these; code may not. Nothing under src/link has a block
+      // comment, and the one string literal it has holds no such word.
+      const size_t comment = line.find("//");
+      const std::string code = comment == std::string::npos ? line : line.substr(0, comment);
+      for (const char* p : kPrintLike) {
+        if (code.find(p) != std::string::npos) {
+          ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << p
+                        << "' - nothing under the box link prints, because a CLI line and its"
+                           " reply can hold a password (LINK-PROTOCOL.md 5.7, S-12)";
+        }
+      }
+      // Every use of the UART *objects* - `Serial.` and `Serial1.` - and not of the names that
+      // merely contain the word (SerialTransport, kRebootSerialDfu, enterSerialDfu).
+      size_t at = 0;
+      while ((at = code.find("Serial", at)) != std::string::npos) {
+        size_t after = at + 6;
+        if (after < code.size() && code[after] == '1') after++;
+        if (after >= code.size() || code[after] != '.') {
+          at += 6;
+          continue;
+        }
+        bool allowed = false;
+        for (const char* s : kAllowedSerial) {
+          const std::string call(s);
+          if (code.compare(at, call.size(), call) == 0) allowed = true;
+        }
+        if (!allowed) {
+          ADD_FAILURE() << rel(root, file) << ":" << n
+                        << ": a use of a UART that is not the framing or the flush before a"
+                           " restart: " << trim(code);
+        }
+        at += 6;
       }
     }
   }

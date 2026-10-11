@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Builds tools/linkloop (the firmware's own box-link session and clock keeper behind a pipe) and
-# drives tools/linkcli.py against it: hello, ping, status, identity, time, time set and reboot,
-# with no board and no serial port, plus the timed worst-case pass.
+# Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine and
+# settings table behind a pipe) and drives tools/linkcli.py against it: hello, ping, status,
+# identity, time, time set, cli, sleep, an attention and reboot, with no board and no serial
+# port, plus the timed worst-case pass.
 #
 # It needs a host C++ compiler. On Windows that is the container tasks/RUNBOOK.md section 2 names,
 # from the repository root:
@@ -28,7 +29,7 @@ fi
 echo "== build"
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/link/codec/*.cpp src/link/session/*.cpp \
-  src/clock/ClockKeeper.cpp
+  src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp
 echo "built $out/linkloop"
 
 cli="python3 tools/linkcli.py --pipe $out/linkloop"
@@ -90,6 +91,37 @@ echo
 echo "== and with --force, a person's instruction, the same request is accepted"
 python3 tools/linkcli.py --pipe "$out/linkloop --emitted" time set --force 1767225601
 $cli time
+
+echo
+echo "== cli: one console command line, with console privileges (5.7). The settings table in"
+echo "   these answers is the firmware's own; upstream's interpreter is the one thing a host"
+echo "   build cannot have."
+$cli cli "get radio"
+$cli cli "ver"
+$cli cli "sensor list"
+$cli cli "sensor get walter.wake"
+
+echo
+echo "== cli: a line that is not legal is ERR_MALFORMED and is never run (a tab in it)"
+if $cli cli "get$(printf '\t')radio"; then
+  echo "a control character should have been refused" >&2
+  exit 1
+fi
+echo "refused, as it should be"
+
+echo
+echo "== cli: a command that restarts the node is not owed an answer"
+$cli cli "reboot"
+
+echo
+echo "== sensor set walter.wake 1 - what a mesh admin sends - raises attention reason 4"
+$cli cli "sensor set walter.wake 1"
+
+echo
+echo "== sleep, and then that attention on the wire: 0x00 0x00, 300 ms, and the events a second"
+echo "   apart with repeat counting up. Four seconds of listening is four of the ten sends."
+$cli sleep 600
+python3 tools/linkcli.py --pipe "$out/linkloop --wake" listen 4
 
 echo
 echo "== reboot 0"

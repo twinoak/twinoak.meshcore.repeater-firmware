@@ -5,6 +5,7 @@
 #include "../clock/BoardClock.h"
 #include "../clock/LinkClock.h"
 #include "SerialTransport.h"
+#include "attention/Attention.h"
 #include "session/Interfaces.h"
 #include "session/ResetReason.h"
 #include "session/Session.h"
@@ -101,10 +102,50 @@ class BoardIdentity : public IdentityAccess {
   MyMesh* mesh_ = nullptr;
 };
 
+// --- the console ------------------------------------------------------------------------------
+
+// CLI (section 5.7): the line run by **upstream's own** interpreter, with a sender timestamp of
+// 0, which is what makes it a command typed on the serial console rather than one that arrived
+// over the mesh. Upstream's MyMesh::handleCommand(0, command, reply) is public and is the same
+// call src/main.cpp's USB console makes (examples/simple_repeater/MyMesh.h:230 and
+// src/helpers/CommonCLI.cpp:182 at the pin d9296435); nothing of upstream's is touched to put it
+// on this link.
+//
+// Three things about that call, each read out of the source at the pin:
+//
+//   - `command` is a char* the interpreter writes into (`*sp++ = 0` in the `setperm` branch), so
+//     the session hands it a copy of the line and not the frame's bytes;
+//   - the reply buffer is the 160 bytes upstream's own console gives it, and several of its
+//     branches assume exactly that number (`snprintf(reply, 160, ...)`,
+//     `_region_map->exportTo(reply, 160)`, `StrHelper::strncpy(&reply[14], ..., 160-15)`), which
+//     is why the session's window is 160 and not 161;
+//   - four lines never come back at all - `poweroff`, `shutdown`, `reboot` and `clkreboot` call
+//     the board's powerOff()/reboot() (CommonCLI.cpp:183-188) - so the response to those is not
+//     owed and this handler does not try to out-run the restart. Our board writes the clock's
+//     file on the way down (src/board/target.cpp), as it does for the link's own REBOOT.
+class BoardCli : public CliAccess {
+ public:
+  void attach(MyMesh* mesh) { mesh_ = mesh; }
+
+  size_t runCommand(char* line, char* reply, size_t reply_cap) override {
+    if (mesh_ == nullptr || reply_cap == 0) return 0;
+    reply[0] = 0;
+    mesh_->handleCommand(0, line, reply);  // 0: "there is no sender_timestamp via serial"
+    size_t n = 0;
+    while (n < reply_cap && reply[n] != 0) n++;
+    return n;
+  }
+
+ private:
+  MyMesh* mesh_ = nullptr;
+};
+
 // --- the one of each --------------------------------------------------------------------------
 
 BoardSystem g_system;
 BoardIdentity g_identity;
+BoardCli g_cli;
+AttentionMachine g_attention;
 
 // The clock keeper as ClockAccess: twenty lines in src/clock/LinkClock.h, and what puts
 // TIME_PERSIST in HELLO's caps. It binds a reference to the keeper of another translation unit,
@@ -126,6 +167,7 @@ SerialTransport g_transport(g_session);
 void linkBegin(MyMesh& mesh) {
   g_system.drawBootId();
   g_identity.attach(&mesh);
+  g_cli.attach(&mesh);
 
   // The three strings of the image, as spec/FIRMWARE-MANIFEST.md section 4 spells them - the same
   // three the descriptor will carry and the release manifest records. TWINOAK_BOARD comes from
@@ -140,14 +182,33 @@ void linkBegin(MyMesh& mesh) {
   g_services.firmware = &g_firmware;
   g_services.system = &g_system;
   g_services.identity = &g_identity;
-  g_services.clock = &g_clock;  // => kCapTimePersist in HELLO's caps
+  g_services.clock = &g_clock;          // => kCapTimePersist in HELLO's caps
+  g_services.cli = &g_cli;              // => kCapCli
+  g_services.attention = &g_attention;  // => kCapAttention
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 
-  g_transport.begin();
+  g_transport.begin();  // Serial1 up, and the session's EV_BOOT queued
+
+  // Section 8's reason 1 - "the node restarted" - is owed only to a Walter that was asleep when
+  // it happened: an awake one learns everything this event carries from EV_BOOT, which has just
+  // been queued. Whether it was asleep is a fact that would have to survive a reset, and on this
+  // board nothing does (tasks/phase-1/reports/04.md, "Where the surviving RAM would live"), so
+  // the answer here is false and the call is the seam a board that can answer it would fill in.
+  g_attention.noteBoot(g_system.resetReason(), /*walter_was_asleep=*/false, millis());
 }
 
 void linkLoop() { g_transport.loop(); }
+
+bool raiseAttention(uint8_t reason, uint16_t detail) {
+  return g_attention.raise(reason, detail, millis());
+}
+
+bool raiseWalterWake() { return raiseAttention(kAttentionPersonAsked, 0); }
+
+bool attentionPending() { return g_attention.pendingReason() != kAttentionNone; }
+
+bool walterAsleep() { return g_attention.walterAsleep(); }
 
 uint16_t linkErrors() { return g_session.linkErrors(); }
 bool walterEverSeen() { return g_session.everSawRequest(); }

@@ -57,9 +57,10 @@ fails goes back to the task's follow-ups.
   after `erase` - one more line, `First boot: a random admin password was set
   (not shown; …)`. `ver` says `v1.17.1 (Build: 14 Aug 2026)`, upstream's.
   `board` says `RAK 4631`. `get radio` says `869.618,62.5,8,8`. `sensor list`
-  says `4 vars` - `fw.version=twinoak-repeater 0.0.0-dev on MeshCore
+  says `5 vars` - `fw.version=twinoak-repeater 0.0.0-dev on MeshCore
   repeater-v1.17.1 (d9296435)` (a release build says its version instead), and
-  `link.errors`, `walter.seen` and `clock.state`, which tasks 03 and 04 added;
+  `walter.wake`, `link.errors`, `walter.seen` and `clock.state`, which tasks 03
+  to 05 added;
   `sensor get fw.version` is the same string; `sensor set fw.version x` is
   refused (`can't find custom var`, upstream's wording for a key that took no
   value).
@@ -87,9 +88,9 @@ is put the bytes on a real UART through real filters.
 - [ ] **p1-03** **A 3.3 V USB-UART dongle on the adapter's link pins** (J4/J5
   on 1–2; dongle TX to P0.15, dongle RX to P0.16, grounds together).
   `linkcli.py --port <port> hello` prints `protocol 1.0`, `role 1 (repeater)`,
-  `slot 0`, `max_payload 240`, `caps 0x40` (`TIME_PERSIST`, task 04's clock; the
-  rest of the protocol is not implemented yet, on purpose), a non-zero
-  `boot_id`, `fw_version 0.0.0-dev`,
+  `slot 0`, `max_payload 240`, `caps 0x61` (`CLI` and `ATTENTION` from task 05,
+  `TIME_PERSIST` from task 04; the rest of the protocol is not implemented yet,
+  on purpose), a non-zero `boot_id`, `fw_version 0.0.0-dev`,
   `board rak4630-single` and `upstream repeater-v1.17.1+d9296435`.
 - [ ] **p1-03** `ping` answers and echoes the nonce; `status` shows the uptime
   and `reset_reason` — **1 (power-on)** after a power cycle, **2 (reset pin)**
@@ -113,9 +114,11 @@ is put the bytes on a real UART through real filters.
   second**: a message through the repeater from a phone still arrives, and
   `link.errors` stays 0. The worst pass measured on the host is tens of
   microseconds (`tasks/phase-1/reports/03.md`); what the board actually spends
-  is `SerialTransport::worstPassMicros()`, which has no console command of its
-  own yet — read it with the debugger, or wait for task 05's `CLI` over the
-  link.
+  is `SerialTransport::worstPassMicros()`, which **still** has no console
+  command of its own: task 05 put the console on the link but added no command
+  upstream does not have, and the settings it added are the five
+  `docs/ARCHITECTURE.md` §4 names. Read it with the debugger
+  (`tasks/phase-1/reports/05.md` says what exposing it would have cost).
 - [ ] **p1-03** **A frame mangled on purpose is dropped and counted, and
   nothing is answered**: with `-v`, send a `ping` and pull the TX line for a
   moment mid-frame, or feed a bad frame from a terminal; `link_errors` goes up
@@ -165,7 +168,59 @@ pipe (`tools/linkloop/`), but no clock has ever ticked on a RAK4630.
 
 ## 4. Management over the link
 
-(phase 1, task 05)
+`docs/link.md` §2b and §2c are the pages: the console over the link, our
+settings, and attention. Every rule below has a native test against fakes and
+most of them ran against the firmware's own session behind a pipe
+(`tools/linkloop/`); what no session could do is run **upstream's own
+interpreter**, which is the thing these lines are really checking, and hear a
+mesh admin.
+
+- [ ] **p1-05** `linkcli.py --port <port> cli "get radio"` answers
+  `> 869.618,62.5,8,8`, exactly as the USB console does; `cli "neighbors"` and
+  `cli "stats-core"` answer as it does too (`stats-core` is one of the commands
+  upstream refuses over the mesh and allows on a console — this link gets it
+  because its `sender_timestamp` is 0). `cli "set name Bench"` is answered `ok`
+  and the next advert carries that name; `cli "get name"` says `> Bench`.
+- [ ] **p1-05** `cli "sensor list"` says `5 vars` and then `fw.version`,
+  `walter.wake`, `link.errors`, `walter.seen` and `clock.state` — all five on a
+  freshly booted node, and on a node that has been up for weeks the last of them
+  behind `cli "sensor list 4"`, because upstream stops a listing at 134 bytes.
+  `cli "sensor get walter.seen"` counts up while nothing is sent, and reads `0`
+  right after any request.
+- [ ] **p1-05** **A reply at the limit.** `cli "sensor list"` on a node with a
+  long `fw.version` is the longest reply this firmware produces; it comes back
+  whole and ends in `clock.state=...` with nothing cut mid-line. Nothing on the
+  USB console is disturbed by any of it.
+- [ ] **p1-05** **A line that restarts the node is not answered**:
+  `cli "reboot"` prints *(no answer …)*, and `listen` then shows `EV_BOOT` with
+  `reset_reason 4` and a new `boot_id`. The clock keeper's file was written on
+  the way down, so `time` after it says `restored` and a few seconds on
+  (section 3's second line, by another road).
+- [ ] **p1-05** **A malformed line is refused and never run**: `cli ""` and a
+  line with a tab in it are `ERR_MALFORMED`, and the node's behaviour is
+  unchanged. With `-v`, the frame is there and the answer is one status byte.
+- [ ] **p1-05** **`linkcli.py sleep 600`, then from a phone logged in as admin
+  over the mesh: `sensor set walter.wake 1`** → it answers `ok` on the mesh, and
+  `listen` on the link shows two `0x00` bytes, 300 ms, and then `EV_ATTENTION`
+  reason 4 **ten times, a second apart, with `repeat` 0 to 9**. `status` then
+  shows `attention 4` and flag bit 2 (asleep) — and the answer to that very
+  `status` is the last place the 4 appears: the next one reads 0 and the flag is
+  clear. This is the whole point of the task and needs two radios and a phone.
+- [ ] **p1-05** **A second `walter.wake` inside the hour raises nothing.**
+  `sensor set walter.wake 1` again (from the phone or the console) answers `ok`,
+  `sensor get walter.wake` reads `1` while one is pending and `0` after it was
+  told, and no second sequence appears on the link until an hour has passed.
+- [ ] **p1-05** **While it believes this end is asleep, nothing else is sent.**
+  After `sleep 600`, `listen` is silent but for an attention — and the moment any
+  request is sent, flag bit 2 clears. (The only events this firmware has today
+  are the two section 8 lets through, so what the bench adds here is that a real
+  idle link is really quiet.)
+- [ ] **p1-05** **`cli "sensor set walter.wake 1"` over the link** raises the
+  same attention as the mesh admin's, which is the easy way to see the sequence
+  with no phone at all — and **`cli "region load"` is the one line not to
+  send**: it leaves upstream's interpreter waiting for a blank line, which this
+  link cannot send. `cli " "` (one space) is the way out, and worth confirming
+  once, because the alternative is a reboot.
 
 ## 5. Power
 

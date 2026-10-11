@@ -89,15 +89,53 @@ struct CliAccess {
 
   // Runs one command line as if it had been typed on the serial console (section 5.7) and writes
   // the reply into `reply` (NUL-terminated); returns the reply's length.
-  virtual size_t runCommand(const char* line, char* reply, size_t reply_cap) = 0;
+  //
+  // `line` is NUL-terminated and is the session's own buffer, not the request's bytes, because
+  // the interpreter is allowed to write into it: upstream's MyMesh::handleCommand terminates a
+  // parameter in place (examples/simple_repeater/MyMesh.cpp:1232 at the pin d9296435,
+  // `*sp++ = 0`). `reply_cap` is what upstream's own console loop gives its interpreter -
+  // 160 bytes, src/main.cpp - and the session keeps room behind it for the few of upstream's
+  // commands that can write past it (src/link/session/Session.h).
+  virtual size_t runCommand(char* line, char* reply, size_t reply_cap) = 0;
 };
 
-// Attention and the sleeping Walter (phase 1's task 05). Present => kCapAttention.
+// Attention and the sleeping Walter: section 8, the machine in src/link/attention/
+// (phase 1's task 05). Present => kCapAttention.
+//
+// The session drives it once a pass and puts on the wire whatever dueNow() asks for; everything
+// about *when* - the 300 ms gap, the 1000 ms repeat, the ten sends, the hourly limit per reason,
+// the queue - is the machine's, so that test/test_attention can hold it against a fake clock
+// without a session and test/test_link_session can drive a session against a fake machine.
+enum AttentionDue : uint8_t {
+  kAttentionDueNothing = 0,
+  kAttentionDueWake = 1,   // the two 0x00 bytes that wake a sleeping Walter
+  kAttentionDueEvent = 2,  // EV_ATTENTION, as pendingEvent() spells it
+};
+
 struct AttentionAccess {
   virtual ~AttentionAccess() {}
 
   virtual uint8_t pendingReason() const = 0;  // STATUS's `attention`, or kAttentionNone
   virtual bool walterAsleep() const = 0;      // STATUS flag bit 2
+
+  // What the session must put on the wire now, if anything.
+  virtual uint8_t dueNow(uint32_t now_ms) const = 0;
+  // The reason, detail and repeat of the event dueNow() just asked for.
+  virtual Attention pendingEvent() const = 0;
+  // The session has handed those bytes to the UART.
+  virtual void wakeSent(uint32_t now_ms) = 0;
+  virtual void eventSent(uint32_t now_ms) = 0;
+
+  // A valid request arrived (section 8: "until any valid request arrives"). The repeats stop
+  // here. The type is passed because SLEEP_NOTICE is the one request that does not mean the
+  // Walter means to stay awake.
+  virtual void noteRequest(uint8_t request_type, uint32_t now_ms) = 0;
+  // That request's response has gone. The pending reason is cleared here and not a moment
+  // earlier, so that the answer to the request which ends an attention still carries the reason
+  // in STATUS - "a Walter that woke for its own reasons sees it too" (section 8).
+  virtual void requestAnswered(uint32_t now_ms) = 0;
+  // SLEEP_NOTICE itself: the Walter's last request before it sleeps.
+  virtual void sleepNotice(uint32_t expect_back_s, uint32_t now_ms) = 0;
 };
 
 // The INA3221 (phase 1's task 06). Present => kCapPower.
