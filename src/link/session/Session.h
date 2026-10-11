@@ -119,6 +119,10 @@ class Session {
   void sendEvent(uint8_t type, const uint8_t* payload, size_t len, uint32_t now_ms);
   // CLI (section 5.7): the line run as if typed on the console, the reply back.
   size_t cliHandler(const Cli& m);
+  // The five sends (section 6.2): the client's answer, or its refusal, into resp_.
+  size_t sendHandler(uint8_t type, Bytes body, uint32_t now_ms);
+  // Section 6.3's event, when nothing else wants the wire: true when one was built.
+  bool pumpMeshReply(uint32_t now_ms);
   // Section 8's sequence, when nothing else wants the wire: the wake bytes, then the events.
   void pumpAttention(uint32_t now_ms);
   // Whether the line has been idle long enough to prefix the frame with 0x00 (section 2).

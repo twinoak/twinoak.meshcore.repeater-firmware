@@ -12,6 +12,13 @@ namespace {
 // they are for is the start bit on the Walter's GPIO8.
 const uint8_t kWakeBytes[2] = {0x00, 0x00};
 
+// The five sends (section 6.2): the requests whose payload can carry a password, so the receiver
+// is wiped after one is answered - whether it ran or was answered from the retry memory.
+bool isSendType(uint8_t type) {
+  return type == kMsgSendLogin || type == kMsgSendRequest || type == kMsgSendCli ||
+         type == kMsgSendDiscovery || type == kMsgSendTrace;
+}
+
 }  // namespace
 
 // ----------------------------------------------------------------------------- the frame in
@@ -36,6 +43,11 @@ void Session::poll(uint32_t now_ms) {
     s_.system->restartNow(restart_mode_);
   }
   if (has_outgoing_) return;  // the writer still holds something unsent
+  // A reply from the mesh that arrived, or a wait that ran out, is reported before anything else
+  // (section 6.3, EV_MESH_REPLY, exactly once): a request that is waiting is answered on the next
+  // pass, which is microseconds away, and the Walter reads the reply before the answer to
+  // whatever it asked next - a REPLY_GET for the same record, as often as not.
+  if (pumpMeshReply(now_ms)) return;
   if (!request_waiting_) {
     // Nothing to answer: section 8's sequence may have the wire.
     pumpAttention(now_ms);
@@ -65,7 +77,14 @@ void Session::poll(uint32_t now_ms) {
 
   // Section 3: the same (type, seq) is not executed again; the remembered response is sent again.
   if (have_memory_ && mem_type_ == pkt.type && mem_seq_ == pkt.seq) {
-    sendResponse(pkt.type, pkt.seq, resp_len_, now_ms);
+    // A retried send transmits nothing - the handler does not run - but the receiver still holds
+    // the frame's bytes, and for a send that frame carried a password (section 6). The remembered
+    // response is the client's answer and holds none; the receiver is wiped all the same, because
+    // a lost response that is being retried must not leave the password in RAM a second time.
+    const uint8_t type = pkt.type;
+    const uint8_t seq = pkt.seq;
+    sendResponse(type, seq, resp_len_, now_ms);
+    if (isSendType(type)) rx_.wipe();
     return;
   }
   execute(pkt, now_ms);
@@ -122,6 +141,10 @@ HelloBody Session::helloBody(uint8_t proto_minor) const {
 
 void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
   size_t n = 0;
+  // `pkt` is a view into the receiver, and a send handler wipes the receiver before it returns
+  // (the five sends below): the response's type and seq are taken before anything can touch it.
+  const uint8_t type = pkt.type;
+  const uint8_t seq = pkt.seq;
   executed_++;
 
   switch (pkt.type) {
@@ -402,8 +425,8 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
     }
 
     case kMsgPathGet: {
-      // Section 6.1: the path the job holds now - which, once task 02 lands, is also the route a
-      // flooded send's reply came back by.
+      // Section 6.1: the path the job holds now - which is also the route a flooded send's reply
+      // came back by (6.3, "a returned path is learned").
       if (s_.mesh == nullptr) {
         n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
         break;
@@ -415,6 +438,55 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
         break;
       }
       n = encodePathGetResponse(p, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgSendLogin:
+    case kMsgSendRequest:
+    case kMsgSendCli:
+    case kMsgSendDiscovery:
+    case kMsgSendTrace: {
+      // Section 6.2: one packet on the air, or none, and the wait armed in the same step. Every
+      // rule - no job, a reply still awaited, what cannot be sent - is the client's.
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      n = sendHandler(pkt.type, pkt.body, now_ms);
+      // "A password is in RAM for the length of the send" (section 6): the request's bytes are in
+      // the receiver's buffer, and they are gone before the answer is framed - after every send,
+      // not only a login or a line flagged sensitive, because a Walter that forgot the flag has
+      // still sent a password and the cost is a loop over 492 bytes. The response remembered for a
+      // retry is the client's answer (send, tag, sender_ts) and holds nothing of the request.
+      rx_.wipe();
+      break;
+    }
+
+    case kMsgReplyGet: {
+      // Section 6.3: the record as it stands - pending, an outcome, or nothing held. The views in
+      // it are the client's own storage and are encoded here and now.
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      ReplyRecord rec;
+      s_.mesh->getReply(rec, now_ms);
+      n = encodeReplyGetResponse(rec, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgMeshCounters: {
+      // Section 6.4: the radio's rx and tx, the client's own client_tx, the radio's floor, RSSI
+      // and SNR - and the observation ring's three, which read zero until the ring exists and are
+      // the ring's to answer when it does (obs_dropped is the same count STATUS carries).
+      if (s_.mesh == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      MeshCountersResponse out;
+      s_.mesh->getCounters(out);
+      if (s_.observations != nullptr) out.obs_dropped = s_.observations->droppedSinceBoot();
+      n = encodeMeshCountersResponse(out, resp_, sizeof(resp_));
       break;
     }
 
@@ -432,7 +504,7 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
     // nothing, because silence after a request is a dead link as far as the Walter can tell.
     n = encodeStatus(kErrFailed, resp_, sizeof(resp_));
   }
-  sendResponse(pkt.type, pkt.seq, n, now_ms);
+  sendResponse(type, seq, n, now_ms);
 }
 
 // ----------------------------------------------------------------------------- the console
@@ -467,6 +539,62 @@ size_t Session::cliHandler(const Cli& m) {
   CliResponse out;
   out.text = bytesOf(reply_, text);
   return encodeCliResponse(out, resp_, sizeof(resp_));
+}
+
+// ----------------------------------------------------------------------------- the mesh client
+
+size_t Session::sendHandler(uint8_t type, Bytes body, uint32_t now_ms) {
+  // The decoders hold the lengths section 6.2 fixes - a password of at most 15 bytes, a line of
+  // 1 to 148 - and read nothing past the payload; a payload that is not a legal value is
+  // kErrMalformed and the client is never asked. What the client answers is one of Numbers.h's
+  // statuses and, on kOk, the three fields of the send response.
+  SendResponse out;
+  uint8_t status = kErrMalformed;
+  switch (type) {
+    case kMsgSendLogin: {
+      SendLogin m;
+      if (decodeSendLogin(body, m)) status = s_.mesh->sendLogin(m, out, now_ms);
+      break;
+    }
+    case kMsgSendRequest: {
+      SendRequest m;
+      if (decodeSendRequest(body, m)) status = s_.mesh->sendRequest(m, out, now_ms);
+      break;
+    }
+    case kMsgSendCli: {
+      SendCli m;
+      if (decodeSendCli(body, m)) status = s_.mesh->sendCli(m, out, now_ms);
+      break;
+    }
+    case kMsgSendDiscovery: {
+      SendDiscovery m;
+      if (decodeSendDiscovery(body, m)) status = s_.mesh->sendDiscovery(m, out, now_ms);
+      break;
+    }
+    case kMsgSendTrace: {
+      SendTrace m;
+      if (decodeSendTrace(body, m)) status = s_.mesh->sendTrace(m, out, now_ms);
+      break;
+    }
+    default:
+      break;
+  }
+  if (status != kOk) return encodeStatus(status, resp_, sizeof(resp_));
+  return encodeSendResponse(out, resp_, sizeof(resp_));
+}
+
+bool Session::pumpMeshReply(uint32_t now_ms) {
+  if (s_.mesh == nullptr) return false;
+  ReplyRecord rec;
+  if (!s_.mesh->takeReplyEvent(rec, now_ms)) return false;
+  // The client has let the outcome go as reported, whatever happens next: sendEvent() drops the
+  // frame while the Walter is believed asleep (section 8), and REPLY_GET is then how it learns
+  // the outcome - "an event is never the only way to learn something" (section 3).
+  uint8_t body[kMaxPayload];
+  const size_t n = encodeEvMeshReply(rec, body, sizeof(body));
+  if (n == 0) return false;  // a record the encoder refuses: unreachable, and silence is safe
+  sendEvent(kMsgEvMeshReply, body, n, now_ms);
+  return has_outgoing_;
 }
 
 // ----------------------------------------------------------------------------- attention

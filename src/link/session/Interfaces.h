@@ -161,12 +161,13 @@ struct LppAccess {
 };
 
 // The mesh client (phase 2; src/meshclient/LinkMeshClient.h implements it over the job of
-// src/meshclient/Job.h). Present => kCapMeshClient.
+// src/meshclient/Job.h and the reply record of src/meshclient/Reply.h). Present => kCapMeshClient.
 //
-// The four job requests of section 6.1 are here; the five sends, the reply and the counters of
-// 6.2 to 6.4 are task 02's and arrive on this same interface. Every method that answers a request
-// returns one of Numbers.h's Status values, because which refusal a request gets - ERR_STATE with
-// no job, ERR_MALFORMED for a path 6.1 does not allow - is the job's rule and not the session's.
+// The four job requests of section 6.1 (task 01), the five sends of 6.2, the reply of 6.3 and the
+// counters of 6.4 (task 02). Every method that answers a request returns one of Numbers.h's
+// Status values, because which refusal a request gets - ERR_STATE with no job, ERR_BUSY while a
+// reply is awaited, ERR_RANGE for what cannot be sent - is the client's rule and not the
+// session's.
 struct MeshClientAccess {
   virtual ~MeshClientAccess() {}
 
@@ -186,6 +187,27 @@ struct MeshClientAccess {
   // by itself when 120 seconds pass with no request on the link while a job is begun" (6.1):
   // this is what restarts that count.
   virtual void noteLinkRequest(uint32_t now_ms) = 0;
+
+  // The five sends (6.2). Each puts exactly one packet on the air or none, arms the wait in the
+  // same step when the request's timeout_ms is not 0, and fills `out` on kOk. The views in `m`
+  // point into the link's receive buffer, which the session wipes after the call: a password is
+  // in RAM for the length of the send and nowhere else.
+  virtual uint8_t sendLogin(const SendLogin& m, SendResponse& out, uint32_t now_ms) = 0;
+  virtual uint8_t sendRequest(const SendRequest& m, SendResponse& out, uint32_t now_ms) = 0;
+  virtual uint8_t sendCli(const SendCli& m, SendResponse& out, uint32_t now_ms) = 0;
+  virtual uint8_t sendDiscovery(const SendDiscovery& m, SendResponse& out, uint32_t now_ms) = 0;
+  virtual uint8_t sendTrace(const SendTrace& m, SendResponse& out, uint32_t now_ms) = 0;
+
+  // REPLY_GET (6.3): the record as it stands - pending, an outcome, or nothing held. The views in
+  // `out` point into the client's own storage and stay valid until the next send or job request.
+  virtual void getReply(ReplyRecord& out, uint32_t now_ms) = 0;
+  // EV_MESH_REPLY (6.3): true, with `out` filled, exactly once per outcome - when an awaited reply
+  // arrived or its wait timed out. The session asks once a pass when the wire is free.
+  virtual bool takeReplyEvent(ReplyRecord& out, uint32_t now_ms) = 0;
+
+  // MESH_COUNTERS (6.4): rx, tx, client_tx and the radio's floor, RSSI and SNR. The observation
+  // fields (adverts, adverts_dropped, obs_dropped) are the ring's and the session fills them.
+  virtual void getCounters(MeshCountersResponse& out) = 0;
 };
 
 // The observation ring (phase 2). Present => kCapObservations.

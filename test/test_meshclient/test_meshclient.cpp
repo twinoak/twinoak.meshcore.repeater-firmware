@@ -1,13 +1,15 @@
-// src/meshclient/: the mesh client's portable state (spec/LINK-PROTOCOL.md section 6.1,
-// docs/ARCHITECTURE.md sections 2 and 7) - PeerSlot's index arithmetic, exhaustively, and the
-// Job's path, its awaited reply, its silence rule and the wipe of its shared secret.
+// src/meshclient/: the mesh client's portable state (spec/LINK-PROTOCOL.md sections 6.1 to 6.3,
+// docs/ARCHITECTURE.md sections 2 and 7) - PeerSlot's index arithmetic, exhaustively, the Job's
+// path, its awaited reply, its silence rule and the wipe of its shared secret (task 01), and the
+// Reply record with its matching rules against scripted arrivals (task 02).
 //
 // The peer overrides of TwinOakMesh are not here: they need MeshCore, which a host build does
-// not have. What is here is the two pieces those overrides are made of - the arithmetic
-// (PeerSlot) and the state (Job) - each of which this task keeps separate for exactly that
-// reason. The four requests through a real Session are in test/test_link_session.
+// not have. What is here is the pieces those overrides are made of - the arithmetic (PeerSlot),
+// the state (Job) and the rules (Reply) - each kept separate for exactly that reason. The job
+// requests, the five sends, the reply and the counters through a real Session are in
+// test/test_link_session.
 //
-// What is checked, in the order tasks/phase-2/01-the-job-and-its-peer.md asks for it:
+// What is checked, in the order the two task files ask for it:
 //   - PeerSlot for every upstream count 0..4 and extra yes/no: the total, which index is ours,
 //     the shift;
 //   - the Job's three path modes; hash sizes 1 to 3; 63 hops; 64 bytes; one byte too many; a hop
@@ -15,7 +17,10 @@
 //   - the 120-second silence rule against a fake clock: silence ends the job, any request
 //     restarts the count;
 //   - the wipe: after end() the buffer that held the secret is zero (read back, as the agent
-//     firmware's credential test does).
+//     firmware's credential test does);
+//   - Reply: the right response; a response with another tag; a response while a text is
+//     awaited; a text while a response is awaited; a late reply after the timeout; two replies
+//     (the first wins); the timeout itself; and what a CLI reply's plaintext must look like.
 
 #include <gtest/gtest.h>
 
@@ -25,6 +30,7 @@
 
 #include "meshclient/Job.h"
 #include "meshclient/PeerSlot.h"
+#include "meshclient/Reply.h"
 
 namespace {
 
@@ -296,6 +302,223 @@ TEST(JobSecret, ASecondBeginWipesTheFirstsSecret) {
   for (uint8_t i = 0; i < kSecretLen; i++) {
     EXPECT_EQ(0, after[i]) << "the first job's secret survived into the second";
   }
+}
+
+// ----------------------------------------------------------------------------- the reply's rules
+
+TEST(ReplyRules, WhatIsAwaitedAndByWhichTag) {
+  // A response is awaited by a login (tag 0: the next from the peer), a request and a discovery
+  // (the timestamp); a text by a CLI line; a trace by a trace.
+  EXPECT_TRUE(responseIsAwaited(kAwaitResponse, 0, 123456)) << "tag 0 takes the next response";
+  EXPECT_TRUE(responseIsAwaited(kAwaitResponse, 777, 777));
+  EXPECT_FALSE(responseIsAwaited(kAwaitResponse, 777, 778)) << "another tag";
+  EXPECT_FALSE(responseIsAwaited(kAwaitText, 0, 777)) << "a response while a text is awaited";
+  EXPECT_FALSE(responseIsAwaited(kAwaitTrace, 777, 777)) << "a response while a trace is awaited";
+  EXPECT_FALSE(responseIsAwaited(kAwaitNone, 0, 777)) << "nothing awaited";
+
+  EXPECT_TRUE(textIsAwaited(kAwaitText));
+  EXPECT_FALSE(textIsAwaited(kAwaitResponse)) << "a text while a response is awaited";
+  EXPECT_FALSE(textIsAwaited(kAwaitTrace));
+  EXPECT_FALSE(textIsAwaited(kAwaitNone));
+
+  EXPECT_TRUE(traceIsAwaited(kAwaitTrace, 900, 900));
+  EXPECT_TRUE(traceIsAwaited(kAwaitTrace, 0, 900));
+  EXPECT_FALSE(traceIsAwaited(kAwaitTrace, 900, 901));
+  EXPECT_FALSE(traceIsAwaited(kAwaitResponse, 900, 900));
+  EXPECT_FALSE(traceIsAwaited(kAwaitNone, 0, 900));
+}
+
+TEST(ReplyRules, ACliReplysPlaintext) {
+  // The repeater's TXT_MSG: its timestamp, a flags byte with the text type in its upper six bits,
+  // the text, and the zero padding of a cipher block.
+  const uint8_t* text = nullptr;
+  size_t n = 0;
+  const uint8_t cli[] = {1, 2, 3, 4, 0x04, '>', ' ', 'o', 'k', 0, 0, 0, 0, 0, 0, 0};
+  EXPECT_TRUE(parseCliText(cli, sizeof cli, text, n));
+  ASSERT_EQ(4u, n) << "up to the first NUL";
+  EXPECT_EQ(0, memcmp(text, "> ok", 4));
+  // A pre-v1.17 repeater says TXT_TYPE_PLAIN, which the agent firmware reads as a CLI reply too.
+  const uint8_t plain[] = {1, 2, 3, 4, 0x00, 'o', 'k'};
+  EXPECT_TRUE(parseCliText(plain, sizeof plain, text, n));
+  EXPECT_EQ(2u, n);
+  // Anything else is not a reply this client reads: a signed text, a text with no bytes after
+  // its header, a header that is not even whole.
+  const uint8_t signed_text[] = {1, 2, 3, 4, uint8_t(2 << 2), 'o', 'k'};
+  EXPECT_FALSE(parseCliText(signed_text, sizeof signed_text, text, n));
+  const uint8_t empty[] = {1, 2, 3, 4, 0x04};
+  EXPECT_FALSE(parseCliText(empty, sizeof empty, text, n));
+  EXPECT_FALSE(parseCliText(empty, 3, text, n));
+  EXPECT_FALSE(parseCliText(nullptr, 20, text, n));
+  // The attempt bits in the low two bits of the flags byte do not change the type.
+  const uint8_t attempt[] = {1, 2, 3, 4, uint8_t(0x04 | 0x02), 'x', 0};
+  EXPECT_TRUE(parseCliText(attempt, sizeof attempt, text, n));
+  EXPECT_EQ(1u, n);
+}
+
+namespace {
+
+std::vector<uint8_t> responseOf(uint32_t tag, const std::vector<uint8_t>& rest) {
+  std::vector<uint8_t> d = {uint8_t(tag), uint8_t(tag >> 8), uint8_t(tag >> 16),
+                            uint8_t(tag >> 24)};
+  d.insert(d.end(), rest.begin(), rest.end());
+  return d;
+}
+
+}  // namespace
+
+TEST(ReplyRecord, TheRightResponseIsTakenAndReported) {
+  Reply r;
+  EXPECT_EQ(kReplyNone, r.state());
+  EXPECT_FALSE(r.eventDue());
+  EXPECT_EQ(0u, r.elapsedMs(5000));
+
+  r.arm(/*tag=*/4242, /*now=*/1000);
+  EXPECT_EQ(kReplyPending, r.state());
+  EXPECT_EQ(4242u, r.tag());
+  EXPECT_EQ(1200u, r.elapsedMs(2200)) << "pending: from the send to now";
+  EXPECT_FALSE(r.eventDue());
+
+  const std::vector<uint8_t> data = responseOf(4242, {0xaa, 0xbb, 0xcc});
+  EXPECT_TRUE(r.takeResponse(kAwaitResponse, 4242, data.data(), data.size(), false, 25, -97, 3100));
+  EXPECT_EQ(kReplyResponse, r.state());
+  EXPECT_EQ(4242u, r.tag());
+  EXPECT_FALSE(r.viaPath());
+  EXPECT_EQ(25, r.snrQ4());
+  EXPECT_EQ(-97, r.rssi());
+  EXPECT_EQ(2100u, r.elapsedMs(9999)) << "an outcome: from the send to the reply, fixed";
+  ASSERT_EQ(3u, r.dataLen());
+  EXPECT_EQ(0, memcmp(r.data(), "\xaa\xbb\xcc", 3)) << "the response after its four tag bytes";
+  EXPECT_TRUE(r.eventDue());
+  r.eventTaken();
+  EXPECT_FALSE(r.eventDue());
+  EXPECT_EQ(kReplyResponse, r.state()) << "the record is kept after the event";
+}
+
+TEST(ReplyRecord, AResponseWithAnotherTagIsDropped) {
+  Reply r;
+  r.arm(4242, 1000);
+  const std::vector<uint8_t> other = responseOf(4243, {0x01});
+  EXPECT_FALSE(r.takeResponse(kAwaitResponse, 4242, other.data(), other.size(), false, 0, 0, 1500));
+  EXPECT_EQ(kReplyPending, r.state()) << "still waiting";
+  EXPECT_FALSE(r.eventDue());
+  // Tag 0 awaited: the same response is taken, and the record's tag becomes the reply's own.
+  Reply login;
+  login.arm(0, 1000);
+  EXPECT_TRUE(login.takeResponse(kAwaitResponse, 0, other.data(), other.size(), false, 0, 0, 1500));
+  EXPECT_EQ(4243u, login.tag());
+}
+
+TEST(ReplyRecord, AResponseWhileATextIsAwaitedIsDroppedAndSoIsTheReverse) {
+  Reply r;
+  r.arm(0, 1000);  // a CLI line: a text is awaited
+  const std::vector<uint8_t> resp = responseOf(0, {0x01});
+  EXPECT_FALSE(r.takeResponse(kAwaitText, 0, resp.data(), resp.size(), false, 0, 0, 1500));
+  EXPECT_EQ(kReplyPending, r.state());
+  const uint8_t text[] = {1, 2, 3, 4, 0x04, 'o', 'k', 0};
+  EXPECT_TRUE(r.takeText(kAwaitText, text, sizeof text, 31, -80, 3890));
+  EXPECT_EQ(kReplyText, r.state());
+  EXPECT_EQ(0u, r.tag()) << "a CLI reply carries no tag";
+  ASSERT_EQ(2u, r.dataLen());
+  EXPECT_EQ(0, memcmp(r.data(), "ok", 2));
+  EXPECT_EQ(2890u, r.elapsedMs(0));
+
+  Reply q;
+  q.arm(77, 1000);  // a request: a response is awaited
+  EXPECT_FALSE(q.takeText(kAwaitResponse, text, sizeof text, 0, 0, 1500));
+  EXPECT_EQ(kReplyPending, q.state());
+  const uint8_t not_cli[] = {1, 2, 3, 4, uint8_t(2 << 2), 'o', 'k'};
+  Reply c;
+  c.arm(0, 1000);
+  EXPECT_FALSE(c.takeText(kAwaitText, not_cli, sizeof not_cli, 0, 0, 1500))
+      << "a text that is not CLI data";
+  EXPECT_EQ(kReplyPending, c.state());
+}
+
+TEST(ReplyRecord, TheFirstReplyWinsAndALateOneIsDropped) {
+  Reply r;
+  r.arm(10, 1000);
+  const std::vector<uint8_t> first = responseOf(10, {0x01});
+  const std::vector<uint8_t> second = responseOf(10, {0x02});
+  EXPECT_TRUE(r.takeResponse(kAwaitResponse, 10, first.data(), first.size(), false, 0, 0, 1100));
+  EXPECT_FALSE(r.takeResponse(kAwaitResponse, 10, second.data(), second.size(), false, 0, 0, 1200))
+      << "the second is dropped";
+  ASSERT_EQ(1u, r.dataLen());
+  EXPECT_EQ(0x01, r.data()[0]) << "the first's bytes";
+  EXPECT_EQ(100u, r.elapsedMs(0));
+
+  // After the timeout the record is not pending, so a late reply is dropped too.
+  Reply t;
+  t.arm(11, 1000);
+  EXPECT_TRUE(t.timeOut(1000 + 8000));
+  EXPECT_EQ(kReplyTimeout, t.state());
+  EXPECT_TRUE(t.eventDue());
+  const std::vector<uint8_t> late = responseOf(11, {0x03});
+  EXPECT_FALSE(t.takeResponse(kAwaitResponse, 11, late.data(), late.size(), false, 0, 0, 9500));
+  EXPECT_EQ(kReplyTimeout, t.state());
+  EXPECT_EQ(0u, t.dataLen());
+}
+
+TEST(ReplyRecord, TheTimeoutItself) {
+  Reply r;
+  EXPECT_FALSE(r.timeOut(5000)) << "nothing pending: nothing times out";
+  r.arm(1791720055, 1000);
+  EXPECT_TRUE(r.timeOut(1000 + 8000));
+  EXPECT_EQ(kReplyTimeout, r.state());
+  EXPECT_EQ(1791720055u, r.tag()) << "the awaited tag";
+  EXPECT_EQ(8000u, r.elapsedMs(0)) << "exactly the timeout the send asked for";
+  EXPECT_EQ(kReplyRssiUnknown, r.rssi());
+  EXPECT_EQ(0, r.snrQ4());
+  EXPECT_FALSE(r.viaPath());
+  EXPECT_TRUE(r.eventDue());
+  EXPECT_FALSE(r.timeOut(20000)) << "once";
+  r.eventTaken();
+  EXPECT_FALSE(r.eventDue());
+  // clear() lets it go.
+  r.clear();
+  EXPECT_EQ(kReplyNone, r.state());
+  EXPECT_EQ(0u, r.tag());
+}
+
+TEST(ReplyRecord, ATraceWithTheAwaitedTag) {
+  Reply r;
+  r.arm(500, 1000);
+  const uint8_t hashes[] = {0x7f, 0x3a, 0xa1, 0xb2, 0x7f, 0x3a, 0x46, 0xf6};
+  const uint8_t snrs[] = {0x1d, 0xf6, 0x14, 0x16};
+  EXPECT_FALSE(r.takeTrace(kAwaitTrace, 500, 501, 1, hashes, 8, snrs, 4, 22, -101, 7100))
+      << "another tag";
+  EXPECT_FALSE(r.takeTrace(kAwaitResponse, 500, 500, 1, hashes, 8, snrs, 4, 22, -101, 7100))
+      << "a trace while a response is awaited";
+  EXPECT_TRUE(r.takeTrace(kAwaitTrace, 500, 500, 1, hashes, 8, snrs, 4, 22, -101, 7100));
+  EXPECT_EQ(kReplyTrace, r.state());
+  EXPECT_EQ(500u, r.tag());
+  EXPECT_EQ(1, r.traceFlags());
+  EXPECT_EQ(22, r.finalSnrQ4());
+  EXPECT_EQ(22, r.snrQ4());
+  EXPECT_EQ(-101, r.rssi());
+  EXPECT_EQ(6100u, r.elapsedMs(0));
+  ASSERT_EQ(8u, r.traceHashLen());
+  EXPECT_EQ(0, memcmp(r.traceHashes(), hashes, 8));
+  ASSERT_EQ(4u, r.traceSnrCount());
+  EXPECT_EQ(0, memcmp(r.traceSnrs(), snrs, 4));
+  // Lengths past the record's buffers are cut, never written past.
+  Reply big;
+  big.arm(1, 0);
+  std::vector<uint8_t> many(300, 0x55);
+  EXPECT_TRUE(big.takeTrace(kAwaitTrace, 1, 1, 0, many.data(), many.size(), many.data(),
+                            many.size(), 0, 0, 10));
+  EXPECT_EQ(size_t(kTraceHashesMax), big.traceHashLen());
+  EXPECT_EQ(size_t(kTraceSnrsMax), big.traceSnrCount());
+  Reply wide;
+  wide.arm(2, 0);
+  std::vector<uint8_t> resp = responseOf(2, std::vector<uint8_t>(300, 0x66));
+  EXPECT_TRUE(wide.takeResponse(kAwaitResponse, 2, resp.data(), resp.size(), true, 0, 0, 10));
+  EXPECT_EQ(size_t(kReplyDataMax), wide.dataLen());
+  EXPECT_TRUE(wide.viaPath());
+  // A response too short to carry a tag is not one.
+  Reply shortr;
+  shortr.arm(3, 0);
+  const uint8_t three[] = {1, 2, 3};
+  EXPECT_FALSE(shortr.takeResponse(kAwaitResponse, 0, three, 3, false, 0, 0, 10));
 }
 
 }  // namespace

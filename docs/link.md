@@ -5,17 +5,19 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's task
-01): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`, `REBOOT`,
-`CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job requests
-`JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, and `EV_BOOT` and
-`EV_ATTENTION` as events. Everything else of the protocol answers
-`ERR_UNSUPPORTED` until the task that owns it lands — the five sends, the reply
-and the counters of phase 2's task 02, the observation ring of its task 03 —
-and `HELLO`'s `caps` is `0x6f` (`CLI`, `POWER`, `ENV`, `MESH_CLIENT`,
-`ATTENTION`, `TIME_PERSIST`) and nothing else for exactly the same reason: a
-capability is an interface that is there (`src/link/session/Interfaces.h`).
-`LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
+What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's tasks
+01 and 02): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
+`REBOOT`, `CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job
+requests `JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, the five sends
+`SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY` and `SEND_TRACE`, the
+reply with `REPLY_GET` and `MESH_COUNTERS`, and `EV_BOOT`, `EV_ATTENTION` and
+`EV_MESH_REPLY` as events. Everything else of the protocol answers
+`ERR_UNSUPPORTED` until the task that owns it lands — the observation ring and
+`OBS_PULL` of phase 2's task 03 — and `HELLO`'s `caps` is `0x6f` (`CLI`,
+`POWER`, `ENV`, `MESH_CLIENT`, `ATTENTION`, `TIME_PERSIST`) and nothing else for
+exactly the same reason: a capability is an interface that is there
+(`src/link/session/Interfaces.h`). `LPP_GET` has no capability bit of its own:
+§4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
 
@@ -62,6 +64,12 @@ python3 tools/linkcli.py --port COM7 listen 30    # the events, for 30 s
 python3 tools/linkcli.py --port COM7 reboot 0     # and then `listen` for EV_BOOT
 python3 tools/linkcli.py --port COM7 job begin <key> --path aabb,ccdd  # a peer and a route
 python3 tools/linkcli.py --port COM7 path         # the route the job holds
+python3 tools/linkcli.py --port COM7 login -      # log in to the peer (password from a prompt)
+python3 tools/linkcli.py --port COM7 status-of-peer   # ask it, and read the reply
+python3 tools/linkcli.py --port COM7 send-cli "get name"   # run a CLI line on the peer
+python3 tools/linkcli.py --port COM7 discover     # flood a path discovery to it
+python3 tools/linkcli.py --port COM7 reply        # the reply the last send is waiting for
+python3 tools/linkcli.py --port COM7 counters     # what the radio and the client have sent
 python3 tools/linkcli.py --port COM7 job end      # forget the peer
 ```
 
@@ -435,6 +443,69 @@ PATH_GET
   reply is awaited** (`docs/ARCHITECTURE.md` §2). Outside that window nothing of
   the repeater's own business is disturbed: the four peer overrides are
   upstream's own, untouched.
+
+## 2f. The five sends, the reply and the counters
+
+With a job begun, the link lends the repeater's identity to the five exchanges
+an exit node makes with the peer. Each send puts **one packet** on the air (or
+none) and is answered at once; the reply comes back later, as an `EV_MESH_REPLY`
+event and on `reply`.
+
+```
+$ python3 tools/linkcli.py --port COM7 job begin <peer-key>   # a peer, flooded until a path is learnt
+$ python3 tools/linkcli.py --port COM7 login -                # the admin password, from a prompt
+SEND_LOGIN **********
+  send          1 (sent as a flood)
+  tag           0x00000000  (the next reply from the peer)
+  sender_ts     1791720050 (2026-10-11 ...)
+REPLY
+  state         3 (response)
+  tag           0x6acb7a72
+  snr           6.25 dB
+  rssi          -97 dBm
+  elapsed_ms    1240
+  data          0100016a...                                   # the login reply, after its tag
+```
+
+- **`login [password]`** is a login as ourselves. With no argument it is the
+  **ACL login** — our key and no secret — which a repeater answers at guest
+  level if it has no guest password and ignores if it has one; both are right,
+  and `reply` says which. With `-` the password is read from a prompt (never the
+  command line, and printed as stars); a literal password as the argument works
+  too but is seen by the shell. A login's `tag` is **0**: its reply carries the
+  *repeater's* timestamp, not ours, so the next response from the peer is the
+  one (the agent firmware learnt this on the air).
+- **`request <type> [hex]`** is a raw request datagram; **`status-of-peer`**
+  (type 1) and **`neighbours-of-peer`** (type 6) are conveniences that send the
+  two commonest and leave the reply's bytes for a person to read. A request's
+  `tag` is the timestamp the repeater reflects back.
+- **`send-cli "<line>"`** runs one CLI line on the **peer**, with the session's
+  privileges, and its reply is a text that carries no tag. `--sensitive` tells
+  the RAK the line holds a password, so it wipes it after the send — but the RAK
+  wipes every send's buffer regardless, so a forgotten flag leaks nothing.
+- **`discover`** floods a path-discovery request **whatever path the job holds**;
+  its reply comes back as a returned path, which becomes the job's path, and
+  `path` then reads the route. **`trace <hashes>`** traces a round-trip path,
+  always direct, and comes back with an SNR per hop; a trace cannot carry
+  three-byte hashes (`--hash-size 3` is `ERR_RANGE`), only 1, 2, 4 or 8.
+- Every send takes **`--timeout-ms`** (how long the RAK awaits the reply; 0
+  awaits nothing) and **`--no-wait`** (print the send's own answer and stop).
+  While a reply is awaited a second send is **`ERR_BUSY`**; with no job the
+  three that need one are **`ERR_STATE`** (a trace needs none). A send that
+  cannot be put on the air — a password over 15 bytes, a line over 148 — is
+  **`ERR_RANGE`** or **`ERR_MALFORMED`** and nothing is sent.
+- **`reply`** reads the record as it stands (`pending`, `response`, `text`,
+  `trace` or `timeout`); the RAK sends one `EV_MESH_REPLY` when the reply
+  arrives or the wait times out, and keeps the record until the next send,
+  `job begin` or `job end`. A lost event costs one `reply`, never a lost reply.
+  While the Walter is believed asleep (`sleep`) the event is held and `reply` is
+  the way to it.
+- **`counters`** is `MESH_COUNTERS`: `rx` and `tx` from the radio, `client_tx`
+  the mesh client's own — **one per send and nothing else**, which is what an
+  exit node's transaction count is held against — and the noise floor and last
+  RSSI/SNR. The advert counts and `obs_dropped` arrive with the ring (task 03).
+- **`STATUS`'s flag bit 1** (`reply awaited`) is on from a send with a timeout
+  until its reply or its deadline.
 
 ## 3. When it says nothing
 
