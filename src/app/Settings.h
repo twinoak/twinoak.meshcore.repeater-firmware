@@ -1,6 +1,7 @@
 // Our settings, as upstream's CLI sees them: `sensor list`, `sensor get <key>` and
 // `sensor set <key> <value>` (docs/ARCHITECTURE.md section 4's table, plus the two battery
-// thresholds of phase 1's task 06).
+// thresholds of phase 1's task 06, the observation ring's wake switch and the mesh client's
+// refusal counter of phase 2).
 //
 // Why they are here and not only on the box link: these are the two ways into a unit that do not
 // need the Walter. The USB console at the field port is one; a **mesh admin** with a phone is the
@@ -59,6 +60,13 @@ struct SettingsHost {
   // says so after each EV_BOOT, as it already must for the clock (section 5.4).
   virtual bool obsWake() const = 0;
   virtual void setObsWake(bool on) = 0;
+
+  // `client.refused`: sends the mesh client's ceiling has refused since boot
+  // (src/meshclient/SendCeiling.h - at most 6 in any 60 seconds, 2 seconds apart). Read-only, and
+  // on this list rather than on the link because a Walter that is being refused is the one party
+  // whose own counters cannot be trusted about it: a person at the USB port, or a mesh admin with
+  // a phone, can read it without the Walter's help.
+  virtual uint32_t clientSendsRefused() const = 0;
 };
 
 class Settings {
@@ -70,7 +78,7 @@ class Settings {
   // own paging (`sensor list <start>`) counts in it.
   static int count();
   static const char* name(int i);
-  // The value of key i, or nullptr out of range. Valid until the next call: four of the seven
+  // The value of key i, or nullptr out of range. Valid until the next call: five of the nine
   // are formatted into a buffer of this object, which is how upstream's CLI uses them (it prints
   // one and then asks for the next).
   const char* value(int i);
@@ -79,12 +87,13 @@ class Settings {
   // "ok"; false when the key is not ours or the value is not one this key accepts, and upstream's
   // CLI then answers "can't find custom var" for both, which is its only other word.
   //
-  // Four of the eight keys are read-only and refuse every value. `walter.wake` accepts "1" and
+  // Five of the nine keys are read-only and refuse every value. `walter.wake` accepts "1" and
   // nothing else, and accepting it means "the machine was asked": whether an attention was
   // actually raised is the hourly limit's business, and `sensor get walter.wake` is where the
   // answer to that is read. `power.low_mv` and `power.crit_mv` take a decimal number of
   // millivolts and refuse anything the thresholds would not accept. `obs.wake` takes "0" and
-  // "1" and nothing else.
+  // "1" and nothing else. `client.refused` is a counter and takes nothing: the ceiling it counts
+  // is a build constant on purpose (src/meshclient/SendCeiling.h).
   bool set(const char* name, const char* value);
 
  private:

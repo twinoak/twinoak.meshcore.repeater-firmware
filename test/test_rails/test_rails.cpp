@@ -1,47 +1,80 @@
-// The rails, as a test and not a promise (README.md "Rails that hold in every task",
-// spec/SYSTEM.md S-12 and S-13, tasks/phase-1/01): it reads platformio.ini and walks src/ and
-// fails on
-//   - the packet-logging define or the mesh-debug define set anywhere in platformio.ini (in a
-//     flag, not in a comment), or mentioned at all in a file of src/ - which also forbids
-//     upstream's debug-print macro in our sources, on purpose: nothing the mesh says is logged as
-//     text;
-//   - a line of src/ that prints a packet's payload or an advert's application data - any line
-//     that names `payload` or `app_data` beside a print-like call. The second is section 7's
-//     rule: the name inside an advert's app_data is something a stranger chose, and neither end
-//     logs it;
-//   - a print-like call anywhere under src/link/, or a use of `Serial` that is not the framing
-//     or the flush before a restart: a CLI line over the link is a console command and can be
-//     `password <new>`, whose reply echoes it back (tasks/phase-1/05-local-management.md);
-//   - a line of src/link/codec/, src/link/session/ or src/clock/ that allocates or uses a string
-//     class: the box link's portable half and the clock keeper are fed buffers and fill buffers,
-//     on a node that must repeat for months without a heap that fragments
-//     (tasks/phase-1/02-the-link-codec.md, 03, 04);
-//   - a board environment whose resolved build flags define ADMIN_PASSWORD as upstream's default,
-//     or do not define it at all (without the define upstream's MyMesh.cpp defaults it to that
-//     same word, which is how phase 0's stock image came to carry it);
-//   - a board environment that turns on either of upstream's two sensor drivers this firmware
-//     replaces: ENV_INCLUDE_INA3221, which applies one shunt value to all three channels where
-//     this board has 100, 20 and 50 milliohm, and ENV_INCLUDE_BME280, which samples the part
-//     inside querySensors and so would put an I2C conversion on the path of a box-link request
-//     (tasks/phase-1/06-power-and-environment.md; src/power/Environment.h);
-//   - a file of src/link/ or of src/power/ other than BoardPower.cpp that names an I2C bus or a
-//     sensor driver: "a request on the box link never performs I2C" is a property of the shape -
-//     one file reaches a bus, and the handlers answer out of a cache - and this is that shape
-//     held in place.
-// The forbidden names are written as split strings so that a grep of the repository for them finds
-// the places that set them and not this test.
+// The rails, as a test and not a promise: nine rules, one test apiece, each failing with a
+// sentence that names the rule it holds (tasks/phase-2/04-the-rails.md, README.md's "Rails that
+// hold in every task", spec/SYSTEM.md S-12 and S-13, spec/LINK-PROTOCOL.md section 6's head).
+//
+// It reads platformio.ini, walks src/, tools/ and .github/, and hashes spec/. In the order the
+// task lists them:
+//
+//   1. **no MESH_PACKET_LOGGING, no MESH_DEBUG, in any environment** - not in a flag of
+//      platformio.ini (a comment may say the words, which is how that file explains itself) and
+//      not mentioned at all in a file of src/, which also forbids upstream's debug-print macro in
+//      our sources. Does not catch: a define passed on a command line by hand.
+//   2. **no source under src/ prints or logs a packet payload, a CLI line or its reply, an
+//      advert's application data, or a password**. Three tests: any line of src/ that names
+//      `payload` or `app_data` beside a print-like call; every print-like call under src/link/,
+//      where a CLI line and its reply live (a `password <new>` and the echo that repeats it); and
+//      the same for src/meshclient/, which holds the one plaintext copy of a password a send
+//      carries. Does not catch: a payload copied into a variable of another name and printed
+//      from a directory that is allowed to print - which is why the two directories are held to
+//      "no printing at all" rather than to a list of names.
+//   3. **no board environment defines ADMIN_PASSWORD as upstream's default** (or leaves it out,
+//      which makes upstream's own MyMesh.cpp default it to that same word), **and the first-boot
+//      path that replaces it exists** and is called from setup() before anything can be logged
+//      into. Does not catch: whether the random password is good - that is test/test_password.
+//   4. **every flood the client originates passes a path-hash size of 2 or more**: the constant
+//      is 2, every call of upstream's sendFlood in src/ passes that constant, and no line passes
+//      a literal 1. Does not catch: a *path the Walter gives us* with one-byte hashes, which the
+//      link deliberately allows (`kPathHashSizeMin` is 1) because that path was chosen by
+//      somebody else - S-12 is about the hashes **this firmware chooses**.
+//   5. **onPeerPathRecv returns false for the client's peer**: no reciprocal path, one packet per
+//      send. The branch that handles our peer is read out of src/app/TwinOakMesh.cpp and must
+//      return false and nothing else. Does not catch: upstream's own path return for upstream's
+//      own peers, which is upstream's business and is left alone.
+//   6. **nothing under src/ writes a file whose content came from SEND_LOGIN or a sensitive
+//      SEND_CLI**: the modules those bytes pass through - the link's codec and session, the mesh
+//      client, and the one board file that builds the packet - name no file-system API at all.
+//      Does not catch: a byte handed to another directory first; nothing does that today, and
+//      rule 2's "these directories do not print" is the fence on the other side.
+//   7. **upstream's INA3221 support is not in the build**, nor its BME280: the first applies one
+//      shunt value to all three channels where this board has 100, 20 and 50 milliohm, and the
+//      second samples the part inside querySensors, which is on the path of a box-link request.
+//   8. **no file under spec/ differs from its manifest** - the SHA-256 and the byte count of
+//      every line of spec/MANIFEST.txt, computed here, which is the same check
+//      `spec/tools/specsync.py verify spec` makes in tools/verify.ps1 and in CI - **and no file
+//      under the pinned MeshCore checkout is referenced for writing by any script**: a line of
+//      tools/ or .github/ that names the checkout carries no write-like call, and only the three
+//      scripts that compile out of it name it at all. Does not catch: a path under the checkout
+//      put in a variable on one line and written on another.
+//   9. **no heap allocation in src/link/ or src/meshclient/** (nor in src/clock/): `new`,
+//      `malloc`, `calloc`, `realloc`, Arduino's `String` or `std::string` in code - a comment may
+//      name them. A node that must repeat for months is given its buffers and fills buffers.
+//      Does not catch: a container of a library called through a header, or a recursion deep
+//      enough to matter; neither directory calls one.
+//
+// Two rails of earlier tasks are kept beside those nine because they are the same kind of thing:
+// **a request on the box link never performs I2C** (one file reaches a bus, the handlers answer
+// out of a cache - phase 1's task 06), and the two prints rails of rule 2 above.
+//
+// The forbidden names are written as split strings so that a grep of the repository for them
+// finds the places that set them and not this test.
 //
 // The agent firmware's test_tls_policy is the model: a walk, a list, a failure per hit.
 
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+// Rule 4 reads the firmware's own constant rather than a copy of it.
+#include "meshclient/MeshPort.h"
 
 #ifndef PROJECT_DIR
 #error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
@@ -203,9 +236,115 @@ std::string rel(const fs::path& root, const fs::path& p) {
   return fs::relative(p, root).generic_string();
 }
 
+// --- what the newer rails read ------------------------------------------------------------
+
+// The bytes of a file, whole: the rails that hash spec/ and the ones that walk a source file
+// line by line both start here. The files involved are kilobytes.
+std::vector<uint8_t> fileBytes(const fs::path& file) {
+  std::ifstream in(file, std::ios::binary);
+  return std::vector<uint8_t>(std::istreambuf_iterator<char>(in),
+                              std::istreambuf_iterator<char>());
+}
+
+std::string fileText(const fs::path& file) {
+  const std::vector<uint8_t> bytes = fileBytes(file);
+  return std::string(bytes.begin(), bytes.end());
+}
+
+std::vector<std::string> linesOf(const fs::path& file) {
+  std::vector<std::string> lines;
+  std::ifstream in(file, std::ios::binary);
+  std::string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+// A source line without its line comment. Code may not name what these rails forbid; a comment
+// may, which is how the files that keep these rules explain why they keep them.
+std::string withoutComment(const std::string& line) {
+  const size_t at = line.find("//");
+  return at == std::string::npos ? line : line.substr(0, at);
+}
+
+// SHA-256 (FIPS 180-4), so that rule 8 **is** the check spec/tools/specsync.py makes and not an
+// approximation of it. Fifty lines is cheaper than a rail that only compares file sizes, and the
+// test holds this implementation against the standard's own two vectors before it trusts it.
+inline uint32_t rotr32(uint32_t v, int n) { return (v >> n) | (v << (32 - n)); }
+
+std::string sha256Hex(const std::vector<uint8_t>& in) {
+  static const uint32_t K[64] = {
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+      0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+      0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+      0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+      0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+      0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+      0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+      0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+      0xc67178f2};
+  uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+  std::vector<uint8_t> m = in;
+  const uint64_t bits = uint64_t(in.size()) * 8u;
+  m.push_back(0x80);
+  while (m.size() % 64 != 56) m.push_back(0);
+  for (int i = 7; i >= 0; i--) m.push_back(uint8_t(bits >> (8 * i)));
+
+  for (size_t off = 0; off < m.size(); off += 64) {
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++) {
+      w[i] = (uint32_t(m[off + 4 * i]) << 24) | (uint32_t(m[off + 4 * i + 1]) << 16) |
+             (uint32_t(m[off + 4 * i + 2]) << 8) | uint32_t(m[off + 4 * i + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+      const uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      const uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3];
+    uint32_t e = h[4], f = h[5], g = h[6], x = h[7];
+    for (int i = 0; i < 64; i++) {
+      const uint32_t s1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+      const uint32_t ch = (e & f) ^ ((~e) & g);
+      const uint32_t t1 = x + s1 + ch + K[i] + w[i];
+      const uint32_t s0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+      const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+      const uint32_t t2 = s0 + maj;
+      x = g;
+      g = f;
+      f = e;
+      e = d + t1;
+      d = c;
+      c = b;
+      b = a;
+      a = t1 + t2;
+    }
+    h[0] += a;
+    h[1] += b;
+    h[2] += c;
+    h[3] += d;
+    h[4] += e;
+    h[5] += f;
+    h[6] += g;
+    h[7] += x;
+  }
+
+  static const char* const kHex = "0123456789abcdef";
+  std::string out;
+  for (uint32_t v : h) {
+    for (int i = 7; i >= 0; i--) out += kHex[(v >> (4 * i)) & 0xF];
+  }
+  return out;
+}
+
 }  // namespace
 
-TEST(Rails, PlatformioIniNeverEnablesPacketLoggingOrMeshDebug) {
+TEST(Rails, Rule1_PlatformioIniNeverEnablesPacketLoggingOrMeshDebug) {
   const fs::path root = projectRoot();
   const Ini ini = readIni(root / "platformio.ini");
   ASSERT_FALSE(ini.sections.empty()) << "no platformio.ini under " << root;
@@ -223,7 +362,7 @@ TEST(Rails, PlatformioIniNeverEnablesPacketLoggingOrMeshDebug) {
   }
 }
 
-TEST(Rails, EveryBoardEnvironmentDefinesAnAdminPasswordThatIsNotUpstreamsDefault) {
+TEST(Rails, Rule3_EveryBoardEnvironmentDefinesAnAdminPasswordThatIsNotUpstreamsDefault) {
   const fs::path root = projectRoot();
   const Ini ini = readIni(root / "platformio.ini");
   int boards = 0;
@@ -253,7 +392,7 @@ TEST(Rails, EveryBoardEnvironmentDefinesAnAdminPasswordThatIsNotUpstreamsDefault
   EXPECT_GT(boards, 0) << "platformio.ini has no board environment";
 }
 
-TEST(Rails, NoBoardEnvironmentTurnsOnUpstreamsOwnIna3221OrBme280) {
+TEST(Rails, Rule7_NoBoardEnvironmentTurnsOnUpstreamsOwnIna3221OrBme280) {
   const fs::path root = projectRoot();
   const Ini ini = readIni(root / "platformio.ini");
   int boards = 0;
@@ -282,7 +421,7 @@ TEST(Rails, NoBoardEnvironmentTurnsOnUpstreamsOwnIna3221OrBme280) {
   EXPECT_GT(boards, 0) << "platformio.ini has no board environment";
 }
 
-TEST(Rails, NothingInSrcMentionsMeshDebugOrPacketLogging) {
+TEST(Rails, Rule1_NothingInSrcMentionsMeshDebugOrPacketLogging) {
   const fs::path root = projectRoot();
   const std::vector<fs::path> files = filesUnder(root / "src");
   EXPECT_GT(files.size(), 5u) << "the walk of src/ found almost nothing - is PROJECT_DIR right?";
@@ -303,7 +442,7 @@ TEST(Rails, NothingInSrcMentionsMeshDebugOrPacketLogging) {
   }
 }
 
-TEST(Rails, NothingInSrcPrintsAPacketsPayloadOrAnAdvertsApplicationData) {
+TEST(Rails, Rule2_NothingInSrcPrintsAPacketsPayloadOrAnAdvertsApplicationData) {
   // `payload` is the mesh's own bytes. `app_data` is an advert's, and the **name a stranger
   // chose** is inside it: "The name inside app_data is something a stranger chose. Neither end
   // logs it" (spec/LINK-PROTOCOL.md section 7). This firmware copies those bytes into the
@@ -333,15 +472,18 @@ TEST(Rails, NothingInSrcPrintsAPacketsPayloadOrAnAdvertsApplicationData) {
   }
 }
 
-TEST(Rails, NothingUnderThePortableLinkOrTheClockAllocatesOrHoldsAString) {
+TEST(Rails, Rule9_NoHeapAllocationUnderTheLinkTheClockOrTheMeshClient) {
   const fs::path root = projectRoot();
-  // The two portable layers of the box link (docs/ARCHITECTURE.md section 4) and the clock keeper
-  // (section 5). The link's transport is not here: it is the file that is allowed to know about
-  // Arduino. src/clock/ is here whole, BoardClock.cpp included - the file system's own
-  // allocation is the core's, inside File::open, and nothing of ours has a reason to add to it.
-  // src/meshclient/ is the mesh client's portable state (section 7): the job, its path and the
-  // shared secret's buffer, which is given its memory once and wipes it rather than freeing it.
-  const char* const kDirs[] = {"link/codec", "link/session", "clock", "meshclient"};
+  // Rule 9 of the task: **no heap allocation in src/link/ or src/meshclient/** - and src/clock/
+  // beside them, which has been held to it since phase 1's task 04. The whole of src/link/ now,
+  // its board half and its transport included (phase 1 held only the two portable layers): a node
+  // that must repeat for months is given its buffers and fills buffers, and the files that touch
+  // Arduino have no more reason to allocate than the portable ones. src/clock/'s BoardClock.cpp
+  // is here too - the file system's own allocation is the core's, inside File::open, and nothing
+  // of ours has a reason to add to it. src/meshclient/ is the mesh client's state (section 7):
+  // the job, its path, the shared secret's buffer and the observation ring, each given its memory
+  // once; the ring wipes rather than frees.
+  const char* const kDirs[] = {"link", "clock", "meshclient"};
   // The names, and whether a whole-identifier match is what to look for: `new` must not match
   // `renew`, where `std::string` is not an identifier at all.
   const std::pair<std::string, bool> kForbidden[] = {
@@ -375,7 +517,7 @@ TEST(Rails, NothingUnderThePortableLinkOrTheClockAllocatesOrHoldsAString) {
   }
 }
 
-TEST(Rails, NoRequestHandlerCanReachAnI2cBus) {
+TEST(Rails, AlsoKept_NoRequestHandlerCanReachAnI2cBus) {
   // The acceptance criterion of phase 1's task 06: **a request on the box link never performs
   // I2C**, shown from the code's structure. That structure is one file deep: src/power/
   // BoardPower.cpp owns the only `Wire` of this firmware's own sources (src/board/target.cpp's
@@ -417,7 +559,7 @@ TEST(Rails, NoRequestHandlerCanReachAnI2cBus) {
   EXPECT_GT(walked, 10) << "almost nothing under src/link or src/power - is PROJECT_DIR right?";
 }
 
-TEST(Rails, NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
+TEST(Rails, Rule2_NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
   // A CLI line over the link is a console command, so it can be `password <new>` - and the reply
   // to that one is `password now: <it>`, because upstream echoes it back to be sure
   // (src/helpers/CommonCLI.cpp at the pin d9296435, the `password ` branch). `get prv.key` is
@@ -477,7 +619,7 @@ TEST(Rails, NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
   }
 }
 
-TEST(Rails, NothingUnderTheMeshClientPrintsOrLogs) {
+TEST(Rails, Rule2_NothingUnderTheMeshClientPrintsOrLogs) {
   // The mesh client's portable half (src/meshclient/) holds, for the length of a send, the one
   // plaintext copy of a password a Walter asked it to log in with, and afterwards the bytes a
   // repeater answered - a CLI reply that can echo a password back. So, as for src/link/, the
@@ -505,6 +647,305 @@ TEST(Rails, NothingUnderTheMeshClientPrintsOrLogs) {
       }
     }
   }
+}
+
+
+// ---------------------------------------------------------------------- rule 3, the other half
+
+TEST(Rails, Rule3_TheFirstBootPathThatReplacesThatPasswordExists) {
+  // The define above is a placeholder and nothing else: on a boot that finds no saved
+  // preferences, src/app/FirstBoot.cpp draws a random password into upstream's own prefs and
+  // saves them before loop() ever runs (spec/SYSTEM.md S-13). The rail is that this path is
+  // **there and called**, because the define alone would be a default password on the air.
+  const fs::path root = projectRoot();
+  for (const char* name : {"app/AdminPassword.h", "app/AdminPassword.cpp", "app/FirstBoot.h",
+                           "app/FirstBoot.cpp"}) {
+    EXPECT_TRUE(fs::is_regular_file(root / "src" / name))
+        << "src/" << name << " is gone: no default password is ever on the air (S-13), and this"
+           " is the path that replaces the build's placeholder";
+  }
+  // And setup() calls it: the test, then the draw, by name.
+  const std::string main_cpp = fileText(root / "src" / "main.cpp");
+  for (const char* call : {"hasSavedPrefs(", "ensureAdminPassword("}) {
+    EXPECT_NE(std::string::npos, main_cpp.find(call))
+        << "src/main.cpp no longer calls " << call
+        << "): a node with no settings would then keep the build's placeholder password (S-13)";
+  }
+  // The password's own rules are tested natively, which needs the file in the native build.
+  const std::string ini = fileText(root / "platformio.ini");
+  EXPECT_NE(std::string::npos, ini.find("+<app/AdminPassword.cpp>"))
+      << "platformio.ini's [env:native] no longer compiles src/app/AdminPassword.cpp, so"
+         " test/test_password no longer holds what a first-boot password looks like (S-13)";
+}
+
+// ------------------------------------------------------------------------------------- rule 4
+
+TEST(Rails, Rule4_EveryFloodTheClientOriginatesUsesTwoByteHashes) {
+  // "Path hashes this firmware chooses are two bytes or more" (S-12, meshmaster.dk D-33).
+  // Upstream's Mesh::sendFlood takes the size as its third argument and **defaults it to 1**
+  // (src/Mesh.h at the pin d9296435), so every call of ours has to pass the constant - and the
+  // constant has to be 2 or more. Both halves are checked: the value, from the header the
+  // firmware itself uses, and the calls, by walking src/.
+  //
+  // What is deliberately not checked: a path the Walter hands us in JOB_BEGIN or PATH_SET may
+  // have one-byte hashes (link::kPathHashSizeMin is 1), because that path was chosen by the
+  // repeater that answered us and not by this firmware. S-12 is about the hashes we choose.
+  EXPECT_GE(int(twinoak::meshclient::kFloodPathHashSize), 2)
+      << "every flood this firmware originates must carry two-byte path hashes or wider (S-12)";
+
+  const fs::path root = projectRoot();
+  int calls = 0;
+  for (const fs::path& file : filesUnder(root / "src")) {
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      const std::string code = withoutComment(raw);
+      if (code.find("sendFlood(") == std::string::npos) continue;
+      calls++;
+      if (code.find("kFloodPathHashSize") == std::string::npos) {
+        ADD_FAILURE() << rel(root, file) << ":" << n
+                      << ": a flood whose path-hash size is not kFloodPathHashSize - upstream"
+                         " defaults that argument to 1 and this firmware never floods at one"
+                         " byte (S-12)";
+      }
+    }
+  }
+  EXPECT_GT(calls, 0) << "no call of sendFlood under src/ - has the mesh client moved?";
+}
+
+// ------------------------------------------------------------------------------------- rule 5
+
+TEST(Rails, Rule5_OnPeerPathRecvReturnsFalseForTheClientsPeer) {
+  // One packet per send (S-12): a returned path from the job's peer teaches us its route and is
+  // **not** answered with a path of our own. Mesh::onRecvPacket sends that reciprocal path only
+  // when this override returns true (src/Mesh.cpp:173-178 at the pin), so the rail is the branch
+  // that handles our peer: it returns false, and it contains no other return.
+  const fs::path root = projectRoot();
+  const fs::path file = root / "src" / "app" / "TwinOakMesh.cpp";
+  const std::vector<std::string> lines = linesOf(file);
+  ASSERT_FALSE(lines.empty()) << "src/app/TwinOakMesh.cpp is gone";
+
+  int start = -1;
+  for (size_t i = 0; i < lines.size(); i++) {
+    if (lines[i].find("bool TwinOakMesh::onPeerPathRecv(") != std::string::npos) start = int(i);
+  }
+  ASSERT_GE(start, 0) << "no definition of TwinOakMesh::onPeerPathRecv in"
+                         " src/app/TwinOakMesh.cpp: the override that must not send a reciprocal"
+                         " path (S-12) is not there to read";
+
+  // The branch is the one guarded by peerSlotIsOurs; read it to its closing brace by counting.
+  int branch = -1;
+  for (size_t i = size_t(start); i < lines.size(); i++) {
+    if (lines[i].find("peerSlotIsOurs") != std::string::npos) {
+      branch = int(i);
+      break;
+    }
+    if (i > size_t(start) && lines[i].rfind("}", 0) == 0) break;  // the function ended first
+  }
+  ASSERT_GE(branch, 0) << "TwinOakMesh::onPeerPathRecv has no branch for the client's own peer:"
+                          " the extra peer in front is what the whole mesh client rests on"
+                          " (docs/ARCHITECTURE.md section 2)";
+
+  int depth = 0;
+  bool returns_false = false;
+  bool returns_other = false;
+  bool closed = false;
+  for (size_t i = size_t(branch); i < lines.size() && !closed; i++) {
+    const std::string code = withoutComment(lines[i]);
+    if (code.find("return") != std::string::npos) {
+      if (code.find("return false;") != std::string::npos) {
+        returns_false = true;
+      } else {
+        returns_other = true;
+      }
+    }
+    for (char c : code) {
+      if (c == '{') depth++;
+      if (c == '}') {
+        depth--;
+        if (depth <= 0) closed = true;
+      }
+    }
+  }
+  EXPECT_TRUE(returns_false) << "the branch of TwinOakMesh::onPeerPathRecv that takes the job"
+                                " peer's returned path does not return false - MeshCore then"
+                                " sends a reciprocal path and the send was two packets (S-12,"
+                                " one packet per send)";
+  EXPECT_FALSE(returns_other) << "that branch has a return that is not `return false;` - every"
+                                 " way out of it must leave the reciprocal path unsent (S-12)";
+}
+
+// ------------------------------------------------------------------------------------- rule 6
+
+TEST(Rails, Rule6_NothingThatCarriesAPasswordNamesTheFileSystem) {
+  // "A password is in RAM for the length of the exchange and nowhere else" (S-12). A SEND_LOGIN's
+  // password and a sensitive SEND_CLI's line pass through exactly four places: the link's codec
+  // (the frame, and the decoded views into its buffer), the link's session (which wipes that
+  // buffer after every send), the mesh client (which builds the plaintext and wipes it), and the
+  // one board file that turns that plaintext into a packet. **None of them names a file-system
+  // API at all** - no open, no File, no InternalFS - so no line of them can write those bytes to
+  // flash, deliberately or by a copy somebody adds later. The firmware's own two writers are
+  // src/clock/BoardClock.cpp (the clock file) and src/power/BoardPower.cpp (the preferences),
+  // and neither is on this path.
+  //
+  // What this does not catch: bytes handed to a directory that is allowed to write. Nothing does
+  // that today, and rule 2 - these directories do not print either - is the fence on the other
+  // side of the same path.
+  const fs::path root = projectRoot();
+  const char* const kFsNames[] = {"InternalFS", "LittleFS", "FILE_O_", "FILESYSTEM", "fopen",
+                                  "ofstream",   "fwrite",   "SdFat",   ".open(",     "->open("};
+  std::vector<fs::path> files;
+  for (const char* dir : {"link/codec", "link/session", "meshclient"}) {
+    for (const fs::path& f : filesUnder(root / "src" / dir)) files.push_back(f);
+  }
+  files.push_back(root / "src" / "app" / "TwinOakMesh.h");
+  files.push_back(root / "src" / "app" / "TwinOakMesh.cpp");
+  EXPECT_GT(files.size(), 15u) << "almost nothing on the password's path - is PROJECT_DIR right?";
+
+  for (const fs::path& file : files) {
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      const std::string code = withoutComment(raw);
+      for (const char* name : kFsNames) {
+        if (code.find(name) != std::string::npos) {
+          ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << name
+                        << "' - a SEND_LOGIN's password and a sensitive SEND_CLI's line pass"
+                           " through this file, and nothing on that path may reach the file"
+                           " system (S-12)";
+        }
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------------- rule 8
+
+TEST(Rails, Rule8_NoFileUnderSpecDiffersFromItsManifest) {
+  // spec/ is a copy and is never edited here (spec/README.md): the specification is changed where
+  // it lives and copied again with spec/tools/specsync.py, which writes spec/MANIFEST.txt - the
+  // SHA-256 and the byte count of every file. `specsync.py verify spec` is step 1 of
+  // tools/verify.ps1 and of CI; this is the same check in the native tests, so that a session
+  // which edits a file of spec/ by mistake is told by the tests and not only by the script.
+  const fs::path root = projectRoot();
+  // The implementation of SHA-256 used below, against the two vectors of FIPS 180-4, so that a
+  // mistake in it cannot pass this rail by hashing everything to the same wrong thing.
+  EXPECT_EQ("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            sha256Hex(std::vector<uint8_t>()))
+      << "the SHA-256 in this test is wrong, so rule 8 proves nothing";
+  const std::string abc = "abc";
+  EXPECT_EQ("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            sha256Hex(std::vector<uint8_t>(abc.begin(), abc.end())))
+      << "the SHA-256 in this test is wrong, so rule 8 proves nothing";
+
+  const fs::path spec = root / "spec";
+  ASSERT_TRUE(fs::is_directory(spec)) << "no spec/ under " << root;
+  std::ifstream manifest(spec / "MANIFEST.txt");
+  ASSERT_TRUE(manifest.good()) << "spec/MANIFEST.txt is gone: the copy has nothing to be held to";
+
+  std::set<std::string> listed;
+  std::string line;
+  int entries = 0;
+  while (std::getline(manifest, line)) {
+    const std::string t = trim(line);
+    if (t.empty() || t[0] == '#') continue;
+    std::istringstream in(t);
+    std::string digest, name;
+    unsigned long long bytes = 0;
+    in >> digest >> bytes >> name;
+    ASSERT_FALSE(name.empty()) << "spec/MANIFEST.txt has a line this test cannot read: " << t;
+    entries++;
+    listed.insert(name);
+    const fs::path file = spec / name;
+    if (!fs::is_regular_file(file)) {
+      ADD_FAILURE() << "spec/" << name << " is in MANIFEST.txt and not on disk: spec/ is a copy"
+                       " and is never edited here (spec/README.md)";
+      continue;
+    }
+    const std::vector<uint8_t> data = fileBytes(file);
+    EXPECT_EQ(bytes, (unsigned long long)data.size())
+        << "spec/" << name << " is " << data.size() << " bytes and its manifest says " << bytes
+        << ": spec/ is a copy and is never edited here - change the specification where it lives"
+           " and copy it with spec/tools/specsync.py (spec/README.md)";
+    EXPECT_EQ(digest, sha256Hex(data))
+        << "spec/" << name << " differs from its manifest: spec/ is a copy and is never edited"
+           " here (spec/README.md)";
+  }
+  EXPECT_GT(entries, 5) << "spec/MANIFEST.txt lists almost nothing - is PROJECT_DIR right?";
+
+  // And nothing on disk that the manifest does not list: a file added to the copy is as much an
+  // edit of it as a byte changed in one. The two files that belong to this repository rather than
+  // to the specification are MANIFEST.txt and README.md (spec/tools/specsync.py's own LOCAL set),
+  // and the tools are listed like everything else.
+  for (const fs::path& file : filesUnder(spec)) {
+    const std::string name = rel(spec, file);
+    if (name == "MANIFEST.txt" || name == "README.md" || name == ".gitattributes") continue;
+    if (name.find("__pycache__/") != std::string::npos) continue;
+    if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pyc") == 0) continue;
+    EXPECT_EQ(1u, listed.count(name))
+        << "spec/" << name << " is not in MANIFEST.txt: spec/ is a copy and is never edited here"
+           " - add the file where the specification lives and copy it (spec/README.md)";
+  }
+}
+
+TEST(Rails, Rule8_NoScriptWritesIntoThePinnedMeshCoreCheckout) {
+  // "MeshCore is not edited" (spec/SYSTEM.md S-2, CLAUDE.md): it is a pinned dependency under
+  // .pio/libdeps/<env>/MeshCore, read and compiled, never patched. Three scripts of ours reach
+  // into that checkout - they compile lib/ed25519 and the variant out of it and run its uf2conv -
+  // and this rail holds all three to reading: a line that names the checkout carries no
+  // write-like call, and no other script of tools/ or .github/ names it at all.
+  //
+  // What this does not catch: a path under the checkout assigned to a variable on one line and
+  // written through that variable on another. The allowlist below is the other half of the
+  // answer - a new script that reaches into the checkout fails here until somebody says so.
+  const fs::path root = projectRoot();
+  const char* const kCheckoutNames[] = {"PROJECT_LIBDEPS_DIR", "libdeps", "meshcore.dir"};
+  const char* const kWriteLike[] = {
+      "os.remove", "os.unlink",   "shutil.copy", "shutil.rmtree", "os.rename",
+      "makedirs",  "Set-Content", "Out-File",    "Remove-Item",   "Copy-Item",
+      "New-Item",  "sed -i",      "tee ",        ".write(",       "WriteFile",
+  };
+  const std::set<std::string> kMayReachIntoIt = {
+      "tools/pio/meshcore_private_libs.py",
+      "tools/pio/meshcore_uf2.py",
+      "tools/pio/meshcore_variant.py",
+  };
+
+  int named = 0;
+  for (const char* dir : {"tools", ".github"}) {
+    for (const fs::path& file : filesUnder(root / dir)) {
+      const std::string name = rel(root, file);
+      if (name.find("__pycache__/") != std::string::npos) continue;
+      int n = 0;
+      bool names_it = false;
+      for (const std::string& raw : linesOf(file)) {
+        n++;
+        bool here = false;
+        for (const char* needle : kCheckoutNames) {
+          if (raw.find(needle) != std::string::npos) here = true;
+        }
+        if (!here) continue;
+        names_it = true;
+        for (const char* w : kWriteLike) {
+          if (raw.find(w) != std::string::npos) {
+            ADD_FAILURE() << name << ":" << n << ": '" << w
+                          << "' on a line that names the pinned MeshCore checkout - MeshCore is a"
+                             " dependency and not one file of it is ever written (S-2)";
+          }
+        }
+      }
+      if (names_it) {
+        named++;
+        EXPECT_EQ(1u, kMayReachIntoIt.count(name))
+            << name << " reaches into the pinned MeshCore checkout and is not one of the three"
+                       " scripts that may: MeshCore is read and compiled, never written (S-2,"
+                       " docs/upstream.md)";
+      }
+    }
+  }
+  EXPECT_EQ(int(kMayReachIntoIt.size()), named)
+      << "the scripts that compile out of the pinned checkout are not the three this rail knows"
+         " about - docs/upstream.md lists them among the places a pin bump re-reads";
 }
 
 int main(int argc, char** argv) {

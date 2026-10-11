@@ -52,6 +52,12 @@ void noteAdvert(const meshclient::HeardAdvert& heard);
 bool obsWakeEnabled();
 void setObsWakeEnabled(bool on);
 
+// --- the mesh client's ceiling (tasks/phase-2/04-the-rails.md) ---------------------------------
+
+// Sends the mesh client's ceiling has refused since boot, which is what `sensor get
+// client.refused` answers (src/meshclient/SendCeiling.h). 0 before the client exists.
+uint32_t clientRefused();
+
 // --- what src/board/target.cpp reads for the settings -----------------------------------------
 
 // Frames the link's receiver dropped since boot, saturating (`link.errors`).

@@ -35,7 +35,7 @@ g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   src/link/attention/*.cpp src/clock/ClockKeeper.cpp src/app/Settings.cpp \
   src/meshclient/Job.cpp src/meshclient/LinkMeshClient.cpp \
   src/meshclient/LinkObservations.cpp src/meshclient/ObservationRing.cpp \
-  src/meshclient/Reply.cpp \
+  src/meshclient/Reply.cpp src/meshclient/SendCeiling.cpp \
   src/power/BatteryWatch.cpp src/power/Environment.cpp src/power/Ina3221.cpp \
   src/power/LinkPower.cpp src/power/PowerReader.cpp src/power/Prefs.cpp \
   src/power/Telemetry.cpp

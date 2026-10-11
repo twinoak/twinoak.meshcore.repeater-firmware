@@ -222,7 +222,7 @@ attention per reason per hour. It also holds the belief that the Walter is aslee
 The session asks it once a pass what to put on the wire and tells it when the bytes have gone, so
 every rule about *when* is in one file with a fake clock in front of it.
 
-Eight more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
+Nine more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
 `src/app/Settings.{h,cpp}`, portable and tested; the board's half is a dozen one-line readers and
 writers. They work from the USB console and from a mesh admin's `sensor get/set`, in this order,
 which is the order `sensor list` prints:
@@ -237,8 +237,9 @@ which is the order `sensor list` prints:
 | `power.low_mv` | the *battery low* threshold in millivolts | a decimal number of millivolts (§6) |
 | `power.crit_mv` | the *battery critical* threshold | the same |
 | `obs.wake` | `0` or `1`: whether a filling observation ring may ask for a sleeping Walter | `0` or `1`; off at boot and per boot (§7) |
+| `client.refused` | mesh-client sends the ceiling refused since boot - 0 on a healthy unit (§7) | — |
 
-Eight keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
+Nine keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
 160-byte buffer, so a fresh node prints the first five and `... next:5` and `sensor list 5` is
 the rest. The order is task 05's five with the later tasks' appended, which is the only place a
 new key can go without renumbering one a bench instruction or a document already names.
@@ -355,7 +356,8 @@ where that file blocks in `await()`.
   reply record, tag matching, the path learned from a returned path.
 - **Sends** (board): build one packet with MeshCore's own primitives, send it direct along the
   job's path or as a flood with two-byte hashes, wipe the plaintext if it held a password, count
-  it. Refuse a second send while a reply is awaited.
+  it. Refuse a second send while a reply is awaited, and refuse one that is over the ceiling
+  below.
 - **Replies**: through the extra peer of §2, and only while awaiting.
 - **Observations** (portable, tested natively): every advert that verified goes to upstream
   first (its neighbour table), then into a ring of **64** records of `LINK-PROTOCOL.md` §7 that
@@ -369,6 +371,77 @@ where that file blocks in `await()`.
 
 What it deliberately is not: a chat client. No contacts, no channels, no acknowledgements, no
 reciprocal path returns. One send is one packet.
+
+### The ceiling on what the client may send
+
+The Walter's agent paces itself to a budget the MeshMaster server sets - `budget 2/min gap 20 s`
+by default (twinoak/meshmaster-agent-firmware's README at `51faafb4`). The RAK enforces a ceiling
+that budget cannot reach: **at most 6 sends in any 60 seconds and at least 2 seconds between two**
+(`src/meshclient/SendCeiling.h`, portable, tested against a fake clock). Over it a send is refused
+`ERR_BUSY` before anything is built and counted in `sensor get client.refused`; the ceiling is
+counted in the same two lines as `client_tx`, so the two cannot disagree about what a send is, and
+a refused send costs nothing - it does not enter the window and does not restart the gap. The
+limits are build constants and not settings: a limit the Walter could raise would be no backstop
+against the Walter. A Walter told `ERR_BUSY` tells the two causes apart by `STATUS`'s flag bit 1,
+which is set when a reply was awaited and clear when it was the ceiling.
+
+### Repeating comes first
+
+Two questions about upstream, read out of the pinned checkout (`d9296435`), because this is the
+one place where our traffic could cost the mesh something.
+
+**The duty cycle covers our packets too.** There is one outbound queue and one budget.
+`Dispatcher::sendPacket` puts every packet - ours and every one being forwarded - into the same
+`PacketManager::queueOutbound` (`src/Dispatcher.cpp:371-378`); `Dispatcher::checkSend` is the only
+thing that takes one out (`:275-354`), and before it does it refuses to transmit at all while
+`tx_budget_ms` is below half the estimated airtime of a maximum packet (`:279-286`). When a send
+completes, the budget is decremented by its **measured** airtime (`:88-98`), whoever originated it.
+So our 6 sends a minute are inside upstream's accounting and not beside it. The budget is
+**this repeater's own setting**: `MyMesh` overrides `getAirtimeBudgetFactor()` to return
+`_prefs.airtime_factor` (`examples/simple_repeater/MyMesh.h:134-137`), its constructor sets that to
+`1.0` (`MyMesh.cpp:890`), and a console `set dutycycle <1..100>` or `set af <x>` changes it and
+saves it (`src/helpers/CommonCLI.cpp:450-461`, `:809-814`). At the default the duty cycle is 1/2
+and the budget fills to 1 800 000 ms of a 3 600 000 ms window. Six of the longest packets this
+client can build is some 13 s a minute - about 22 % - on a channel where one 186-byte packet is
+about 1.7 s (869.618 MHz, 62.5 kHz, SF8, CR8, 32 preamble symbols); the exchange a server actually
+asks for is some 2 %. **The one interaction worth knowing**: a unit someone has set to a duty
+cycle below about 22 % could have upstream's budget saturated by a Walter sending six maximum-size
+packets a minute - and then upstream delays the next transmission rather than refusing it, so
+nothing is lost and the ceiling is still what stops the Walter. That is why the ceiling is about
+the mesh's patience and upstream's budget is about the band: only upstream's can hold the
+regulatory limit, because only upstream's sees the hundreds of packets a busy repeater forwards.
+
+**A client send can delay a forward by its own airtime and no more.** The queue is a flat table
+picked over by priority, lowest number first, and ties go to whichever was added first
+(`PacketQueue::get`, `src/helpers/StaticPoolPacketManager.cpp:22-44`). What the numbers are:
+
+| what | priority |
+|---|---|
+| a forward of routed (direct) traffic | **0** - "Routed traffic is HIGHEST priority" (`src/Mesh.cpp:106`) |
+| **our direct sends** (a login, a request, a CLI line along a path) | **0** (`Mesh::sendDirect`, `:693-715`) |
+| a forward of a flood | **its hop count after ours is appended**, so 1 for a direct neighbour's and more as it propagates (`Mesh::routeRecvPacket`, `:344-357`) |
+| **our floods** | **1** (`Mesh::sendFlood`, `:637-662`; 2 for a PATH, 3 for an advert) |
+| a forward of a trace, and **our traces** | **5** (`:64`, `:698-704`) |
+
+So a send of ours never jumps a forward of routed traffic that is already queued - equal priority,
+first added wins - and it is ahead of a flood forward that has travelled two hops or more. Being
+ahead costs that forward exactly the airtime of our packet: one packet, then the queue is picked
+over again. Two things do not change that. While a send is in flight `Dispatcher::loop()` returns
+early (`src/Dispatcher.cpp:126`), so nothing else is processed - but that is true of every packet
+upstream sends, ours or a forward, and a radio that is transmitting could not be receiving anyway.
+And when a completed send leaves `tx_budget_ms` below `MIN_TX_BUDGET_RESERVE_MS` (100 ms) the next
+transmission is pushed out (`:99-102`) - which is 100 ms out of a budget of 1 800 000 and needs
+the node to have transmitted for half the hour before it can be reached at all. **No fix is
+needed, and none is proposed.** What would need one: a client that could queue several packets at
+once, which the ceiling's 2-second gap also forbids.
+
+One shared resource is worth naming, because it is not the queue: the **packet pool** is 32
+packets (`new StaticPoolPacketManager(32)`, `examples/simple_repeater/MyMesh.cpp:863`) and a
+client send holds one from the moment it is built until the radio has sent it. A received packet
+that finds the pool empty is dropped (`Dispatcher::checkRecv`, `src/Dispatcher.cpp:201-203`). With
+at least 2 seconds between our sends and about 1.7 s of airtime for the longest of them, ours
+holds one entry at a time in anything but a pathological case - and the pathological case is a
+radio that cannot transmit, where the 31 entries left are not what the node's trouble is.
 
 ## 8. The family: roles, boards, bands
 
@@ -421,7 +494,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | the console over the link, our settings, the attention machine | ✔ against fakes, and the `CLI`, `SLEEP_NOTICE` and `EV_ATTENTION` fixtures through the real session | upstream's interpreter behind it | every console command, and a mesh admin waking the box |
 | clock rules, the boot order, the file's rate | ✔ against fakes, and the `TIME_SET` fixture through the real session | the flash file, the RTC probe | a reboot keeps time moving forward |
 | shunt arithmetic, the two readers' schedules, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part, and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view |
-| job state, reply matching | ✔ | the overrides, the sends | a login to a real repeater |
+| job state, reply matching, the send ceiling | ✔ (the ceiling against a fake clock, and through a real session) | the overrides, the sends | a login to a real repeater |
 | the observation ring, the pull's payload fitting, the RSSI note table, `obs.wake` | ✔ against fakes, and the `OBS_PULL` fixture through the real session | advert capture, the two overrides | adverts heard on the roof |
 | descriptor, manifest | ✔ against the fixtures | placement in the image | the Walter reads it |
 

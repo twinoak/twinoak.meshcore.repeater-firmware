@@ -2023,6 +2023,12 @@ struct ClientRig {
     uint8_t type = 0, seq = 0;
     return answeredStatus(h, type, seq);
   }
+
+  // Lets the send ceiling's two-second gap pass (src/meshclient/SendCeiling.h). Every test that
+  // makes a second successful send through one rig says this, because the firmware refuses one
+  // that follows another inside two seconds - and saying it is cheaper than a seam that would
+  // let a test turn the ceiling off.
+  void gap() { h.now += twinoak::meshclient::kCeilingGapMs; }
 };
 
 // The fixture's request frame of this type and seq, with the seq changed: the payload is the
@@ -2331,11 +2337,16 @@ TEST(TheFiveSends, WhatCannotBeSentIsRefusedBeforeAnythingIsBuilt) {
   EXPECT_EQ(0u, r.client.clientTx());
   EXPECT_FALSE(r.job.awaiting());
 
+  // Ten refusals and the ceiling is untouched: none of them was a send, so the next legitimate
+  // one is admitted at once (src/meshclient/SendCeiling.h).
+  EXPECT_EQ(0u, r.client.refused()) << "nothing above was refused by the ceiling";
+
   // And the two that are legal and nearly were not: 148 bytes of line, 162 bytes of data.
   std::vector<uint8_t> line = {0x00};
   line.insert(line.end(), 148, 'y');
   r.answer(frameOf(kMsgSendCli, 70, sendPayload(0, line)));
   EXPECT_EQ(kOk, r.lastStatus());
+  r.gap();
   std::vector<uint8_t> data = {0x01};
   data.insert(data.end(), 162, 0xab);
   r.answer(frameOf(kMsgSendRequest, 71, sendPayload(0, data)));
@@ -2344,11 +2355,75 @@ TEST(TheFiveSends, WhatCannotBeSentIsRefusedBeforeAnythingIsBuilt) {
   EXPECT_EQ(167u, r.port.sent[1].plain.size()) << "the longest plaintext a datagram carries";
 
   // A pool with no packet left is ERR_FAILED: tried and failed, nothing counted, nothing awaited.
+  r.gap();
   r.port.fail = true;
   r.answer(requestFrame(kMsgSendLogin, 23, 72));
   EXPECT_EQ(kErrFailed, r.lastStatus());
   EXPECT_EQ(2u, r.client.clientTx());
   EXPECT_FALSE(r.job.awaiting());
+}
+
+TEST(TheFiveSends, TheCeilingRefusesTheSeventhSendOfAMinuteAndTheOneInsideTwoSeconds) {
+  // The backstop of tasks/phase-2/04-the-rails.md, through the real session and the real client:
+  // at most six sends in any sixty seconds, at least two seconds apart, over the ceiling
+  // ERR_BUSY and counted. The limiter itself is tested against a fake clock in
+  // test/test_meshclient; this is that limiter where the Walter meets it.
+  ClientRig r;
+  r.beginJob(kPathNone);
+  const uint32_t first = r.h.now;
+  uint8_t seq = 80;
+  for (uint8_t i = 0; i < twinoak::meshclient::kCeilingSends; i++) {
+    if (i > 0) r.gap();
+    r.answer(frameOf(kMsgSendRequest, seq++, sendPayload(0, {0x01})));
+    ASSERT_EQ(kOk, r.lastStatus()) << "send " << int(i) << " of the minute";
+  }
+  EXPECT_EQ(uint32_t(twinoak::meshclient::kCeilingSends), r.client.clientTx());
+  EXPECT_EQ(size_t(twinoak::meshclient::kCeilingSends), r.port.sent.size());
+  EXPECT_EQ(0u, r.client.refused());
+
+  // The seventh, with the gap kept and nothing awaited: refused, nothing on the air, counted.
+  r.gap();
+  r.answer(frameOf(kMsgSendRequest, seq++, sendPayload(0, {0x01})));
+  EXPECT_EQ(kErrBusy, r.lastStatus()) << "the seventh send inside the window";
+  EXPECT_FALSE(r.job.awaiting()) << "STATUS flag bit 1 is clear: this ERR_BUSY is the ceiling";
+  EXPECT_EQ(size_t(twinoak::meshclient::kCeilingSends), r.port.sent.size());
+  EXPECT_EQ(uint32_t(twinoak::meshclient::kCeilingSends), r.client.clientTx())
+      << "a refused send is not counted as one";
+  EXPECT_EQ(1u, r.client.refused());
+
+  // Every one of the five is refused the same way while the window is full, and each try costs
+  // the Walter nothing but the count.
+  struct Refused {
+    uint8_t type;
+    uint8_t fixture_seq;
+  };
+  const Refused others[] = {{kMsgSendLogin, 23},
+                            {kMsgSendCli, 28},
+                            {kMsgSendDiscovery, 30},
+                            {kMsgSendTrace, 31}};
+  for (const Refused& o : others) {
+    r.answer(requestFrame(o.type, o.fixture_seq, seq++));
+    EXPECT_EQ(kErrBusy, r.lastStatus()) << "type 0x" << std::hex << int(o.type) << std::dec;
+  }
+  EXPECT_EQ(5u, r.client.refused());
+  EXPECT_EQ(size_t(twinoak::meshclient::kCeilingSends), r.port.sent.size());
+
+  // The window slides. The six went at `first`, `first + 2000`, ... `first + 10000`; one window
+  // after the first of them that one has left it and exactly one more send goes.
+  r.h.now = first + twinoak::meshclient::kCeilingWindowMs;
+  r.answer(frameOf(kMsgSendRequest, seq++, sendPayload(0, {0x01})));
+  EXPECT_EQ(kOk, r.lastStatus()) << "the oldest of the six has left the window";
+  EXPECT_EQ(uint32_t(twinoak::meshclient::kCeilingSends) + 1, r.client.clientTx());
+
+  // And the gap, which is the limit a mistake meets first: a millisecond short of two seconds the
+  // refusal is the gap's, not the window's - four of the six are still inside it.
+  r.h.now += twinoak::meshclient::kCeilingGapMs - 1;
+  r.answer(frameOf(kMsgSendRequest, seq++, sendPayload(0, {0x01})));
+  EXPECT_EQ(kErrBusy, r.lastStatus()) << "a millisecond short of the two-second gap";
+  EXPECT_EQ(6u, r.client.refused());
+  r.h.now += 1;
+  r.answer(frameOf(kMsgSendRequest, seq++, sendPayload(0, {0x01})));
+  EXPECT_EQ(kOk, r.lastStatus()) << "the gap, exactly";
 }
 
 TEST(TheFiveSends, ARetriedSendTransmitsNothingAndAnswersTheSame) {
@@ -2611,6 +2686,7 @@ TEST(TheReply, WhatIsNotTheAwaitedReplyIsDroppedThroughTheClient) {
   // A CLI line: a response is dropped, a text of another type is dropped.
   r.h.sent.clear();
   r.h.run();  // the event goes
+  r.gap();
   r.answer(requestFrame(kMsgSendCli, 28, 28));
   EXPECT_EQ(kOk, r.lastStatus());
   EXPECT_FALSE(r.client.onResponse(right.data(), right.size(), false, 0, 0, r.h.now))
@@ -2656,6 +2732,7 @@ TEST(TheReply, TheRecordIsLetGoByTheNextSendJobBeginAndJobEnd) {
   EXPECT_EQ(kReplyResponse, r.client.reply().state());
 
   // A send with timeout 0 awaits nothing and lets the record go.
+  r.gap();
   r.answer(frameOf(kMsgSendRequest, 27, sendPayload(0, {0x01})));
   EXPECT_EQ(kOk, r.lastStatus());
   EXPECT_FALSE(r.job.awaiting());
@@ -2663,6 +2740,7 @@ TEST(TheReply, TheRecordIsLetGoByTheNextSendJobBeginAndJobEnd) {
   EXPECT_EQ(2u, r.client.clientTx()) << "counted all the same";
 
   // JOB_END while a reply is awaited: nothing awaited, nothing held, no event.
+  r.gap();
   r.answer(frameOf(kMsgSendRequest, 28, sendPayload(5000, {0x01})));
   EXPECT_TRUE(r.job.awaiting());
   r.answer(frameOf(kMsgJobEnd, 29, {}));
@@ -2683,6 +2761,7 @@ TEST(TheReply, TheRecordIsLetGoByTheNextSendJobBeginAndJobEnd) {
   EXPECT_EQ(kReplyNone, r.client.reply().state());
 
   // And the silence rule, which ends the job by itself.
+  r.gap();
   r.answer(frameOf(kMsgSendRequest, 32, sendPayload(500000, {0x01})));
   EXPECT_TRUE(r.job.awaiting());
   r.h.now += twinoak::meshclient::kIdleEndMs;
@@ -2731,9 +2810,14 @@ TEST(TheCounters, MeshCountersReadsTheRadioTheClientAndTheRing) {
   r.h.observations.obs_lost = f["obs_dropped"].as<uint32_t>();
   const uint32_t sends = f["client_tx"].as<uint32_t>();
   for (uint32_t i = 0; i < sends; i++) {
+    // Twenty seconds apart, which is the gap the MeshMaster server's default budget asks of the
+    // Walter: 42 sends at that pace never meet the RAK's ceiling of six a minute, which is the
+    // whole point of where the ceiling was put (src/meshclient/SendCeiling.h).
+    if (i > 0) r.h.now += 20000;
     r.answer(frameOf(kMsgSendRequest, uint8_t(100 + i), sendPayload(0, {0x01})));
     ASSERT_EQ(kOk, r.lastStatus()) << "send " << i;
   }
+  EXPECT_EQ(0u, r.client.refused()) << "a paced Walter is never refused";
   EXPECT_EQ(sends, r.client.clientTx());
   EXPECT_EQ(size_t(sends), r.port.sent.size());
 

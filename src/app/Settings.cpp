@@ -8,20 +8,20 @@ namespace {
 
 // The order `sensor list` prints, and the order upstream's paging counts in. **It is phase 1's
 // task 05's order of five keys with the later tasks' appended** - task 06's two thresholds, then
-// phase 2's task 03's `obs.wake` - which is the only place a new key can go without renumbering
-// one a bench instruction or a document already names (docs/link.md, docs/bench.md,
-// tasks/phase-1/reports/05.md).
+// phase 2's task 03's `obs.wake` and its task 04's `client.refused` - which is the only place a
+// new key can go without renumbering one a bench instruction or a document already names
+// (docs/link.md, docs/bench.md, tasks/phase-1/reports/05.md).
 //
 // That order was chosen for one quirk of upstream's: `sensor list` stops adding lines once it has
 // written **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp at the pin d9296435),
 // and the `fw.version` line alone is 78 of them. With five keys everything fitted on one page.
-// With seven it does not, and what the order buys is that **the key pushed off is pushed by a
+// With nine it does not, and what the order buys is that **the key pushed off is pushed by a
 // width and the pair of thresholds stays together**:
 //
 //   - a fresh node lists all five of task 05's and `... next:5`, 159 bytes of the 160;
 //   - a node whose counters have grown wide lists four and `... next:4`;
-//   - `sensor list 5` is then how the two thresholds and `obs.wake` are read, and
-//     `sensor get <key>` always works whatever the paging does.
+//   - `sensor list 5` is then how the two thresholds, `obs.wake` and `client.refused` are read,
+//     and `sensor get <key>` always works whatever the paging does.
 //
 // A listing that would be longer than the window is **cut, not spilled**: the session keeps 64
 // guard bytes behind upstream's 160 and counts the cut (src/link/session/Session.h,
@@ -39,12 +39,13 @@ enum Key : int {
   kPowerLowMv,
   kPowerCritMv,
   kObsWake,
+  kClientRefused,
   kKeyCount,
 };
 
 const char* const kNames[kKeyCount] = {
-    "fw.version",  "walter.wake",  "link.errors",   "walter.seen",
-    "clock.state", "power.low_mv", "power.crit_mv", "obs.wake",
+    "fw.version",   "walter.wake",   "link.errors", "walter.seen", "clock.state",
+    "power.low_mv", "power.crit_mv", "obs.wake",    "client.refused",
 };
 
 // A decimal millivolt value, with nothing else in it: "3500" yes, "3500 " no, "3.5" no, "+3500"
@@ -97,6 +98,11 @@ const char* Settings::value(int i) {
       // "0" or "1": whether a filling observation ring may ask for a sleeping Walter
       // (LINK-PROTOCOL.md section 8, reason 5). Off at boot.
       return host_.obsWake() ? "1" : "0";
+    case kClientRefused:
+      // Sends the mesh client's ceiling refused since boot (src/meshclient/SendCeiling.h). 0 on
+      // every node whose Walter paces itself to the server's budget, which is every healthy one.
+      snprintf(buf_, sizeof(buf_), "%lu", (unsigned long)host_.clientSendsRefused());
+      return buf_;
     default:
       return nullptr;
   }
@@ -127,7 +133,7 @@ bool Settings::set(const char* name, const char* value) {
     host_.setObsWake(on);
     return true;
   }
-  return false;  // the other four are read-only
+  return false;  // the other five are read-only
 }
 
 }  // namespace twinoak

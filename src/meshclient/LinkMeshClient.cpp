@@ -53,12 +53,20 @@ uint8_t LinkMeshClient::getPath(link::Path& out) {
 
 // ----------------------------------------------------------------------------- the sends (6.2)
 
-uint8_t LinkMeshClient::gate(bool needs_job) const {
+uint8_t LinkMeshClient::gate(bool needs_job, uint32_t now_ms) {
   // In the order section 6.2 lists them: no job, then a reply still awaited. A trace needs no
   // job, but it cannot be sent while something else's reply is awaited either - one exchange at
   // a time.
   if (needs_job && !job_.begun()) return link::kErrState;
   if (job_.awaiting()) return link::kErrBusy;
+  // And then ours: the ceiling (SendCeiling.h). Last of the three, so that a Walter with no job
+  // is told that and so that nothing a request was going to be refused for anyway is counted
+  // here. kErrBusy again, which is 6.2's word for "not now" - the Walter tells the two apart by
+  // STATUS's flag bit 1, which is clear when it was the ceiling and set when a reply was awaited.
+  if (!ceiling_.admits(now_ms)) {
+    ceiling_.noteRefused();
+    return link::kErrBusy;
+  }
   return link::kOk;
 }
 
@@ -76,6 +84,10 @@ Route LinkMeshClient::routeOfJob() const {
 void LinkMeshClient::sent(uint8_t await_kind, uint32_t tag, uint32_t sender_ts, bool flooded,
                           uint32_t timeout_ms, link::SendResponse& out, uint32_t now_ms) {
   client_tx_++;  // one per send, and nothing else (6.4)
+  // The ceiling is counted in the same two lines as client_tx, and nowhere else: whatever counts
+  // as a send for the Walter's transaction count counts as one against the ceiling
+  // (SendCeiling.h).
+  ceiling_.noteSent(now_ms);
   out.send = flooded ? link::kSendFlood : link::kSendDirect;
   out.tag = tag;
   out.sender_ts = sender_ts;
@@ -94,7 +106,7 @@ void LinkMeshClient::sent(uint8_t await_kind, uint32_t tag, uint32_t sender_ts, 
 
 uint8_t LinkMeshClient::sendLogin(const link::SendLogin& m, link::SendResponse& out,
                                   uint32_t now_ms) {
-  const uint8_t g = gate(/*needs_job=*/true);
+  const uint8_t g = gate(/*needs_job=*/true, now_ms);
   if (g != link::kOk) return g;
   // The codec has held the password to kLoginPasswordMax already; a longer one is kErrRange here
   // for the one caller that is not the codec.
@@ -127,7 +139,7 @@ uint8_t LinkMeshClient::sendLogin(const link::SendLogin& m, link::SendResponse& 
 
 uint8_t LinkMeshClient::sendRequest(const link::SendRequest& m, link::SendResponse& out,
                                     uint32_t now_ms) {
-  const uint8_t g = gate(/*needs_job=*/true);
+  const uint8_t g = gate(/*needs_job=*/true, now_ms);
   if (g != link::kOk) return g;
   // Mesh::createDatagram refuses a plaintext past 167 bytes (src/Mesh.cpp:490); said here as a
   // range rather than found out as a failure.
@@ -152,7 +164,7 @@ uint8_t LinkMeshClient::sendRequest(const link::SendRequest& m, link::SendRespon
 
 uint8_t LinkMeshClient::sendCli(const link::SendCli& m, link::SendResponse& out,
                                 uint32_t now_ms) {
-  const uint8_t g = gate(/*needs_job=*/true);
+  const uint8_t g = gate(/*needs_job=*/true, now_ms);
   if (g != link::kOk) return g;
   // The codec has held the line to 1..kSendCliTextMax already (decodeSendCli).
   if (m.text.len < 1 || m.text.len > link::kSendCliTextMax) return link::kErrRange;
@@ -184,7 +196,7 @@ uint8_t LinkMeshClient::sendCli(const link::SendCli& m, link::SendResponse& out,
 
 uint8_t LinkMeshClient::sendDiscovery(const link::SendDiscovery& m, link::SendResponse& out,
                                       uint32_t now_ms) {
-  const uint8_t g = gate(/*needs_job=*/true);
+  const uint8_t g = gate(/*needs_job=*/true, now_ms);
   if (g != link::kOk) return g;
 
   // AgentMesh::sendDiscovery, which is the companion's own CMD_SEND_PATH_DISCOVERY_REQ: "'Path
@@ -211,7 +223,7 @@ uint8_t LinkMeshClient::sendDiscovery(const link::SendDiscovery& m, link::SendRe
 uint8_t LinkMeshClient::sendTrace(const link::SendTrace& m, link::SendResponse& out,
                                   uint32_t now_ms) {
   // "SEND_TRACE needs no job" (6.2): a trace is addressed to nobody - the path is the packet.
-  const uint8_t g = gate(/*needs_job=*/false);
+  const uint8_t g = gate(/*needs_job=*/false, now_ms);
   if (g != link::kOk) return g;
 
   // A trace states its hash size as an exponent in the low two bits of its flags byte: every

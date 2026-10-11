@@ -256,6 +256,10 @@ bool attentionPending() { return g_attention.pendingReason() != kAttentionNone; 
 
 bool walterAsleep() { return g_attention.walterAsleep(); }
 
+uint32_t clientRefused() {
+  return g_mesh_client == nullptr ? 0 : g_mesh_client->refused();
+}
+
 uint16_t linkErrors() { return g_session.linkErrors(); }
 bool walterEverSeen() { return g_session.everSawRequest(); }
 uint32_t walterSeenSecondsAgo() { return g_session.secondsSinceRequest(millis()); }
