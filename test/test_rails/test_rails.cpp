@@ -328,7 +328,9 @@ TEST(Rails, NothingUnderThePortableLinkOrTheClockAllocatesOrHoldsAString) {
   // (section 5). The link's transport is not here: it is the file that is allowed to know about
   // Arduino. src/clock/ is here whole, BoardClock.cpp included - the file system's own
   // allocation is the core's, inside File::open, and nothing of ours has a reason to add to it.
-  const char* const kDirs[] = {"link/codec", "link/session", "clock"};
+  // src/meshclient/ is the mesh client's portable state (section 7): the job, its path and the
+  // shared secret's buffer, which is given its memory once and wipes it rather than freeing it.
+  const char* const kDirs[] = {"link/codec", "link/session", "clock", "meshclient"};
   // The names, and whether a whole-identifier match is what to look for: `new` must not match
   // `renew`, where `std::string` is not an identifier at all.
   const std::pair<std::string, bool> kForbidden[] = {

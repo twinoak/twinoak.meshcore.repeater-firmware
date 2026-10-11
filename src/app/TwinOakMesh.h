@@ -4,12 +4,13 @@
 // MyMesh is MeshCore's examples/simple_repeater/MyMesh.{h,cpp}, compiled from the pin by
 // build_as_lib.py (-D BUILD_EXAMPLE=simple_repeater) with only its main.cpp left out
 // (-D EXCLUDE_FROM_EXAMPLE=main.cpp). Not one line of it is edited: everything of ours hangs on the
-// virtuals below. Local management, power and the mesh client are added here later.
+// virtuals below. Local management and power reach upstream elsewhere (src/link/BoardLink.cpp,
+// src/board/target.h); what is here is the clock keeper's four hooks and the mesh client's peer.
 //
-// What they do today is tell the clock keeper that something carrying this node's clock has gone,
-// or may have gone, on the air - which is what makes a backwards TIME_SET unsafe
+// **The clock.** Four of the overrides tell the clock keeper that something carrying this node's
+// clock has gone, or may have gone, on the air - which is what makes a backwards TIME_SET unsafe
 // (spec/LINK-PROTOCOL.md section 5.4, src/clock/ClockKeeper.h). The four places are the four
-// places upstream can put our clock into a packet, and each calls its base and nothing else:
+// places upstream can put our clock into a packet:
 //
 //   - `sendSelfAdvertisement`, which createAdvert() stamps with getCurrentTime()
 //     (src/Mesh.cpp:418). Ours is the main.cpp that sends the boot advert, so that one comes
@@ -21,12 +22,23 @@
 //     regions / owner / clock replies from getCurrentTime() (MyMesh.cpp:148-200), and
 //     handleRequest's own telemetry from the sensors. Upstream decides whether to reply at all,
 //     so these three are deliberately read as "may have": a packet from a stranger that upstream
-//     rate-limits away still counts, which errs towards refusing a backwards set.
+//     rate-limits away still counts, which errs towards refusing a backwards set. A packet the
+//     mesh client's own peer takes (below) is not one of them: upstream never sees it and
+//     answers nothing.
 //
 // Upstream's *periodic* adverts are upstream's own (MyMesh::loop, MyMesh.cpp:1294-1305) and are
 // not hooked: the first of them cannot fire before two minutes (updateAdvertTimer at the default
 // advert_interval of 1, which is 2 minutes, and 47 hours for the flood one), by which time the
 // advert hold has lifted and the boot advert has already said so.
+//
+// **The mesh client's peer** (ARCHITECTURE section 2, "an extra peer in front"; phase 2's task
+// 01). The job the Walter begins over the link (src/meshclient/Job.h) has one peer, and while a
+// reply from it is awaited the four peer overrides put that peer **in front of** upstream's own
+// matches: index 0 is ours, every other index is upstream's shifted down by one
+// (src/meshclient/PeerSlot.h). With no job, or a job with no reply awaited, each of the four is
+// upstream's result and nothing else - TwinOakMesh.cpp says so above each, and that sentence is
+// the proof that the repeater is undisturbed. Nothing is transmitted by this task; the sends are
+// task 02's.
 //
 // Every override below carries `override`, so a pin bump that makes one of these private, renames
 // it or changes its signature is a compile error on the bump's own pull request and not a method
@@ -35,6 +47,10 @@
 
 #pragma once
 
+#include <stdint.h>
+
+#include "../meshclient/Job.h"
+#include "../meshclient/LinkMeshClient.h"
 #include "UpstreamMyMesh.h"
 
 class TwinOakMesh : public MyMesh {
@@ -43,10 +59,23 @@ class TwinOakMesh : public MyMesh {
   // defined at MyMesh.cpp:861).
   using MyMesh::MyMesh;
 
+  // The mesh client's state - the job, its path, what is awaited, the shared secret - and the
+  // box link's view of it (src/link/BoardLink.cpp hands meshClient() to the session, which is
+  // what puts MESH_CLIENT in HELLO's caps).
+  twinoak::meshclient::Job& job() { return job_; }
+  const twinoak::meshclient::Job& job() const { return job_; }
+  twinoak::meshclient::LinkMeshClient& meshClient() { return client_; }
+
+  // Packets the extra peer took: a data packet (a RESPONSE or a TXT_MSG that verified with the
+  // job's secret) and a PATH. Task 02 reads them as replies; today they are counted and nothing
+  // else, which is this task's whole use of the peer.
+  uint32_t peerDataTaken() const { return peer_data_taken_; }
+  uint32_t peerPathTaken() const { return peer_path_taken_; }
+
  protected:
   // --- the peer path: how a packet addressed to us finds the peer that sent it ------------------
   //
-  // Mesh::onRecvPacket (src/Mesh.cpp:41; the peer loop is lines 147-186 at the pin) handles a
+  // Mesh::onRecvPacket (src/Mesh.cpp:41; the peer loop is lines 149-186 at the pin) handles a
   // PATH / REQ / RESPONSE / TXT_MSG whose destination hash is ours by calling, in this order:
   //   num = searchPeersByHash(&src_hash);                   how many known peers match the hash
   //   for j in 0..num-1:  getPeerSharedSecret(secret, j);   then MACThenDecrypt with it
@@ -54,23 +83,27 @@ class TwinOakMesh : public MyMesh {
   //                                 onPeerDataRecv(pkt, type, j, ...)  for the other three
   //     then break.
   // The order - index 0 is tried first, the first MAC that verifies wins - is what the mesh
-  // client's "extra peer in front" (ARCHITECTURE section 2, phase 2) rests on. It cannot be
-  // checked by the compiler, which is why the function is cited here with the pin.
+  // client's "extra peer in front" rests on. It cannot be checked by the compiler, which is why
+  // the function is cited here with the pin, and why docs/upstream.md lists it among the places
+  // a bump re-reads.
 
   // Declared `int searchPeersByHash(const uint8_t* hash) override;` under `protected:` in
   // MyMesh.h; virtual in mesh::Mesh (src/Mesh.h:78). Upstream's definition (MyMesh.cpp:623) fills
-  // its private matching_peer_indexes[] from the ACL and returns the count.
+  // its private matching_peer_indexes[] from the ACL and returns the count. Ours: upstream's
+  // count, plus one in front when a reply is awaited and the job's peer matches the hash.
   int searchPeersByHash(const uint8_t* hash) override;
 
   // Declared `void getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) override;` under
   // `protected:` in MyMesh.h; virtual in mesh::Mesh (src/Mesh.h:85). Upstream (MyMesh.cpp:633)
-  // copies the ACL entry's pre-computed shared secret for matching_peer_indexes[peer_idx].
+  // copies the ACL entry's pre-computed shared secret for matching_peer_indexes[peer_idx]. Ours:
+  // the job's ECDH secret for our index, upstream's for the rest with the index shifted.
   void getPeerSharedSecret(uint8_t* dest_secret, int peer_idx) override;
 
   // Declared `void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const
   // uint8_t* secret, uint8_t* data, size_t len) override;` under `protected:` in MyMesh.h; virtual
   // in mesh::Mesh (src/Mesh.h:95). Upstream (MyMesh.cpp:663) runs a REQ from a known client
-  // through handleRequest() and answers it.
+  // through handleRequest() and answers it, and runs a TXT_MSG from an admin through the CLI.
+  // Ours: a counter for our index, upstream's for the rest with the index shifted.
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret,
                       uint8_t* data, size_t len) override;
 
@@ -78,7 +111,8 @@ class TwinOakMesh : public MyMesh {
   // uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len)
   // override;` under `protected:` in MyMesh.h; virtual in mesh::Mesh (src/Mesh.h:116). Upstream
   // (MyMesh.cpp:766) stores the path on the client's ACL entry and returns false (no reciprocal
-  // path).
+  // path). Ours: a counter and false for our index, upstream's for the rest with the index
+  // shifted.
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path,
                       uint8_t path_len, uint8_t extra_type, uint8_t* extra,
                       uint8_t extra_len) override;
@@ -126,4 +160,20 @@ class TwinOakMesh : public MyMesh {
   // (MyMesh.cpp:1031) builds the advert with createSelfAdvert() - which stamps it with the
   // clock - and sends it zero-hop or flooded.
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
+
+ private:
+  // The job's ECDH secret, calculated once per job on first need from this node's private key
+  // (mesh::LocalIdentity::calcSharedSecret, src/Identity.h:81) into the job's own buffer, which
+  // is where it is wiped when the job ends.
+  const uint8_t* sharedSecret();
+
+  twinoak::meshclient::Job job_;
+  twinoak::meshclient::LinkMeshClient client_{job_};
+  // Whether the extra peer is in front for the packet Mesh::onRecvPacket is handling now: set by
+  // searchPeersByHash() - the first of the four calls, every time - and read by the three that
+  // follow it, exactly as upstream's own matching_peer_indexes[] is filled by its
+  // searchPeersByHash() and read by its three. False at every moment no reply is awaited.
+  bool extra_ = false;
+  uint32_t peer_data_taken_ = 0;
+  uint32_t peer_path_taken_ = 0;
 };

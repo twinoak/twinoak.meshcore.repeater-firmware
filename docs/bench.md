@@ -284,3 +284,19 @@ of them is the exit criterion of the whole phase.
   the pack at 3.2 V, which is the behaviour this firmware chose, and read
   `cli "get pwrmgt.bootmv"` (it says `0 mV`) and `cli "get pwrmgt.bootreason"`
   while there.
+
+## 6. The mesh client
+
+`docs/link.md` §2e is the page: the job, its path, and what the extra peer is
+for. Phase 2's task 01 is the state only — a peer and a path — so there is one
+bench line, and it is about what must **not** change. The five sends that put a
+packet on the air, and the second radio they need, arrive with task 02.
+
+- [ ] **p2-01** **With a job begun and nothing sent, the repeater behaves
+  exactly as before.** `job begin <any 64-hex key>` over the link, then from a
+  phone: log in as admin, run a CLI command, read `status`; and a message
+  through the unit from another node still passes. The extra peer is only ever
+  in front of upstream's own while a reply is awaited, which this task cannot
+  yet cause (no send), so none of the repeater's own admin or routing is
+  touched. `status` shows flag bit 0 (`job begun`) set and bit 1 clear, and the
+  job ends itself after 120 s with no further request on the link.

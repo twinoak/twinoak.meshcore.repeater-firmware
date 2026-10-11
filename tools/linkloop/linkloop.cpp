@@ -58,6 +58,8 @@
 #include "link/codec/Numbers.h"
 #include "link/session/Interfaces.h"
 #include "link/session/Session.h"
+#include "meshclient/Job.h"
+#include "meshclient/LinkMeshClient.h"
 #include "power/BatteryWatch.h"
 #include "power/Environment.h"
 #include "power/Ina3221.h"
@@ -150,6 +152,7 @@ class LoopUpstreamClock : public twinoak::clock::UpstreamClock {
 
 bool g_emitted = false;  // --emitted, in main() below
 bool g_wake = false;     // --wake
+bool g_begin_job = false;  // --job: begin a job at startup, so `path` reads a route back
 
 LoopSystem g_system;
 LoopIdentity g_identity;
@@ -350,6 +353,13 @@ class LoopTelemetry : public twinoak::power::TelemetrySource {
 LoopTelemetry g_telemetry;
 twinoak::power::LinkPower g_link_power(g_telemetry);
 
+// The mesh client's job and the box link's view of it (src/meshclient/), so that `job begin`,
+// `job end` and `path` through the pipe go through the firmware's own Job - the same state a
+// board runs. No radio here, so nothing is ever awaited and no reply ever arrives; what this
+// exercises is the job state, the path codec and the 120-second silence rule.
+twinoak::meshclient::Job g_job;
+twinoak::meshclient::LinkMeshClient g_mesh_client(g_job);
+
 uint16_t LoopSettingsHost::batteryLowMv() const { return g_battery.lowMilliVolts(); }
 uint16_t LoopSettingsHost::batteryCritMv() const { return g_battery.critMilliVolts(); }
 bool LoopSettingsHost::setBatteryLowMv(uint16_t mv) {
@@ -377,6 +387,7 @@ void wire() {
   g_services.power = &g_link_power;
   g_services.env = &g_link_power;
   g_services.lpp = &g_link_power;
+  g_services.mesh = &g_mesh_client;  // => kCapMeshClient; caps is now 0x6f
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule
@@ -403,6 +414,20 @@ int pump() {
   // believed asleep, which no board can know - so here it is the --wake flag's business instead.
   if (g_wake) g_attention.raise(kAttentionPersonAsked, 0, nowMs());
 
+  // A job is per-boot RAM, and each linkcli invocation is a fresh boot of this program, so `path`
+  // would read ERR_STATE on a node that no earlier command's job survived to. --job begins one
+  // here - a peer and a two-hop path of two bytes each - so that one invocation can read the
+  // route back and watch STATUS's job bit, the way a board holds a job across requests in one
+  // boot.
+  if (g_begin_job) {
+    const uint8_t key[twinoak::meshclient::kPeerKeyLen] = {
+        0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18, 0x29, 0x3a, 0x4b,
+        0x5c, 0x6d, 0x7e, 0x8f, 0x90, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6,
+        0x07, 0x18, 0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90};
+    const uint8_t hashes[] = {0xa1, 0xb2, 0x7f, 0x3a};
+    g_job.begin(key, twinoak::meshclient::kPathHops, 2, 2, hashes, sizeof hashes, nowMs());
+  }
+
   // As TwinOakSensors::begin() does it (src/board/target.cpp).
   g_power_reader.begin(nowMs());
   g_env_reader.begin(nowMs());
@@ -422,6 +447,7 @@ int pump() {
       session.feedByte(byte, nowMs());
     }
     g_keeper.loop(nowMs());
+    g_mesh_client.loop(nowMs());  // the job's 120-second silence rule (src/meshclient/Job.cpp)
     // As TwinOakSensors::loop() does it, once a pass: one INA3221 channel, one BME280 sample,
     // and the battery thresholds looked at with whatever channel 2 last said.
     {
@@ -530,9 +556,11 @@ int main(int argc, char** argv) {
       g_wake = true;
     } else if (strcmp(argv[i], "--drop-ina") == 0) {
       g_bus.dropped = true;  // the bench's "unplug the B-board": `power` then answers valid 0
+    } else if (strcmp(argv[i], "--job") == 0) {
+      g_begin_job = true;
     } else {
       fprintf(stderr,
-              "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina]\n");
+              "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina] [--job]\n");
       return 2;
     }
   }

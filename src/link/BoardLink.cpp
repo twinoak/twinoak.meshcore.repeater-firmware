@@ -163,12 +163,17 @@ Services g_services;
 Session g_session(g_services);
 SerialTransport g_transport(g_session);
 
+// The mesh client's link half lives with its job inside the TwinOakMesh (src/app/TwinOakMesh.h);
+// this is the one pointer linkLoop() needs for the job's silence rule.
+meshclient::LinkMeshClient* g_mesh_client = nullptr;
+
 }  // namespace
 
-void linkBegin(MyMesh& mesh) {
+void linkBegin(TwinOakMesh& mesh) {
   g_system.drawBootId();
   g_identity.attach(&mesh);
   g_cli.attach(&mesh);
+  g_mesh_client = &mesh.meshClient();
 
   // The three strings of the image, as spec/FIRMWARE-MANIFEST.md section 4 spells them - the same
   // three the descriptor will carry and the release manifest records. TWINOAK_BOARD comes from
@@ -193,6 +198,9 @@ void linkBegin(MyMesh& mesh) {
   g_services.power = &power::linkPower();  // => kCapPower
   g_services.env = &power::linkPower();    // => kCapEnv
   g_services.lpp = &power::linkPower();
+  // JOB_BEGIN, JOB_END, PATH_SET, PATH_GET and STATUS's two job bits (spec/LINK-PROTOCOL.md 6.1;
+  // the sends, the reply and the counters follow in phase 2's tasks 02 to 04).
+  g_services.mesh = g_mesh_client;  // => kCapMeshClient
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 
@@ -206,7 +214,14 @@ void linkBegin(MyMesh& mesh) {
   g_attention.noteBoot(g_system.resetReason(), /*walter_was_asleep=*/false, millis());
 }
 
-void linkLoop() { g_transport.loop(); }
+void linkLoop() {
+  g_transport.loop();
+  // "The RAK also ends a job by itself when 120 seconds pass with no request on the link while a
+  // job is begun" (spec/LINK-PROTOCOL.md 6.1): the rule is the job's (src/meshclient/Job.cpp),
+  // the session restarts its count on every valid request, and this is the once-a-pass look at
+  // the clock that ends it.
+  if (g_mesh_client != nullptr) g_mesh_client->loop(millis());
+}
 
 bool raiseAttention(uint8_t reason, uint16_t detail) {
   return g_attention.raise(reason, detail, millis());
