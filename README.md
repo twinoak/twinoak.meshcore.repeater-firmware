@@ -22,11 +22,29 @@ The plan, the decisions and the two protocols are in [`spec/`](spec/README.md)
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How it gets built is
 [`tasks/`](tasks/README.md).
 
-## State
+## Building it
 
-Nothing is built yet. This repository holds the specification, the
-architecture and the task piles; phase 0's first task turns it into something
-that compiles.
+```powershell
+pio run -e repeater_rak4630_single   # the repeater for the single-RAK adapter
+pio test -e native                   # the tests that need no board (in a container on Windows)
+.\tools\verify.ps1                   # everything CI runs, in order, with a log per step in out/verify/
+```
+
+A clean first build downloads, once, into `~/.platformio`: the `nordicnrf52`
+platform, the ARM GCC toolchain, MeshCore's fork of the Adafruit nRF52 Arduino
+core at the commit MeshCore pins, `adafruit-nrfutil` for the DFU package; and
+into `.pio/libdeps/`: MeshCore itself at the pinned commit (`[meshcore]` in
+`platformio.ini`) and every library at the exact version `[libs]` names. It
+takes a few minutes; every build after it takes seconds. The images it leaves
+in `.pio/build/<env>/` — and `tools/verify.ps1` copies to `out/build/<env>/` —
+are `firmware.hex` (the Walter, over SWD), `firmware.zip` (a laptop,
+`adafruit-nrfutil dfu serial`), `firmware.uf2` (the bootloader's drive) and
+`firmware.elf`.
+
+`pio test -e native` is a host build. Linux and CI use the machine's `g++`;
+this Windows machine has none, so `tools/verify.ps1` runs that step in a
+`python:3.11-slim` container (`tasks/RUNBOOK.md` §2 has the one-line
+`docker run`). The task piles that build the rest are run with
 
 ```powershell
 .\tasks\run-pile.ps1          # phases 0 to 3, one headless session per task
