@@ -19,7 +19,8 @@ commit — with four things added:
 
 The plan, the decisions and the two protocols are in [`spec/`](spec/README.md)
 (start with `spec/SYSTEM.md`). How this firmware is put together is
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How it gets built is
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How a board becomes a unit is
+[`docs/provisioning.md`](docs/provisioning.md). How it gets built is
 [`tasks/`](tasks/README.md); how it gets released is
 [`docs/release.md`](docs/release.md); how it keeps up with MeshCore — the weekly
 pull request that moves the pin, the one command for a bump that needs a
@@ -28,9 +29,8 @@ session, and the seven places a bump re-reads — is
 
 ## State
 
-Phases 0 to 2 have landed, which is everything but the family of roles and
-first-boot provisioning (phase 3). What the firmware does **today**, on a board
-nobody has flashed yet:
+Phases 0 to 3 have landed: everything the piles set out to build without a
+board. What the firmware does **today**, on a board nobody has flashed yet:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
   `repeater-v1.17.1` (`d9296435`), compiled unmodified and subclassed — the
@@ -44,7 +44,7 @@ nobody has flashed yet:
   a file, adverts are held back until it is trustworthy, and a backwards set is
   refused once anything of ours has carried a timestamp (`docs/link.md` §2a).
 - **It is managed over the link and from the mesh**: upstream's own
-  interpreter behind `CLI`, nine settings on `sensor get/set`, and an attention
+  interpreter behind `CLI`, ten settings on `sensor get/set`, and an attention
   machine that can wake a sleeping Walter — which a mesh admin with a phone can
   ask for (`docs/link.md` §2b and §2c).
 - **It measures itself**: three current-sense channels with the right shunt
@@ -67,10 +67,14 @@ nobody has flashed yet:
   repeater when a site has a noise problem, from the same board target, the
   same power code and the same release
   ([`docs/noisescope.md`](docs/noisescope.md)).
+- **It comes up as a member of the Danish mesh with nobody near it**: the right
+  channel from the build, a random admin password nobody knows, and a
+  first-boot profile of console lines that runs exactly once — and one written
+  procedure for making it *this* unit, at the USB port or over the link
+  ([`docs/provisioning.md`](docs/provisioning.md)).
 
 Not done, and deliberately: the bridge role and the dual adapter
-(`docs/ARCHITECTURE.md` §8 has the seams) and first-boot provisioning over the
-link. Nothing above has been on a bench:
+(`docs/ARCHITECTURE.md` §8 has the seams). Nothing above has been on a bench:
 [`docs/bench.md`](docs/bench.md) is the walk that would prove it, and
 `tools/verify.ps1` is what has been proved without one.
 
@@ -124,6 +128,26 @@ container provides it. The task piles that build the rest are run with
 | Released as | a GitHub Release: the images, `manifest.json`, its signature, `SHA256SUMS` |
 | Channel | 869.618 MHz, 62.5 kHz, SF8, CR8, +22 dBm (MeshCore Denmark, EU Narrow) |
 
+## Provisioning it
+
+A board fresh from the flasher is already on 869.618 MHz, already repeating, and
+already carries an admin password drawn from the radio's own noise that nobody
+knows — so nobody can administer it over the mesh until a person or the Walter
+sets one. Making it *this* unit is six settings and one page:
+
+```bash
+# at the field port, 115200: six lines of docs/provisioning.md section 3
+# or, over the box link, the same lines in a file:
+python3 tools/linkcli.py --port COM7 provision unit-odense.txt
+```
+
+[`docs/provisioning.md`](docs/provisioning.md) is that page: what a unit is out
+of the box, the settings a unit needs and the command for each, the USB session
+line for line, the same lines over the link, and what MeshMaster has to be told
+afterwards — including that the admin password set there is the only copy there
+is. `sensor get firstboot.state` says what the boot did: `done`,
+`partial: <n> refused`, or `never`.
+
 ## Rails that hold in every task
 
 Nine rules, and the test that fails when one is broken. `test/test_rails` is
@@ -136,8 +160,8 @@ test says what it does and does not catch.
 |---|---|---|
 | 1 | **Nothing the mesh says is logged as text.** `MESH_PACKET_LOGGING` and `MESH_DEBUG` stay off in every environment. | `Rails.Rule1_*` — the resolved flags of every board environment, and a walk of `src/` |
 | 2 | **No source prints a packet payload, a CLI line or its reply, an advert's application data, or a password.** | `Rails.Rule2_*` — three tests: a payload beside a print, and no print-like call at all under `src/common/link/` or `src/roles/repeater/meshclient/` |
-| 3 | **No default password is ever on the air.** A node that boots with no saved settings draws itself a random admin password that nobody knows (`src/roles/repeater/app/FirstBoot.cpp`); the one a person sets at the USB port with `password <new>` is the first anyone can use. | `Rails.Rule3_*` — no environment defines `ADMIN_PASSWORD` as upstream's word or leaves it out, and the first-boot path exists and is called; `test/test_password` holds what the random one looks like |
-| 4 | **Path hashes this firmware chooses are two bytes or more.** | `Rails.Rule4_*` — the constant is 2, every `sendFlood` passes it, no literal 1 |
+| 3 | **No default password is ever on the air.** A node that boots with no saved settings draws itself a random admin password that nobody knows (`src/roles/repeater/app/FirstBoot.cpp`); the one a person sets at the USB port with `password <new>` is the first anyone can use, and no line of the first-boot profile may carry a password at all. | `Rails.Rule3_*` — no environment defines `ADMIN_PASSWORD` as upstream's word or leaves it out, and the first-boot path exists and is called; `test/test_password` holds what the random one looks like and `test/test_firstboot` holds the profile's table to it |
+| 4 | **Path hashes this firmware chooses are two bytes or more.** | `Rails.Rule4_*` — the constant is 2, every `sendFlood` passes it, no literal 1; and the first-boot profile still raises `path.hash.mode`, which is the half upstream decides from a preference |
 | 5 | **One packet per send.** No reciprocal path is returned for the client's peer. | `Rails.Rule5_*` — the branch of `onPeerPathRecv` that takes the job peer's path returns false and nothing else |
 | 6 | **A password is in RAM for the length of a send** and nowhere else. | `Rails.Rule6_*` — no file on the path of a `SEND_LOGIN` or a sensitive `SEND_CLI` names a file-system API; `test_link_session` searches the session, the client and the job for the bytes afterwards |
 | 7 | **Upstream's INA3221 and BME280 support stay out of the build** — one shunt value for three channels, and an I2C conversion on the path of a link request. | `Rails.Rule7_*` |

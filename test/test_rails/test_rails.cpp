@@ -716,12 +716,21 @@ TEST(Rails, Rule3_TheFirstBootPathThatReplacesThatPasswordExists) {
         << "src/" << name << " is gone: no default password is ever on the air (S-13), and this"
            " is the path that replaces the build's placeholder";
   }
-  // And setup() calls it: the test, then the draw, by name.
+  // And setup() calls it: the test, then the first boot it decides, by name.
   const std::string main_cpp = fileText(root / "src" / "roles" / "repeater" / "main.cpp");
-  for (const char* call : {"hasSavedPrefs(", "ensureAdminPassword("}) {
+  for (const char* call : {"hasSavedPrefs(", "firstBoot("}) {
     EXPECT_NE(std::string::npos, main_cpp.find(call))
         << "src/roles/repeater/main.cpp no longer calls " << call
         << "): a node with no settings would then keep the build's placeholder password (S-13)";
+  }
+  // ... and the first boot draws the password, whatever else it does (phase 3's task 03 put the
+  // profile's lines beside it in the same call).
+  const std::string first_boot =
+      fileText(root / "src" / "roles" / "repeater" / "app" / "FirstBoot.cpp");
+  for (const char* call : {"ensureAdminPassword(", "generatePassword("}) {
+    EXPECT_NE(std::string::npos, first_boot.find(call))
+        << "src/roles/repeater/app/FirstBoot.cpp no longer calls " << call
+        << "): the build's placeholder password would survive a first boot (S-13)";
   }
   // The password's own rules are tested natively, which needs the file in the native build.
   const std::string ini = fileText(root / "platformio.ini");
@@ -763,6 +772,27 @@ TEST(Rails, Rule4_EveryFloodTheClientOriginatesUsesTwoByteHashes) {
     }
   }
   EXPECT_GT(calls, 0) << "no call of sendFlood under src/ - has the mesh client moved?";
+}
+
+TEST(Rails, Rule4_TheFirstBootProfileAsksForTwoByteHashesInAdvertsToo) {
+  // The other half of S-12's path-hash rule, and the half upstream decides from a preference
+  // rather than from an argument: this node's own **flooded adverts** go out at
+  // `path_hash_mode + 1` bytes (MyMesh::sendSelfAdvertisement,
+  // examples/simple_repeater/MyMesh.cpp:1035 at the pin d9296435; the periodic flood advert at
+  // :1297), and upstream's default is 0 - one byte. The first-boot profile's one line is what
+  // raises it, so the rail is that the line is still in the table and that the table is still
+  // compiled by the native environment, where test/test_firstboot holds every rule about it.
+  const fs::path root = projectRoot();
+  const std::string profile =
+      fileText(root / "src" / "roles" / "repeater" / "firstboot" / "Profile.cpp");
+  EXPECT_NE(std::string::npos, profile.find("\"set path.hash.mode 1\""))
+      << "the first-boot profile no longer raises path.hash.mode, so a fresh unit would flood"
+         " its adverts with one-byte path hashes (S-12, meshmaster.dk D-33)";
+  const std::string ini = fileText(root / "platformio.ini");
+  EXPECT_NE(std::string::npos, ini.find("+<roles/repeater/firstboot/Profile.cpp>"))
+      << "platformio.ini's [env:native] no longer compiles"
+         " src/roles/repeater/firstboot/Profile.cpp, so test/test_firstboot no longer holds the"
+         " profile's table or its reply rule";
 }
 
 // ------------------------------------------------------------------------------------- rule 5

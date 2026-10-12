@@ -41,10 +41,15 @@
 //     `obs`, `status` and `counters` through the pipe read the firmware's own ring, its own
 //     payload fitting and its own counters. `--adverts <n>` hears that many synthetic adverts at
 //     startup - a ring is per-boot RAM, like a job - and `--obs-wake` turns the `obs.wake`
-//     setting on so that attention reason 5 can be watched with nothing but a laptop.
+//     setting on so that attention reason 5 can be watched with nothing but a laptop;
+//   - the **first-boot profile** (src/roles/repeater/firstboot/Profile.*), which `--first-boot`
+//     runs at startup the way a board with no saved preferences does - the shipped table through
+//     the `set` miniature below - so that `sensor get firstboot.state` and
+//     `linkcli.py provision` are watched with no board at all.
 //
 // What cannot be here is upstream's interpreter itself, so every other command line is answered
-// by the handful of canned lines below. POSIX only: the loop waits on stdin with select(), which
+// by the handful of canned lines below - plus a miniature of its `set` branch and its `password`
+// branch, which is what `linkcli.py provision` needs something to answer. POSIX only: the loop waits on stdin with select(), which
 // is what lets it emit an attention on time while nothing is being asked of it.
 
 #include <sys/select.h>
@@ -58,23 +63,24 @@
 #include <string>
 #include <vector>
 
-#include "app/Settings.h"
-#include "clock/ClockKeeper.h"
-#include "clock/LinkClock.h"
-#include "link/attention/Attention.h"
-#include "link/codec/FrameWriter.h"
-#include "link/codec/Numbers.h"
-#include "link/session/Interfaces.h"
-#include "link/session/Session.h"
-#include "meshclient/Job.h"
-#include "meshclient/LinkMeshClient.h"
-#include "meshclient/LinkObservations.h"
-#include "meshclient/ObservationRing.h"
-#include "power/BatteryWatch.h"
-#include "power/Environment.h"
-#include "power/Ina3221.h"
-#include "power/LinkPower.h"
-#include "power/PowerReader.h"
+#include "roles/repeater/app/Settings.h"
+#include "roles/repeater/firstboot/Profile.h"
+#include "roles/repeater/clock/ClockKeeper.h"
+#include "roles/repeater/clock/LinkClock.h"
+#include "common/link/attention/Attention.h"
+#include "common/link/codec/FrameWriter.h"
+#include "common/link/codec/Numbers.h"
+#include "common/link/session/Interfaces.h"
+#include "common/link/session/Session.h"
+#include "roles/repeater/meshclient/Job.h"
+#include "roles/repeater/meshclient/LinkMeshClient.h"
+#include "roles/repeater/meshclient/LinkObservations.h"
+#include "roles/repeater/meshclient/ObservationRing.h"
+#include "common/power/BatteryWatch.h"
+#include "common/power/Environment.h"
+#include "common/power/Ina3221.h"
+#include "common/power/LinkPower.h"
+#include "common/power/PowerReader.h"
 
 using namespace twinoak::link;  // NOLINT: one namespace, and the names are the wire's
 
@@ -165,6 +171,7 @@ bool g_wake = false;     // --wake
 bool g_begin_job = false;  // --job: begin a job at startup, so `path` reads a route back
 long g_adverts = 0;        // --adverts <n>: adverts heard at startup, so `obs` has records
 bool g_obs_wake = false;   // --obs-wake: the obs.wake setting on
+bool g_first_boot = false;  // --first-boot: run the shipped profile at startup
 
 LoopSystem g_system;
 LoopIdentity g_identity;
@@ -227,6 +234,10 @@ class LoopSettingsHost : public twinoak::SettingsHost {
   bool obsWake() const override;
   void setObsWake(bool on) override;
   uint32_t clientSendsRefused() const override;
+  // The real thing: the profile's own state, and this program is one boot. --first-boot runs the
+  // shipped table through the `set` miniature below, which is how `firstboot.state` can say
+  // something other than `never` with no board at all.
+  const char* firstBootState() const override { return twinoak::firstboot::stateText(); }
 };
 
 LoopSettingsHost g_settings_host;
@@ -257,6 +268,15 @@ class LoopCli : public CliAccess {
       const std::string key = rest.substr(0, sp);
       const std::string value = sp == std::string::npos ? "null" : rest.substr(sp + 1);
       out = g_settings.set(key.c_str(), value.c_str()) ? "ok" : "can't find custom var";
+    } else if (in.rfind("set ", 0) == 0) {
+      out = setCmd(in.substr(4));
+    } else if (in.rfind("region ", 0) == 0) {
+      out = regionCmd(in.substr(7));
+    } else if (in.rfind("password ", 0) == 0) {
+      // Upstream echoes the new password back (CommonCLI.cpp's `password` branch at the pin), on
+      // purpose: "just to let admin know for sure". It is what `linkcli.py provision` must never
+      // print, and the only way to watch that is to have something answer it.
+      out = "password now: " + in.substr(9);
     } else if (in == "get radio") {
       out = "> 869.618,62.5,8,8";
     } else if (in == "ver") {
@@ -275,6 +295,46 @@ class LoopCli : public CliAccess {
   }
 
  private:
+  // A miniature of upstream's `set` branch: the keys docs/provisioning.md uses, each with
+  // upstream's own reply, and `unknown config: <rest>` for everything else - which is what
+  // `linkcli.py provision` stops at. Nothing is stored: a host build has no preferences file,
+  // and what is being watched here is the tool and the replies, not the settings.
+  static std::string setCmd(const std::string& rest) {
+    const size_t sp = rest.find(' ');
+    if (sp == std::string::npos) return "unknown config: " + rest;  // every `set` needs a value
+    const std::string key = rest.substr(0, sp);
+    const std::string value = rest.substr(sp + 1);
+    if (key == "path.hash.mode") {
+      const bool ok = value == "0" || value == "1" || value == "2";
+      return ok ? "OK" : "Error, must be 0,1, or 2";
+    }
+    if (key == "name") {  // upstream's isValidName(), CommonCLI.cpp at the pin
+      return value.find_first_of("[]\\:,?*") == std::string::npos ? "OK" : "Error, bad chars";
+    }
+    if (key == "lat" || key == "lon" || key == "owner.info" || key == "guest.password" ||
+        key == "loop.detect" || key == "flood.max.unscoped" || key == "dutycycle" ||
+        key == "advert.interval" || key == "flood.advert.interval" ||
+        key == "agc.reset.interval" || key == "rxdelay" || key == "txdelay" ||
+        key == "direct.txdelay" || key == "radio.rxgain") {
+      return "OK";
+    }
+    return "unknown config: " + rest;
+  }
+
+  // And a miniature of its `region` branch, for the same reason: upstream answers these with a
+  // sentence and not with `OK`, and `provision` judges them by the absence of `Err`
+  // (CommonCLI::handleRegionCmd at the pin d9296435).
+  static std::string regionCmd(const std::string& rest) {
+    const size_t sp = rest.find(' ');
+    const std::string verb = rest.substr(0, sp);
+    const std::string arg = sp == std::string::npos ? "" : rest.substr(sp + 1);
+    if (verb == "save") return "OK";
+    if (verb == "default" && !arg.empty()) return " default scope is now " + arg;
+    if (verb == "home" && !arg.empty()) return " home is now " + arg;
+    if (verb == "put" && !arg.empty()) return "OK - (flood allowed)";
+    return "Err - ??";
+  }
+
   static const char* byKey(const std::string& key) {
     for (int i = 0; i < twinoak::Settings::count(); i++) {
       if (key == twinoak::Settings::name(i)) return g_settings.value(i);
@@ -530,6 +590,17 @@ int pump() {
     g_job.begin(key, twinoak::meshclient::kPathHops, 2, 2, hashes, sizeof hashes, nowMs());
   }
 
+  // The first-boot profile, as src/roles/repeater/app/FirstBoot.cpp runs it: the shipped table
+  // through the interpreter above, which here is the `set` miniature. Without the flag this is a
+  // boot that found its settings, and `sensor get firstboot.state` says `never`.
+  {
+    char line[160] = {0};
+    char reply[160 + 64] = {0};
+    twinoak::firstboot::runFirstBootProfile(
+        /*saved_prefs_found=*/!g_first_boot, twinoak::firstboot::kProfile,
+        twinoak::firstboot::kProfileCount, g_cli, line, sizeof line, reply, sizeof reply);
+  }
+
   // A ring is per-boot RAM too, so --adverts fills one at startup the way ten minutes on a roof
   // antenna would. More than the ring holds is how a loss count and `dropped` are watched.
   if (g_obs_wake) g_observations.setWakeEnabled(true);
@@ -669,13 +740,15 @@ int main(int argc, char** argv) {
       g_begin_job = true;
     } else if (strcmp(argv[i], "--obs-wake") == 0) {
       g_obs_wake = true;
+    } else if (strcmp(argv[i], "--first-boot") == 0) {
+      g_first_boot = true;
     } else if (strcmp(argv[i], "--adverts") == 0 && i + 1 < argc) {
       g_adverts = strtol(argv[++i], nullptr, 10);
       if (g_adverts < 0) g_adverts = 0;
     } else {
       fprintf(stderr,
               "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina] [--job]"
-              " [--adverts <n>] [--obs-wake]\n");
+              " [--adverts <n>] [--obs-wake] [--first-boot]\n");
       return 2;
     }
   }

@@ -200,6 +200,28 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // clock - and sends it zero-hop or flooded.
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
 
+  // Declared `void savePrefs() override { _cli.savePrefs(_fs); }` under `public:` in MyMesh.h
+  // (line 195 at the pin); pure virtual in CommonCLICallbacks (src/helpers/CommonCLI.h). Every
+  // `set` branch of upstream's CLI calls it, and so does our first boot.
+  //
+  // Ours exists for one reason: **the first boot must write the preferences file once, at the
+  // end, or not at all.** Upstream saves after every `set`, and `CommonCLI::savePrefs(FILESYSTEM*)`
+  // removes `/prefs.json` and writes it again - so a first boot that ran the profile line by line
+  // would leave, if the power went between two of them, a node whose settings file exists
+  // (so the next boot runs no profile at all) and whose profile only half ran. With the saves
+  // held, the file appears exactly once, when everything the first boot does is in it:
+  // power cut before that moment, and the next boot finds no file and does the whole thing
+  // again; power cut after it, and the node is done (src/roles/repeater/app/FirstBoot.h).
+  //
+  // Held only inside twinoak::firstBoot(), in setup(), before loop() has run once. At every other
+  // moment this is upstream's savePrefs() and nothing else.
+  void savePrefs() override;
+
+  // Hold the saves and let them go again. releasePrefsSaves() performs one save if anything asked
+  // for one while the hold was on, and returns whether it did.
+  void holdPrefsSaves();
+  bool releasePrefsSaves();
+
  private:
   // The job's ECDH secret, calculated once per job on first need from this node's private key
   // (mesh::LocalIdentity::calcSharedSecret, src/Identity.h:81) into the job's own buffer, which
@@ -225,4 +247,7 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // follow it, exactly as upstream's own matching_peer_indexes[] is filled by its
   // searchPeersByHash() and read by its three. False at every moment no reply is awaited.
   bool extra_ = false;
+  // The first boot's one write (savePrefs above). Both false at every other moment.
+  bool prefs_save_held_ = false;
+  bool prefs_save_pending_ = false;
 };

@@ -53,6 +53,7 @@ python3 tools/linkcli.py --port COM7 status
 python3 tools/linkcli.py --port COM7 time         # read the clock
 python3 tools/linkcli.py --port COM7 time set     # set it to this laptop's
 python3 tools/linkcli.py --port COM7 identity
+python3 tools/linkcli.py --port COM7 provision unit.txt   # docs/provisioning.md
 python3 tools/linkcli.py --port COM7 cli "get radio"   # a console command line
 python3 tools/linkcli.py --port COM7 power        # panel, battery and load
 python3 tools/linkcli.py --port COM7 env          # the air inside the box
@@ -206,12 +207,13 @@ CLI get radio
 
 $ python3 tools/linkcli.py --port COM7 cli "sensor list"
 CLI sensor list
-  5 vars
+  10 vars
   fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)
   walter.wake=0
   link.errors=0
   walter.seen=0
   clock.state=set
+  ... next:5
 ```
 
 - **A line is 1 to 160 bytes of UTF-8 text with no control characters in it.**
@@ -221,13 +223,25 @@ CLI sensor list
 - **The reply is at most 159 characters**, because that is the buffer upstream's
   own console gives its interpreter and several of its commands assume exactly
   that number. A reply that would be longer is cut, not spilled: `sensor list`
-  pages with `... next:<n>` by itself (so on a node that has been up a long
-  time, `sensor list 4` is how the last key is read), and `neighbors` stops
-  adding records near the limit.
+  pages with `... next:<n>` by itself (so `sensor list 5` is how the last five
+  keys are read, and on a node that has been up a long time `sensor list 4` is
+  where that page starts), and `neighbors` stops adding records near the limit.
+  Both ends of the window have 64 guard bytes behind them — the session's since
+  phase 1's task 05, the USB console's since phase 3's task 03 — so a command
+  that writes past 160 bytes writes into a guard and is counted, never into a
+  stack frame.
 - **Four commands never answer**, because they restart the node: `reboot`,
   `clkreboot`, `poweroff` and `shutdown`. Silence after one of those is the
   expected outcome, and `linkcli.py` says so rather than calling the link down.
   `listen` afterwards shows the `EV_BOOT`.
+- **A whole provisioning session is one file.** `linkcli.py provision <file>`
+  sends the lines of a text file one at a time as `CLI` requests — which is what
+  the Walter will do when a unit is adopted. It stops at the first refusal,
+  never prints a `password` line's value, and refuses a file with a `region
+  load`, an over-long line or one of the four commands that never answer before
+  it opens the link at all. `docs/provisioning.md` is the page: what a unit is
+  out of the box, the six settings that make it *this* unit, and the same lines
+  at the USB port.
 - **`region load` is the one line not to send from here.** It puts upstream's
   interpreter into a mode where every following line is a region definition
   until a *blank* one ends it — and a blank line is not a legal `CLI` request.
@@ -240,7 +254,7 @@ CLI sensor list
 
 ### Our settings, from here, from the console and from the mesh
 
-The nine keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
+The ten keys of `docs/ARCHITECTURE.md` §4 are on upstream's own `sensor` CLI,
 which means three ways to reach them: `cli "sensor get <key>"` over this link,
 the same line typed on the USB console, and — for a **mesh admin**, logged in
 with the admin password from a phone — the same line as a message. Upstream's
@@ -258,6 +272,7 @@ through the interpreter only for a client whose ACL entry is admin).
 | `power.crit_mv` | the *battery critical* threshold (3300 by default) | the same |
 | `obs.wake` | `0`, or `1` when a filling observation ring may wake a sleeping Walter | `0` or `1`; **off at boot and per boot** (§2g) |
 | `client.refused` | mesh-client sends the RAK's ceiling has refused since boot — `0` on a healthy unit | — (§2h says why it is not settable) |
+| `firstboot.state` | `done`, `partial: <n> refused`, or `never` because this boot found settings and ran nothing (`docs/provisioning.md`) | — |
 
 A `set` of any other key — or of `walter.wake` with any value but `1` — is
 answered `can't find custom var`, which is upstream's wording and its only other
@@ -266,12 +281,16 @@ decimal number, when it is outside 2500–4300 mV, or when `low` would not sit
 more than 100 mV above `crit`; a `set` that is accepted is written to a small
 file of this firmware's own (`/power`) and survives a restart.
 
-**Nine keys no longer fit one `sensor list`.** Upstream stops a listing once it
+**Ten keys no longer fit one `sensor list`.** Upstream stops a listing once it
 has written 134 bytes into a 160-byte reply, so a freshly booted node prints the
-first five and `... next:5`, and **`cli "sensor list 5"`** is how the other four
-are read; a node whose counters have grown wide prints four and `... next:4`.
-`sensor get <key>` always works whatever the paging does, and
-`tasks/phase-1/reports/06.md` has the arithmetic.
+first five and **`cli "sensor list 5"`** is how the other five are read; a node
+whose counters have grown wide prints four and `... next:4`. The tenth key made
+upstream's own header `10 vars` rather than `9 vars`, which costs the first page
+one character: on a node whose clock is `restored` or `unset` that page is 160
+characters, and the digit of `... next:5` is the character that is cut. The hint
+is still there and `sensor get <key>` always works whatever the paging does;
+`tasks/phase-3/reports/03.md` has the arithmetic and `test/test_settings`
+measures it.
 
 ## 2c. Attention, and a Walter that sleeps
 
@@ -688,14 +707,16 @@ docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 
 That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
 `time set`, `cli`, `power`, `env`, `lpp`, the job, the five sends, `obs`,
-`sleep`, an attention and `reboot` against it, and times one pass of the link.
+`sleep`, an attention, the first-boot profile, `provision` and `reboot` against
+it, and times one pass of the link.
 It is not part of `tools/verify.ps1`: it needs a host compiler, and what it
 proves about the session itself is already a native test
 (`test/test_link_session`).
 
-Six things in that program are the firmware's own code and not a stub - the
+Seven things in that program are the firmware's own code and not a stub - the
 clock keeper, the attention machine, the settings table, the power and
-environment readers, the mesh client's job and the observation ring - so `cli
+environment readers, the mesh client's job, the observation ring and the
+first-boot profile - so `cli
 "sensor set walter.wake 1"` through the pipe really does raise an attention,
 `--wake` raises one at startup so that `listen` shows the whole sequence with
 nothing but a laptop, `power`, `env` and `lpp` go through the firmware's own
@@ -705,7 +726,11 @@ back through the real `Job`, and `--adverts <n>` hears that many synthetic
 adverts so that `obs` empties the firmware's own ring with its own payload
 fitting (a job and a ring are both per-boot RAM, so each one-shot `linkcli`
 invocation is otherwise a fresh boot with neither). `--obs-wake` turns the
-`obs.wake` setting on.
+`obs.wake` setting on, and `--first-boot` is a board with no saved preferences,
+which runs the shipped profile through the program's own stand-in for upstream's
+`set` branch - so `sensor get firstboot.state` says `done` rather than `never`,
+and `provision` has something that answers a `set`, a `region` line and a
+`password` line the way upstream does.
 
 ## 5. Inside the firmware
 
@@ -720,6 +745,7 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 | mesh client | `src/roles/repeater/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule; the five sends behind `MeshPort`; the reply record and its matching rules; `PeerSlot`, the index arithmetic of the extra peer; the observation ring, its pull and the RSSI note table. Portable; the peer overrides, the packet building and the advert capture are in `src/roles/repeater/app/TwinOakMesh.cpp`. |
 | transport | `src/common/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
 | the board's half | `src/roles/repeater/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
+| the first boot | `src/roles/repeater/firstboot/`, `src/roles/repeater/app/FirstBoot.*` | the profile's table of console lines, the runner that judges each reply, and the one preferences write that makes running once exact. Portable but for `FirstBoot.cpp`. `docs/provisioning.md` is its page. |
 
 One pass of `loop()` reads what the UART has (bounded), handles **at most one**
 request, and writes what fits without blocking. A request that completes while

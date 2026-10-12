@@ -356,3 +356,26 @@ void TwinOakMesh::sendSelfAdvertisement(int delay_millis, bool flood) {
   twinoak::clock::noteTimestampEmitted();
   MyMesh::sendSelfAdvertisement(delay_millis, flood);
 }
+
+// --- the first boot's one write (TwinOakMesh.h says why) ---------------------------------------
+
+void TwinOakMesh::savePrefs() {
+  if (prefs_save_held_) {
+    prefs_save_pending_ = true;  // one write, at releasePrefsSaves()
+    return;
+  }
+  MyMesh::savePrefs();
+}
+
+void TwinOakMesh::holdPrefsSaves() {
+  prefs_save_held_ = true;
+  prefs_save_pending_ = false;
+}
+
+bool TwinOakMesh::releasePrefsSaves() {
+  prefs_save_held_ = false;
+  if (!prefs_save_pending_) return false;
+  prefs_save_pending_ = false;
+  MyMesh::savePrefs();
+  return true;
+}

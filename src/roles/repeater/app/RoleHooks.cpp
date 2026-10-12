@@ -2,7 +2,7 @@
 // whichever role an environment builds.
 //
 // Nothing here is new. The settings host below stood in src/common/board/target.cpp until the
-// tree was split by role (phase 3's task 01) - it is the board's half of the nine keys of
+// tree was split by role (phase 3's task 01) - it is the board's half of the ten keys of
 // docs/ARCHITECTURE.md section 4, whose table and rules are portable and tested
 // (src/roles/repeater/app/Settings.{h,cpp}). The keys are on upstream's CLI and not only on the
 // box link so that they can be read from the USB console and, over the mesh, by an admin: that
@@ -15,6 +15,7 @@
 #include "common/version/Version.h"
 #include "roles/repeater/app/Settings.h"
 #include "roles/repeater/clock/BoardClock.h"
+#include "roles/repeater/firstboot/Profile.h"
 #include "roles/repeater/link/BoardLink.h"
 
 namespace {
@@ -41,6 +42,7 @@ class BoardSettingsHost : public twinoak::SettingsHost {
   bool obsWake() const override { return twinoak::link::obsWakeEnabled(); }
   void setObsWake(bool on) override { twinoak::link::setObsWakeEnabled(on); }
   uint32_t clientSendsRefused() const override { return twinoak::link::clientRefused(); }
+  const char* firstBootState() const override { return twinoak::firstboot::stateText(); }
 };
 
 BoardSettingsHost g_settings_host;
@@ -65,7 +67,8 @@ const char* settingName(int i) { return twinoak::Settings::name(i); }
 
 const char* settingValue(int i) { return g_settings.value(i); }
 
-// `walter.wake 1`, `power.low_mv <mv>` and `power.crit_mv <mv>`; the other six are read-only.
+// `walter.wake 1`, `power.low_mv <mv>`, `power.crit_mv <mv>` and `obs.wake 0|1`; the other six
+// are read-only.
 bool settingSet(const char* name, const char* value) { return g_settings.set(name, value); }
 
 }  // namespace role

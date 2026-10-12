@@ -1,7 +1,7 @@
 // Our settings, as upstream's CLI sees them: `sensor list`, `sensor get <key>` and
 // `sensor set <key> <value>` (docs/ARCHITECTURE.md section 4's table, plus the two battery
 // thresholds of phase 1's task 06, the observation ring's wake switch and the mesh client's
-// refusal counter of phase 2).
+// refusal counter of phase 2, and the first boot's own outcome from phase 3's task 03).
 //
 // Why they are here and not only on the box link: these are the two ways into a unit that do not
 // need the Walter. The USB console at the field port is one; a **mesh admin** with a phone is the
@@ -67,6 +67,14 @@ struct SettingsHost {
   // whose own counters cannot be trusted about it: a person at the USB port, or a mesh admin with
   // a phone, can read it without the Walter's help.
   virtual uint32_t clientSendsRefused() const = 0;
+
+  // `firstboot.state`: what **this boot** did about the first-boot profile - `done`,
+  // `partial: <n> refused`, or `never` because settings existed already
+  // (src/roles/repeater/firstboot/Profile.h, phase 3's task 03). Read-only, and per boot: a unit
+  // provisioned weeks ago says `never`, which is the answer to "did this boot touch my settings".
+  // It is here rather than on the box link because the first thing anybody does with a fresh
+  // board is read it at the USB port, before a Walter is in the box at all.
+  virtual const char* firstBootState() const = 0;
 };
 
 class Settings {
@@ -78,7 +86,7 @@ class Settings {
   // own paging (`sensor list <start>`) counts in it.
   static int count();
   static const char* name(int i);
-  // The value of key i, or nullptr out of range. Valid until the next call: five of the nine
+  // The value of key i, or nullptr out of range. Valid until the next call: five of the ten
   // are formatted into a buffer of this object, which is how upstream's CLI uses them (it prints
   // one and then asks for the next).
   const char* value(int i);
@@ -87,7 +95,7 @@ class Settings {
   // "ok"; false when the key is not ours or the value is not one this key accepts, and upstream's
   // CLI then answers "can't find custom var" for both, which is its only other word.
   //
-  // Five of the nine keys are read-only and refuse every value. `walter.wake` accepts "1" and
+  // Six of the ten keys are read-only and refuse every value. `walter.wake` accepts "1" and
   // nothing else, and accepting it means "the machine was asked": whether an attention was
   // actually raised is the hourly limit's business, and `sensor get walter.wake` is where the
   // answer to that is read. `power.low_mv` and `power.crit_mv` take a decimal number of

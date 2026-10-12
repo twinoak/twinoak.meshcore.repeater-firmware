@@ -2,8 +2,9 @@
 # Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine,
 # settings table, power/environment readers, mesh-client job and observation ring behind a pipe)
 # and drives tools/linkcli.py against it: hello, ping, status, identity, time, time set, cli,
-# power, env, lpp, the job and its path, the five sends, the observations, sleep, an attention
-# and reboot, with no board and no serial port, plus the timed worst-case pass.
+# power, env, lpp, the job and its path, the five sends, the observations, sleep, an attention,
+# the first-boot profile and `provision`, and reboot, with no board and no serial port, plus the
+# timed worst-case pass.
 #
 # It needs a host C++ compiler. On Windows that is the container tasks/RUNBOOK.md section 2 names,
 # from the repository root:
@@ -33,6 +34,7 @@ echo "== build"
 g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/common/link/codec/*.cpp src/common/link/session/*.cpp \
   src/common/link/attention/*.cpp src/roles/repeater/clock/ClockKeeper.cpp src/roles/repeater/app/Settings.cpp \
+  src/roles/repeater/firstboot/Profile.cpp \
   src/roles/repeater/meshclient/Job.cpp src/roles/repeater/meshclient/LinkMeshClient.cpp \
   src/roles/repeater/meshclient/LinkObservations.cpp src/roles/repeater/meshclient/ObservationRing.cpp \
   src/roles/repeater/meshclient/Reply.cpp src/roles/repeater/meshclient/SendCeiling.cpp \
@@ -217,6 +219,85 @@ echo "== sleep, and then that attention on the wire: 0x00 0x00, 300 ms, and the 
 echo "   apart with repeat counting up. Four seconds of listening is four of the ten sends."
 $cli sleep 600
 python3 tools/linkcli.py --pipe "$out/linkloop --wake" listen 4
+
+echo
+echo "== the first-boot profile (phase 3's task 03). A boot that found its settings runs no line"
+echo "   and says 'never'; --first-boot is a board with none, and the shipped table then runs"
+echo "   through upstream's own command interface."
+$cli cli "sensor get firstboot.state"
+python3 tools/linkcli.py --pipe "$out/linkloop --first-boot" cli "sensor get firstboot.state"
+
+echo
+echo "== provision: the same lines a person types at the USB port, sent one by one over the link"
+echo "   (docs/provisioning.md). The file format is the profile's own: # comments, one command"
+echo "   line each, sent verbatim."
+cat > "$out/provision-ok.txt" <<'EOF'
+# A unit of the Danish mesh - docs/provisioning.md
+set name TwinOak-Bench
+set lat 55.3250
+set lon 10.4900
+set owner.info Thomas|twinoak.dk
+# the default scope of the Danish mesh. These answer with a sentence and not with OK, which is
+# a rule of its own in the tool (upstream's CommonCLI::handleRegionCmd).
+region default dk
+region save
+# the admin password, which is never printed back
+password sup3rsecret
+EOF
+python3 tools/linkcli.py --pipe "$out/linkloop" provision "$out/provision-ok.txt" \
+  > "$out/provision-ok.log" 2>&1
+cat "$out/provision-ok.log"
+echo
+echo "   and the password's value is nowhere in that output:"
+if grep -q "sup3rsecret" "$out/provision-ok.log"; then
+  echo "a password line's value was printed" >&2
+  exit 1
+fi
+grep -q "password \*\*\*\*" "$out/provision-ok.log" || {
+  echo "the password line was not shown as stars" >&2
+  exit 1
+}
+echo "   not printed, and shown as stars - as it should be"
+
+echo
+echo "== provision stops at the first refusal, and says which line it was"
+cat > "$out/provision-bad.txt" <<'EOF'
+set name TwinOak-Bench
+set nonsense 1
+set lat 55.3250
+EOF
+if python3 tools/linkcli.py --pipe "$out/linkloop" provision /dev/null > /dev/null 2>&1; then
+  echo "an empty file should not have been provisioned" >&2
+  exit 1
+fi
+printf 'region load\n' > "$out/provision-load.txt"
+if python3 tools/linkcli.py --pipe "$out/linkloop" provision "$out/provision-load.txt" \
+     > "$out/provision-load.log" 2>&1; then
+  echo 'a region load line should have been refused before anything was sent' >&2
+  exit 1
+fi
+cat "$out/provision-load.log"
+# The exit code is the tool's and not a pipeline's, so the log is a file and not a `tee`.
+if python3 tools/linkcli.py --pipe "$out/linkloop" provision "$out/provision-bad.txt" \
+     > "$out/provision-bad.log" 2>&1; then
+  cat "$out/provision-bad.log"
+  echo "a refused line should have failed the run" >&2
+  exit 1
+fi
+cat "$out/provision-bad.log"
+grep -q "stopped at line" "$out/provision-bad.log" || {
+  echo "the refusal was not reported" >&2
+  exit 1
+}
+if grep -q "set lat" "$out/provision-bad.log"; then
+  echo "the line after the refusal was still sent" >&2
+  exit 1
+fi
+echo "   stopped where it should, and nothing after it was sent"
+
+echo
+echo "== provision --dry-run reads the file and sends nothing"
+python3 tools/linkcli.py --pipe "$out/linkloop" provision "$out/provision-ok.txt" --dry-run
 
 echo
 echo "== reboot 0"
