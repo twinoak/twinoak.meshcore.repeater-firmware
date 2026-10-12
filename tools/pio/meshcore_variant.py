@@ -24,6 +24,13 @@
 # which header it could not find and this is the list to extend. The clone also leaves our own
 # -Werror (build_src_flags) where it belongs - on src/ - and not on upstream's files.
 #
+# **A role that compiles no MeshCore gets variant.cpp and nothing else.** The scanner
+# (src/roles/scanner/, phase 3's task 02) has no mesh and no board object, but it is the same
+# stamp and needs the same Arduino pin map, so it takes variant.cpp out of the same checkout and
+# leaves RAK4631Board.cpp - which is MeshCore - behind. The build says which it is by whether it
+# ignores the MeshCore library at all (platformio.ini: lib_ignore), because that is the same
+# switch that decides whether upstream's own sources are compiled.
+#
 # This script fails loudly, with docs/upstream.md's name in the message, when the pin moves or
 # renames what it reaches for, or when MC_VARIANT is set after all (two `board`s, two targets).
 
@@ -32,7 +39,10 @@ import os
 Import("env")  # noqa: F821  (SCons injects it)
 
 VARIANT = "rak4631"
-SOURCES = ("RAK4631Board.cpp", "variant.cpp")
+# The Arduino pin map, which every role of this board needs, and upstream's board object, which
+# only a role that compiles MeshCore can use.
+VARIANT_SOURCES = ("variant.cpp",)
+MESHCORE_SOURCES = ("RAK4631Board.cpp",)
 
 meshcore = os.path.join(env.subst("$PROJECT_LIBDEPS_DIR"), env.subst("$PIOENV"), "MeshCore")
 variant_dir = os.path.join(meshcore, "variants", VARIANT)
@@ -46,7 +56,14 @@ for item in env.get("CPPDEFINES", []):
             % VARIANT
         )
 
-for name in SOURCES:
+ignored = env.GetProjectOption("lib_ignore", [])
+if isinstance(ignored, str):
+    ignored = ignored.split()
+meshcore_in_build = "MeshCore" not in [name.strip() for name in ignored]
+
+sources = VARIANT_SOURCES + (MESHCORE_SOURCES if meshcore_in_build else ())
+
+for name in sources:
     if not os.path.isfile(os.path.join(variant_dir, name)):
         raise Exception(
             "MeshCore's variants/%s/%s is not at %s - has the pin moved it? (docs/upstream.md)"
@@ -63,6 +80,6 @@ venv.Append(CPPPATH=[os.path.join(meshcore, "src"), wire])
 lib = venv.BuildLibrary(
     os.path.join("$BUILD_DIR", "meshcore_variant"),
     variant_dir,
-    src_filter="-<*> " + " ".join("+<%s>" % name for name in SOURCES),
+    src_filter="-<*> " + " ".join("+<%s>" % name for name in sources),
 )
 env.Prepend(LIBS=[lib])

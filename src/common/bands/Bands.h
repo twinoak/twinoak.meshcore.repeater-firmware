@@ -56,6 +56,18 @@ constexpr bool known(const Band* rows, size_t count, const char* band) {
   return indexOf(rows, count, band) >= 0;
 }
 
+// The ends of a band, in MHz, or 0 for a band the table does not know - which cannot be a
+// frequency, so a caller that forgot to ask `known()` first gets a range no radio tunes rather
+// than a plausible one. The scanner's default sweep is a band's own range and is written nowhere
+// else (src/roles/scanner/config.h).
+constexpr double lowOf(const Band* rows, size_t count, const char* band) {
+  return indexOf(rows, count, band) < 0 ? 0.0 : rows[indexOf(rows, count, band)].low;
+}
+
+constexpr double highOf(const Band* rows, size_t count, const char* band) {
+  return indexOf(rows, count, band) < 0 ? 0.0 : rows[indexOf(rows, count, band)].high;
+}
+
 // Whether `mhz` is inside `band`. False for a band the table does not know, so a new band
 // cannot be shipped by naming it alone.
 constexpr bool holds(const Band* rows, size_t count, const char* band, double mhz) {

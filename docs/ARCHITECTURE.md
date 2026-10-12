@@ -13,11 +13,14 @@ platformio.ini          the pin, the libraries, one [img_*] and one [env:*] per 
                         [band_*] blocks, [env:native]
 boards/                 board definitions PlatformIO must see before it clones a dependency
 src/
-  common/               what every role on this board shares. An environment compiles all of it
+  common/               what the roles on this board share. An environment compiles all of it,
+                        or - a role that compiles no MeshCore - the files of it that are not
+                        MeshCore's side of the build (section 8)
     board/              target.h / target.cpp for our adapter: the board object, the radio, the
                         clock, the sensors; Boards.h (a row per board: the radio slot);
-                        RoleHooks.h (the six things common/ asks of the role); UpstreamHeaders.h,
-                        the one place upstream's headers are included from (section 11)
+                        RoleHooks.h (the six things common/ asks of the role); UpstreamHeaders.h
+                        and CoreHeaders.h, the two places upstream's headers are included from
+                        (section 11)
     bands/              Bands.h (a row per band) and the static_assert that holds a build's
                         default frequency to the band it says it is in
     fwdesc/             the image descriptor: the portable builder, and this image's own 96
@@ -36,11 +39,19 @@ src/
                         its flash file), LinkClock (the keeper as the link's ClockAccess)
       link/             BoardLink: the one Session and the board facts it answers from
       meshclient/       the job, the five sends, the reply, the observation ring (state portable)
+    scanner/            NoiseScope, moved here from the hardware repository (docs/noisescope.md)
+      main.cpp          ours: setup() and loop(), the two line buffers, the command dispatch
+      Commands, Lines, Sweep
+                        portable: what a command means, every NDJSON line, the sweep's points and
+                        the RSSI window - compiled by [env:native] beside test/test_scanner
+      Radio, Telemetry, Wdt
+                        the SX1262 through RadioLib, the RV-3028 and the INA3221, the watchdog
 test/                   native tests, one directory per subject
 spec/                   a copy of the system specification and its fixtures - never edited here
 keys/                   release.pub, the public half of the release key - and nothing secret, ever
-tools/                  verify.ps1, release/ (the release tooling and its tests), pio/ (build scripts)
-docs/                   this file, release.md, upstream.md, link.md, bench.md
+tools/                  verify.ps1, release/ (the release tooling and its tests), pio/ (build
+                        scripts), noisescope/ (the scanner's waterfall plotter)
+docs/                   this file, release.md, upstream.md, link.md, bench.md, noisescope.md
 tasks/                  the piles
 ```
 
@@ -468,7 +479,7 @@ PlatformIO environment, named `<role>_<board with its hyphens as underscores>`:
 | Role | What | When |
 |---|---|---|
 | `repeater` | everything above | phases 0–2 |
-| `scanner` | NoiseScope: the SX1262 spectrum scanner, RX only, moved here from the hardware repository | phase 3 |
+| `scanner` | NoiseScope: the SX1262 spectrum scanner, RX only, never writes flash (`docs/noisescope.md`) | phase 3 |
 | `bridge` | two radios of one unit carrying packets between two bands over a UART of their own | later |
 
 | Board | Slot | What | When |
@@ -536,19 +547,40 @@ Three things then check it, in the order a release meets them:
 A role that cannot do something says so in its capability bits rather than failing a request; the
 bridge will have its own messages in the reserved range. The scanner is the exception that proves
 the rule: NoiseScope 0.1 speaks text lines on the same UART, not frames, and the Walter tells the
-two apart as `spec/LINK-PROTOCOL.md` §9 says.
+two apart as `spec/LINK-PROTOCOL.md` §9 says. It still carries a descriptor, which is how the
+Walter knows which of the two it is about to flash before it flashes it.
 
 For the bridge, the second UART (`Serial2`, P0.19/P0.20) is reserved to connect the two radios of
 a dual adapter. `Serial1` stays the link to the Walter on every board.
 
+### What a role compiles of `common/`
+
+An environment compiles `common/` beside exactly one directory of `roles/`, and the repeater's
+compiles all of it. Three files of `common/` are **MeshCore's side of the build** —
+`board/target.cpp`, which exists to be upstream's `<target.h>`; `link/SerialTransport.cpp`, the
+box link's frames on a UART; `power/BoardPower.cpp`, which keeps a preferences file in the
+internal flash — and a role that compiles no MeshCore cannot have them. The scanner is such a
+role, so `[env:scanner_rak4630_single]`'s `build_src_filter` names the files of `common/` it
+uses, the way `[env:native]`'s does: the descriptor, the band table, the version, and the
+INA3221's arithmetic, reader and bus. A file it needs and that is not listed does not link,
+which is the loud end of that trade.
+
+The headers follow the same split. `src/common/board/CoreHeaders.h` is the Arduino core's own two
+headers as system headers, and `UpstreamHeaders.h` includes it and adds everything above the core
+(section 11); a file of `common/` that needs only `Wire` — today `power/WireBus.cpp` — includes
+the first and stops there, so it can be in a build that has no MeshCore at all.
+
 ### Adding a role
 
-1. `src/roles/<role>/` with its own `main.cpp`, and a definition of all six functions of
-   `src/common/board/RoleHooks.h` — without them it does not link.
+1. `src/roles/<role>/` with its own `main.cpp`, and a definition of every function of
+   `src/common/board/RoleHooks.h` that the files of `common/` the environment compiles reach —
+   all six for a role that compiles all of `common/`, and none for one that compiles neither
+   `board/target.cpp` nor `power/BoardPower.cpp`. There is no weak default: a role that forgets
+   one does not link, and the error names it.
 2. `[img_<role>_<board>]` in `platformio.ini` with `role`, `board` and `band`, and
-   `[env:<role>_<board>]` beside it: `build_src_filter = +<common/> +<roles/<role>/>`, the three
-   `TWINOAK_*` defines interpolated from that `[img_*]` section, and the band's five radio flags
-   from its `[band_*]` block.
+   `[env:<role>_<board>]` beside it: `build_src_filter = +<common/> +<roles/<role>/>` (or the
+   list above), the three `TWINOAK_*` defines interpolated from that `[img_*]` section, and the
+   band's radio flags from its `[band_*]` block.
 3. A row in the **Role** table above. The role's name must be one of the codes of
    `spec/FIRMWARE-MANIFEST.md` §4 — `bridge` and `scanner` are already there;
    `src/common/fwdesc/Descriptor.h`'s `roleCode()` is this firmware's copy of that list, and a
@@ -621,6 +653,16 @@ against the build, by the task that first compiled our application onto upstream
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/common/board/UpstreamHeaders.h` and `src/roles/repeater/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Corrections and additions made above by **p3-02**, NoiseScope: §1 (`src/roles/scanner/`,
+`tools/noisescope/` and the second header wrapper) and §8 (*what a role compiles of `common/`*,
+which is new, and the two lists after it). Two claims about the pinned checkout were read for it
+and are worth recording here with the rest:
+
+| Claim | Evidence |
+|---|---|
+| the Adafruit core at this pin has no `WisCore_RAK4631_Board` variant, so **both** roles take the Arduino pin map out of MeshCore's tree | `~/.platformio/packages/framework-arduinoadafruitnrf52/variants/` at `d5413016` has thirteen variants and none of them is it; `boards/rak4631.json` names that variant, and `variant.h` resolves through `-I ${meshcore.dir}/variants/rak4631`. `tools/pio/meshcore_variant.py` compiles `variant.cpp` for every role of this board and `RAK4631Board.cpp` only for a role that compiles MeshCore |
+| the SX1262 of the RAK4630 stamp is unpowered until `SX126X_POWER_EN` is driven high | `variants/rak4631/variant.h:155` defines it as pin 37 (P1.05) and `RAK4631Board.cpp:58-66` is `pinMode(SX126X_POWER_EN, OUTPUT)`, the boot-voltage check, `digitalWrite(..., HIGH)` and `delay(10)` with the comment "give sx1262 some time to power up"; `initiateShutdown` drives it low again. After a reset the GPIO is an input, so a firmware that never drives it leaves the radio unpowered — which NoiseScope did, and `src/roles/scanner/Radio.cpp` now does not (`tasks/phase-3/reports/02.md`) |
 
 Corrections and additions made above by **p3-01**, roles and boards: §1 (the tree, which is now
 `src/common/` and `src/roles/<role>/`, and the one seam between them), §8 (rewritten: an image's

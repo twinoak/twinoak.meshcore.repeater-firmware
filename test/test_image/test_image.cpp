@@ -360,6 +360,18 @@ TEST(Descriptor, TheRoleCodesAreTheSpecifications) {
   EXPECT_EQ(unsigned(twinoak::link::kRoleScanner), unsigned(fwdesc::kRoleScanner));
 }
 
+TEST(Descriptor, TheRoleNameOfACodeIsTheNameThatMadeIt) {
+  // The scanner prints its own `role` out of its descriptor's role byte rather than out of the
+  // define that made it (src/roles/scanner/main.cpp), so the two directions have to agree.
+  for (const char* role : {"repeater", "bridge", "scanner", "manager"}) {
+    EXPECT_STREQ(role, fwdesc::roleName(fwdesc::roleCode(role)));
+  }
+  EXPECT_STREQ("unknown", fwdesc::roleName(fwdesc::kRoleUnknown));
+  EXPECT_STREQ("unknown", fwdesc::roleName(99)) << "a code with no name is not given one";
+  EXPECT_EQ(unsigned(fwdesc::kRoleUnknown), unsigned(fwdesc::roleCode(fwdesc::roleName(99))))
+      << "and the round trip does not invent a role out of the word 'unknown'";
+}
+
 // ================================================================= 2. the names
 
 TEST(Names, EveryBoardEnvironmentHasAnImageSectionAndIsNamedAfterIt) {
@@ -546,6 +558,21 @@ TEST(Bands, AMadeUpBandBehavesLikeARealOne) {
   EXPECT_TRUE(holds(kMadeUp, kCount, "915", 928.0));
   EXPECT_FALSE(holds(kMadeUp, kCount, "915", 901.9));
   EXPECT_FALSE(holds(kMadeUp, kCount, "868", 915.0));
+}
+
+TEST(Bands, ABandsOwnEndsAreReadableAndABandWithNoRowHasNone) {
+  using namespace twinoak::bands;  // NOLINT
+  // The scanner's default sweep is the band's range and is written nowhere else
+  // (src/roles/scanner/config.h), so the table has to be able to say what that range is.
+  EXPECT_DOUBLE_EQ(863.0, lowOf(kBands, kBandCount, "868"));
+  EXPECT_DOUBLE_EQ(870.0, highOf(kBands, kBandCount, "868"));
+  EXPECT_DOUBLE_EQ(0.0, lowOf(kBands, kBandCount, "433"))
+      << "a band the table does not know has no range, and 0 MHz is no frequency at all";
+  EXPECT_DOUBLE_EQ(0.0, highOf(kBands, kBandCount, "433"));
+  // At compile time too, which is what lets a build take its sweep from it.
+  static constexpr Band kMadeUp[] = {{"915", 902.0, 928.0}};
+  static_assert(lowOf(kMadeUp, 1, "915") == 902.0, "a band's low end is a constant expression");
+  static_assert(highOf(kMadeUp, 1, "915") == 928.0, "and so is its high end");
 }
 
 TEST(Bands, EveryBandOfPlatformioIniHasARowAndItsDefaultFrequencyFitsIt) {

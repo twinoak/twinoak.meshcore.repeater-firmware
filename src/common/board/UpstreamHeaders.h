@@ -1,5 +1,9 @@
-// Every upstream header the board side uses - the Adafruit core's, RadioLib's, MeshCore's -
-// included from one place, as system headers.
+// Every upstream header the repeater's side of the build uses - the Adafruit core's, RadioLib's,
+// MeshCore's - included from one place, as system headers.
+//
+// The core's own two are src/common/board/CoreHeaders.h, which this file includes: a role that
+// compiles no MeshCore (src/roles/scanner/) and a file of common/ that needs only `Wire`
+// include that one and stop there. Everything above the core is here.
 //
 // src/ is built with -Wall -Wextra -Werror (platformio.ini, build_src_flags) and upstream's
 // headers are not written to that standard: unused parameters of inline virtuals (MeshCore.h,
@@ -24,8 +28,9 @@
 
 #pragma GCC system_header
 
-#include <Arduino.h>
-#include <Wire.h>
+// The Arduino core's two, beside this file: a role that compiles no MeshCore includes that file
+// and stops there (src/common/board/CoreHeaders.h says why the wrapper is split in two).
+#include "CoreHeaders.h"
 
 #define RADIOLIB_STATIC_ONLY 1
 #include <RadioLib.h>

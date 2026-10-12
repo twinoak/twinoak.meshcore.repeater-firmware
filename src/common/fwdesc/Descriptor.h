@@ -90,6 +90,19 @@ constexpr uint8_t roleCode(const char* role) {
                                      : kRoleUnknown;
 }
 
+// The name of a role code - the inverse of roleCode() over the same list, and the string a
+// reader of the descriptor prints. "unknown" for a code this firmware has no name for, which is
+// a word and not a role: roleCode("unknown") is kRoleUnknown, so the two never make a round trip
+// that invents a role. src/roles/scanner/ reads its own `role` field out of the image's bytes
+// through this (its NDJSON `boot` and `info` lines, docs/noisescope.md).
+constexpr const char* roleName(uint8_t code) {
+  return code == kRoleRepeater  ? "repeater"
+         : code == kRoleBridge  ? "bridge"
+         : code == kRoleScanner ? "scanner"
+         : code == kRoleManager ? "manager"
+                                : "unknown";
+}
+
 // --- the CRC ------------------------------------------------------------------------------
 
 // CRC-32 as in IEEE 802.3 and zlib: the reflected polynomial, initial and final complement.
