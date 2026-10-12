@@ -1,4 +1,4 @@
-// src/roles/repeater/app/Settings.{h,cpp}: our nine keys as upstream's CLI sees them - `sensor list`,
+// src/roles/repeater/app/Settings.{h,cpp}: our ten keys as upstream's CLI sees them - `sensor list`,
 // `sensor get <key>`, `sensor set <key> <value>` - against a fake host.
 //
 // What is checked: the order of `sensor list` is stable (it is what a bench reads and what
@@ -9,11 +9,11 @@
 // counter that takes nothing at all.
 //
 // The last tests are the arithmetic of upstream's own `sensor list`, which stops adding lines
-// once it has written 134 bytes into a 160-byte reply: with these nine keys in this order a
+// once it has written 134 bytes into a 160-byte reply: with these ten keys in this order a
 // fresh node prints task 05's five and `... next:5`, a node whose counters have grown wide
-// prints four and `... next:4`, `sensor list 5` prints the four that are left - and
-// the one case that would be longer than the window (a release version string together with a
-// `restored` clock) is measured here rather than found on a bench.
+// prints four and `... next:4`, `sensor list 5` prints the five that are left - and the two
+// cases that reach the end of the window (the tenth key's own `10 vars` header, and a release
+// version string) are measured here rather than found on a bench.
 
 #include <gtest/gtest.h>
 
@@ -47,6 +47,7 @@ class FakeHost : public twinoak::SettingsHost {
   bool obs_wake = false;
   int obs_sets = 0;
   uint32_t refused = 0;
+  std::string first_boot = "never";
 
   const char* fwVersion() const override { return version.c_str(); }
   uint16_t linkErrors() const override { return errors; }
@@ -78,6 +79,7 @@ class FakeHost : public twinoak::SettingsHost {
     obs_wake = on;
   }
   uint32_t clientSendsRefused() const override { return refused; }
+  const char* firstBootState() const override { return first_boot.c_str(); }
 };
 
 }  // namespace
@@ -85,19 +87,22 @@ class FakeHost : public twinoak::SettingsHost {
 TEST(TheTable, TheOrderIsStableAndIsWhatSensorListPrints) {
   FakeHost host;
   twinoak::Settings s(host);
-  ASSERT_EQ(9, twinoak::Settings::count());
+  ASSERT_EQ(10, twinoak::Settings::count());
 
-  // Task 05's five, in task 05's order, then task 06's two, then phase 2's task 03's and 04's.
-  const char* const want[] = {"fw.version",    "walter.wake",   "link.errors",
-                              "walter.seen",   "clock.state",   "power.low_mv",
-                              "power.crit_mv", "obs.wake",      "client.refused"};
+  // Task 05's five, in task 05's order, then task 06's two, then phase 2's task 03's and 04's,
+  // then phase 3's task 03's - every later task's key appended, so nothing already documented
+  // moved.
+  const char* const want[] = {"fw.version",     "walter.wake",   "link.errors",
+                              "walter.seen",    "clock.state",   "power.low_mv",
+                              "power.crit_mv",  "obs.wake",      "client.refused",
+                              "firstboot.state"};
   for (int i = 0; i < twinoak::Settings::count(); i++) {
     EXPECT_STREQ(want[i], twinoak::Settings::name(i)) << "index " << i;
   }
   EXPECT_EQ(nullptr, twinoak::Settings::name(-1));
-  EXPECT_EQ(nullptr, twinoak::Settings::name(9));
+  EXPECT_EQ(nullptr, twinoak::Settings::name(10));
   EXPECT_EQ(nullptr, s.value(-1));
-  EXPECT_EQ(nullptr, s.value(9));
+  EXPECT_EQ(nullptr, s.value(10));
 }
 
 TEST(TheTable, EveryValueIsWhatTheHostSays) {
@@ -114,6 +119,7 @@ TEST(TheTable, EveryValueIsWhatTheHostSays) {
   EXPECT_STREQ("3300", s.value(6)) << "power.crit_mv, the default";
   EXPECT_STREQ("0", s.value(7)) << "obs.wake, off at boot";
   EXPECT_STREQ("0", s.value(8)) << "client.refused, on a node whose Walter paces itself";
+  EXPECT_STREQ("never", s.value(9)) << "firstboot.state, on a boot that found its settings";
 
   // And one that has been running, with thresholds somebody set.
   host.errors = 65535;  // the counter saturates there
@@ -133,17 +139,20 @@ TEST(TheTable, EveryValueIsWhatTheHostSays) {
   EXPECT_STREQ("1", s.value(7));
   host.refused = 4294967295u;
   EXPECT_STREQ("4294967295", s.value(8)) << "and the widest the counter can say still fits";
+  host.first_boot = "partial: 2 refused";
+  EXPECT_STREQ("partial: 2 refused", s.value(9)) << "firstboot.state is the host's own string";
 }
 
-TEST(TheTable, FiveOfTheNineAreReadOnlyAndAnUnknownKeyIsNotOurs) {
+TEST(TheTable, SixOfTheTenAreReadOnlyAndAnUnknownKeyIsNotOurs) {
   FakeHost host;
   twinoak::Settings s(host);
 
   // `client.refused` is read-only on purpose: the ceiling it counts is a build constant, because
   // a limit the Walter could raise would be no backstop against the Walter
   // (src/roles/repeater/meshclient/SendCeiling.h).
-  const char* const read_only[] = {"fw.version", "link.errors", "walter.seen", "clock.state",
-                                   "client.refused"};
+  // `firstboot.state` likewise: it says what a boot did, and a boot cannot be talked out of it.
+  const char* const read_only[] = {"fw.version",     "link.errors", "walter.seen", "clock.state",
+                                   "client.refused", "firstboot.state"};
   for (const char* key : read_only) {
     EXPECT_FALSE(s.set(key, "1")) << key;
     EXPECT_FALSE(s.set(key, "x")) << key;
@@ -170,6 +179,9 @@ TEST(TheTable, FiveOfTheNineAreReadOnlyAndAnUnknownKeyIsNotOurs) {
   EXPECT_FALSE(s.set("client.refuse", "0"));
   EXPECT_FALSE(s.set("client.refused", "0"));
   EXPECT_FALSE(s.set("client.refused", "1"));
+  EXPECT_FALSE(s.set("firstboot.stat", "done"));
+  EXPECT_FALSE(s.set("firstboot.state", "done"));
+  EXPECT_FALSE(s.set("firstboot.state", "never"));
   EXPECT_EQ(0, host.wakes);
   EXPECT_EQ(0, host.low_sets);
   EXPECT_EQ(0, host.obs_sets);
@@ -289,22 +301,28 @@ TEST(SensorList, AFreshNodeListsTaskFivesFiveAndPagesTheRest) {
   int printed = 0;
   const std::string page1 = sensorList(s, 0, printed);
   EXPECT_EQ(5, printed) << page1;
-  EXPECT_EQ(159u, page1.size()) << page1;
-  EXPECT_LT(page1.size(), 160u) << page1;
+  // 160 characters, where nine keys wrote 159: the tenth key made upstream's own header one
+  // byte longer (`10 vars`, not `9 vars`) and nothing else about this page changed. The window
+  // holds 159 characters and a NUL, so what the console prints and what the link sends is this
+  // page without the digit of `... next:5`, and the 64 guard bytes behind the window are what
+  // absorb the byte (src/roles/repeater/main.cpp, src/common/link/session/Session.h).
+  EXPECT_EQ(160u, page1.size()) << page1;
   EXPECT_NE(std::string::npos, page1.find("walter.wake=0\n")) << page1;
   EXPECT_NE(std::string::npos, page1.find("walter.seen=42\n")) << page1;
   EXPECT_NE(std::string::npos, page1.find("clock.state=restored\n")) << page1;
-  EXPECT_NE(std::string::npos, page1.find("... next:5")) << page1;
+  EXPECT_NE(std::string::npos, page1.substr(0, 159).find("... next:")) << page1;
   EXPECT_EQ(std::string::npos, page1.find("power.low_mv")) << page1;
 
-  // `sensor list 5` is the rest of it, and the pair of thresholds is together.
+  // `sensor list 5` is the rest of it - all five of them on one page, the pair of thresholds
+  // together - and it is nowhere near the window.
   const std::string page2 = sensorList(s, 5, printed);
-  EXPECT_EQ(4, printed) << page2;
-  EXPECT_LT(page2.size(), 160u) << page2;
+  EXPECT_EQ(5, printed) << page2;
+  EXPECT_GT(160u, page2.size()) << page2;
   EXPECT_NE(std::string::npos, page2.find("power.low_mv=3500\n")) << page2;
   EXPECT_NE(std::string::npos, page2.find("power.crit_mv=3300\n")) << page2;
   EXPECT_NE(std::string::npos, page2.find("obs.wake=0\n")) << page2;
-  EXPECT_NE(std::string::npos, page2.find("client.refused=0")) << page2;
+  EXPECT_NE(std::string::npos, page2.find("client.refused=0\n")) << page2;
+  EXPECT_NE(std::string::npos, page2.find("firstboot.state=never")) << page2;
   EXPECT_EQ(std::string::npos, page2.find("next:")) << page2;
 }
 
@@ -331,11 +349,11 @@ TEST(SensorList, WithBothCountersAtTheirWidestOnlyFourFitAndNothingOverruns) {
   EXPECT_EQ(std::string::npos, out.find("clock.state")) << out;
 }
 
-TEST(SensorList, TheOneCaseThatOutgrowsTheWindowIsKnownCountedAndCutRatherThanSpilled) {
+TEST(SensorList, TheReleaseVersionCaseIsKnownCountedAndCutRatherThanSpilled) {
   // A release image's version string is longer than `0.0.0-dev` (the release build passes
   // TWINOAK_FW_VERSION, src/common/version/Version.cpp), which pushes the fw.version line from 78 bytes to
   // 82 - and with a `restored` clock and both counters still narrow, upstream's own loop writes
-  // 162 bytes into a 160-byte reply.
+  // 163 bytes into a 160-byte reply.
   FakeHost host;
   host.version = "twinoak-repeater 0.1.0+abc1234 on MeshCore repeater-v1.17.1 (d9296435)";
   host.seen = true;
@@ -346,13 +364,14 @@ TEST(SensorList, TheOneCaseThatOutgrowsTheWindowIsKnownCountedAndCutRatherThanSp
   int printed = 0;
   const std::string out = sensorList(s, 0, printed);
   EXPECT_EQ(5, printed) << out;
-  EXPECT_EQ(162u, out.size()) << out;
+  EXPECT_EQ(163u, out.size()) << out;
 
-  // What the firmware does with it: the session's 64 guard bytes absorb the write, the cut is
-  // counted, and what leaves the link is the window's own 159 characters
-  // (src/common/link/session/Session.cpp's cliHandler; test/test_link_session drives the real thing).
-  // So the cost is the tail of `... next:5` and nothing else - every key is still readable with
-  // `sensor get`, and `sensor list 5` still prints the pair.
+  // What the firmware does with it: 64 guard bytes behind the window absorb the write - the
+  // link's and the console's alike - the link counts the cut, and what goes out is the window's
+  // own 159 characters (src/common/link/session/Session.cpp's cliHandler and
+  // src/roles/repeater/main.cpp; test/test_link_session drives the real session). So the cost is
+  // the tail of `... next:5` and nothing else - every key is still readable with `sensor get`,
+  // and `sensor list 5` still prints the five that are left.
   EXPECT_LT(out.size(), 160u + 64u) << "and it stays well inside the guard";
   EXPECT_NE(std::string::npos, out.substr(0, 159).find("clock.state=restored")) << out;
 }

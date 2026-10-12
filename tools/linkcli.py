@@ -54,6 +54,15 @@ A password is read from a prompt, never the command line, and printed as stars.
     python3 tools/linkcli.py --port COM7 obs                   # the adverts the node heard
     python3 tools/linkcli.py --port COM7 obs 2 --names         # ... with the names decoded here
 
+    python3 tools/linkcli.py --port COM7 provision unit.txt    # a file of console lines, one by one
+    python3 tools/linkcli.py --port COM7 provision unit.txt --dry-run
+
+Provisioning (phase 3's task 03, `docs/provisioning.md`): the lines that make a board *this*
+unit - its name, its place, its passwords - sent one at a time as `CLI` requests, which is what
+the Walter will do. The file format is the first-boot profile's own: a `#` line is a comment,
+a blank line is nothing, and every other line is a console command sent exactly as it stands.
+It **stops at the first refusal** and never prints a `password` line's value.
+
 The observation ring (phase 2's task 03): every advert the repeater heard, with the path it
 arrived by and how well it was heard. **The records a pull returns leave the ring**, so this is
 a collection and not a view. The node never parses an advert's application data; `--names`
@@ -763,6 +772,168 @@ def cmd_cli(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+# ----------------------------------------------------------------------------- provisioning (5.7)
+#
+# `provision <file>` is `cli` once per line of a file, with three rules the firmware's own
+# first-boot profile has too (src/roles/repeater/firstboot/Profile.h):
+#
+#   - **a reply decides.** Upstream's interpreter has no status code: the outcome of a `set` is
+#     the English in its reply, and every acceptance it can produce begins with `OK` or `ok`,
+#     optionally in brackets. `reply_accepted` below is the same rule as the firmware's, in the
+#     same words, so a line judged taken here is one the node took;
+#   - **it stops at the first refusal.** A provisioning file is a sequence a person wrote; a
+#     refusal in the middle of it means the rest was written against a different firmware or a
+#     different board, and sending it anyway would leave a half-configured unit nobody told;
+#   - **a password is never printed.** Not the value in the line - `password ****`, four stars
+#     whatever its length - and not the reply either, because upstream's `password` branch echoes
+#     the new password back on purpose and its refusals can echo the line.
+
+# What a reply means (the rule, and the two replies that are neither - Profile.h says why).
+def reply_accepted(text):
+    i = 0
+    while i < len(text) and text[i] == " ":
+        i += 1
+    if i < len(text) and text[i] == "(":
+        i += 1
+        while i < len(text) and text[i] == " ":
+            i += 1
+    head = text[i:i + 2].lower()
+    if head != "ok":
+        return False
+    rest = text[i + 2:i + 3]
+    return rest in ("", " ", ",", "-", ":", ".", "!", ")")
+
+
+def accepted(line, text):
+    """Whether the node took this line. One line has its own rule, and upstream is why.
+
+    Upstream has no status code: the outcome of a line is the English in its reply, and almost
+    every acceptance it can produce begins with `OK` or `ok`. Two families of line do not, and
+    each gets its own rule read off upstream's own branch:
+
+      - `password <new>` is answered `password now: <the new password>` (CommonCLI.cpp's
+        `password` branch at the pin d9296435) - a success that does not begin with `OK`, and the
+        one reply this tool must never print. The firmware's own first-boot profile judges that
+        same reply a **refusal**, on purpose: no line of a table compiled into an image may carry
+        a password at all (spec/SYSTEM.md S-13, src/roles/repeater/firstboot/Profile.h). Here a
+        person is typing it deliberately, so here it is a success - the two rules disagree
+        exactly where the two jobs do;
+      - the `region` commands answer with the region tree or with a sentence about the home or
+        default scope, and every failure of theirs begins with `Err`.
+    """
+    words = line.split()
+    head = words[0].lower() if words else ""
+    if head == "password":
+        return text.startswith("password now:")
+    if head == "region":
+        # Upstream's `region` branch answers with the region tree, ` home is <x>` or ` default
+        # scope is now <x>` - never `OK` - and every one of its failures begins with `Err`
+        # (CommonCLI::handleRegionCmd, src/helpers/CommonCLI.cpp at the pin d9296435). So for
+        # these lines the rule is the absence of that word.
+        return not text.strip().startswith("Err")
+    return reply_accepted(text)
+
+
+def is_password_line(line):
+    """Whether this line carries a password: `password <new>`, or a key whose name ends in one."""
+    words = line.split()
+    if not words:
+        return False
+    if words[0].lower() == "password":
+        return True
+    return words[0].lower() == "set" and len(words) >= 2 and words[1].lower().endswith("password")
+
+
+def starred(line):
+    """The line with its value replaced by four stars - never the real length."""
+    words = line.split(" ")
+    if words[0].lower() == "password":
+        return "password ****"
+    if len(words) >= 2:
+        return "%s %s ****" % (words[0], words[1])
+    return line
+
+
+def read_provision_file(path):
+    """The lines of a provisioning file, or (None, message). The format is the profile's own."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = handle.read().splitlines()
+    except OSError as exc:
+        return None, "cannot read %s: %s" % (path, exc)
+    lines = []
+    for n, text in enumerate(raw, 1):
+        stripped = text.strip()
+        if stripped == "" or stripped.startswith("#"):
+            continue
+        # Sent exactly as it stands: a trailing space is part of the value upstream stores, which
+        # is how a string setting is cleared (`set guest.password ` with the space).
+        encoded = text.encode("utf-8")
+        if len(encoded) > 160:
+            return None, "%s:%d: that line is %d bytes; the protocol takes 160" % (
+                path, n, len(encoded))
+        if any(ord(c) < 0x20 or ord(c) == 0x7f for c in text):
+            return None, "%s:%d: a control character; a line is UTF-8 text without them" % (
+                path, n)
+        if text.strip().startswith("region load"):
+            return None, ("%s:%d: `region load` puts the interpreter into a mode that only a "
+                          "blank line ends, and a blank line is not a legal CLI request "
+                          "(docs/link.md). Define regions with `region def` or `region put`."
+                          % (path, n))
+        if any(text.startswith(word) for word in CLI_NO_ANSWER):
+            return None, ("%s:%d: `%s` restarts the node and answers nothing, so a file cannot "
+                          "be provisioned past it - take it out and reboot by hand afterwards"
+                          % (path, n, text.split()[0]))
+        lines.append((n, text))
+    return lines, None
+
+
+def cmd_provision(link, args):
+    """A file of console lines, one at a time, stopping at the first refusal (5.7)."""
+    lines, problem = read_provision_file(args.file)
+    if problem is not None:
+        print(problem, file=sys.stderr)
+        return 2
+    if not lines:
+        print("%s has no command lines in it (a `#` line is a comment)" % args.file,
+              file=sys.stderr)
+        return 2
+
+    print("provision %s: %d line(s)%s"
+          % (args.file, len(lines), " (dry run, nothing is sent)" if args.dry_run else ""))
+    for n, line in lines:
+        secret = is_password_line(line)
+        shown = starred(line) if secret else line
+        print("  %-4s %s" % ("%d:" % n, shown))
+        if args.dry_run:
+            continue
+        f = link.request(ref.CLI, {"text": line})
+        if f.get("status") != ref.OK:
+            print("       -> status %d (%s)"
+                  % (f["status"], STATUS_NAMES.get(f["status"], "?")))
+            print("provision stopped at line %d of %s: the link refused it" % (n, args.file),
+                  file=sys.stderr)
+            return 1
+        text = f["text"]
+        took_it = accepted(line, text)
+        if secret:
+            # Neither the reply nor anything derived from it: upstream's `password` branch echoes
+            # the new password, and `unknown config: <line>` would echo the whole line.
+            print("       -> %s (the reply to a password line is not printed)"
+                  % ("accepted" if took_it else "refused"))
+        else:
+            print("       -> %s" % text.replace("\n", "\n          "))
+        if not took_it:
+            print("provision stopped at line %d of %s: the node did not take it. Nothing after "
+                  "it was sent." % (n, args.file), file=sys.stderr)
+            return 1
+    if args.dry_run:
+        print("the file reads; nothing was sent")
+    else:
+        print("every line was taken")
+    return 0
+
+
 def cmd_power(link, args):
     """The three INA3221 channels, each with the board's own shunt already applied (5.8)."""
     f = link.request(ref.POWER_GET, {})
@@ -1114,6 +1285,12 @@ def build_parser():
     c.add_argument("words", nargs=argparse.REMAINDER, metavar='"<command line>"',
                    help="the line, exactly as it would be typed on the USB console")
     c.set_defaults(run=cmd_cli)
+    prov = subs.add_parser("provision",
+                           help="a file of console lines, one at a time (5.7, docs/provisioning.md)")
+    prov.add_argument("file", help="a text file: `#` comments, one console command line each")
+    prov.add_argument("--dry-run", action="store_true",
+                      help="read the file and print what would be sent, and send nothing")
+    prov.set_defaults(run=cmd_provision)
     subs.add_parser("power", help="the three INA3221 channels, shunts applied (5.8)").set_defaults(
         run=cmd_power)
     subs.add_parser("env", help="temperature, humidity and pressure in the box (5.8)").set_defaults(

@@ -8,27 +8,32 @@ namespace {
 
 // The order `sensor list` prints, and the order upstream's paging counts in. **It is phase 1's
 // task 05's order of five keys with the later tasks' appended** - task 06's two thresholds, then
-// phase 2's task 03's `obs.wake` and its task 04's `client.refused` - which is the only place a
-// new key can go without renumbering one a bench instruction or a document already names
-// (docs/link.md, docs/bench.md, tasks/phase-1/reports/05.md).
+// phase 2's task 03's `obs.wake` and its task 04's `client.refused`, then phase 3's task 03's
+// `firstboot.state` - which is the only place a new key can go without renumbering one a bench
+// instruction or a document already names (docs/link.md, docs/bench.md,
+// tasks/phase-1/reports/05.md).
 //
 // That order was chosen for one quirk of upstream's: `sensor list` stops adding lines once it has
 // written **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp at the pin d9296435),
 // and the `fw.version` line alone is 78 of them. With five keys everything fitted on one page.
-// With nine it does not, and what the order buys is that **the key pushed off is pushed by a
+// With ten it does not, and what the order buys is that **the key pushed off is pushed by a
 // width and the pair of thresholds stays together**:
 //
-//   - a fresh node lists all five of task 05's and `... next:5`, 159 bytes of the 160;
+//   - a fresh node lists all five of task 05's and `... next:5`;
 //   - a node whose counters have grown wide lists four and `... next:4`;
-//   - `sensor list 5` is then how the two thresholds, `obs.wake` and `client.refused` are read,
-//     and `sensor get <key>` always works whatever the paging does.
+//   - `sensor list 5` is then how the two thresholds, `obs.wake`, `client.refused` and
+//     `firstboot.state` are read - all five of them on one page - and `sensor get <key>` always
+//     works whatever the paging does.
 //
-// A listing that would be longer than the window is **cut, not spilled**: the session keeps 64
-// guard bytes behind upstream's 160 and counts the cut (src/common/link/session/Session.h,
-// cliTruncations). The one case that reaches it is a release whose version string is longer than
-// `0.0.0-dev` *and* a clock state of `restored` - 162 bytes, cut at 159, which costs the tail of
-// `... next:5` and nothing else. tasks/phase-1/reports/06.md has that arithmetic; the test below
-// walks upstream's own loop over this table so that it is measured and not assumed.
+// A listing that would be longer than the window is **cut, not spilled**: the console and the
+// session both keep 64 guard bytes behind upstream's 160, and the session counts the cut
+// (src/common/link/session/Session.h, cliTruncations; src/roles/repeater/main.cpp has the
+// console's). Two cases reach it, both measured in the test below rather than found on a bench:
+// the tenth key made the header a byte longer (`10 vars`), so a node with a `restored` clock
+// writes 160 characters where it wrote 159 and loses the digit of `... next:5`; and a release
+// whose version string is longer than `0.0.0-dev` writes 163. The cost in both is the tail of
+// `... next:5` and nothing else - every key is still readable with `sensor get`, and `sensor
+// list 5` still prints the five that are left.
 
 enum Key : int {
   kFwVersion = 0,
@@ -40,12 +45,14 @@ enum Key : int {
   kPowerCritMv,
   kObsWake,
   kClientRefused,
+  kFirstBootState,
   kKeyCount,
 };
 
 const char* const kNames[kKeyCount] = {
-    "fw.version",   "walter.wake",   "link.errors", "walter.seen", "clock.state",
-    "power.low_mv", "power.crit_mv", "obs.wake",    "client.refused",
+    "fw.version",     "walter.wake",    "link.errors", "walter.seen", "clock.state",
+    "power.low_mv",   "power.crit_mv",  "obs.wake",    "client.refused",
+    "firstboot.state",
 };
 
 // A decimal millivolt value, with nothing else in it: "3500" yes, "3500 " no, "3.5" no, "+3500"
@@ -103,6 +110,10 @@ const char* Settings::value(int i) {
       // every node whose Walter paces itself to the server's budget, which is every healthy one.
       snprintf(buf_, sizeof(buf_), "%lu", (unsigned long)host_.clientSendsRefused());
       return buf_;
+    case kFirstBootState:
+      // `never`, `done` or `partial: <n> refused` - the host's own string, not this object's
+      // buffer (src/roles/repeater/firstboot/Profile.h).
+      return host_.firstBootState();
     default:
       return nullptr;
   }
@@ -133,7 +144,7 @@ bool Settings::set(const char* name, const char* value) {
     host_.setObsWake(on);
     return true;
   }
-  return false;  // the other five are read-only
+  return false;  // the other six are read-only
 }
 
 }  // namespace twinoak

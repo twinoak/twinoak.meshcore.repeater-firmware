@@ -72,14 +72,16 @@ How to read a line:
   after `erase` - one more line, `First boot: a random admin password was set
   (not shown; …)`. `ver` says `v1.17.1 (Build: 14 Aug 2026)`, upstream's.
   `board` says `RAK 4631`. `get radio` says `869.618,62.5,8,8`. `sensor list`
-  says **`9 vars`** and prints the first five of them -
+  says **`10 vars`** and prints the first five of them -
   `fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1
   (d9296435)` (a release build says its version instead), then `walter.wake`,
-  `link.errors`, `walter.seen` and `clock.state` - and `... next:5`, because
-  upstream stops a listing at 134 bytes; `sensor list 5` is the other four
-  (§5's last-but-one line walks the paging). `sensor get fw.version` is the
-  same string; `sensor set fw.version x` is refused (`can't find custom var`,
-  upstream's wording for a key that took no value).
+  `link.errors`, `walter.seen` and `clock.state` - and then `... next:` with
+  **the digit cut**, because upstream stops a listing at 134 bytes and the
+  tenth key made its header one byte longer (§5's paging line walks it, and
+  `tasks/phase-3/reports/03.md` has the arithmetic); `sensor list 5` is the
+  other five. `sensor get fw.version` is the same string; `sensor set
+  fw.version x` is refused (`can't find custom var`, upstream's wording for a
+  key that took no value).
 - [ ] **p1-01** It hears adverts (`neighbors` after a few minutes on the roof
   antenna) and repeats (a message through it from a phone).
 - [ ] **p1-01** A phone login with the password `password` is refused, and so
@@ -199,7 +201,7 @@ mesh admin.
   upstream refuses over the mesh and allows on a console — this link gets it
   because its `sender_timestamp` is 0). `cli "set name Bench"` is answered `ok`
   and the next advert carries that name; `cli "get name"` says `> Bench`.
-- [ ] **p1-05** `cli "sensor list"` says `9 vars` and then `fw.version`,
+- [ ] **p1-05** `cli "sensor list"` says `10 vars` and then `fw.version`,
   `walter.wake`, `link.errors`, `walter.seen` and `clock.state` — those five on
   a freshly booted node, and on a node that has been up for weeks the last of
   them behind `cli "sensor list 4"`, because upstream stops a listing at 134
@@ -305,12 +307,15 @@ of them is the exit criterion of the whole phase.
   the core's unbounded TWIM loops — the one failure mode this firmware cannot
   bound by itself.
 - [ ] **p1-06** **`sensor list` really does page.** `cli "sensor list"` says
-  `9 vars` and prints the first five with `... next:5`; `cli "sensor list 5"`
-  prints `power.low_mv`, `power.crit_mv`, `obs.wake` and `client.refused`
-  (`obs.wake` arrived with p2-03 and `client.refused` with p2-04). On a release
-  image (a longer `fw.version`) the first page is two bytes over the window and
-  comes back cut at 159 characters — expected, counted, and the reason
-  `sensor get <key>` is the way to read one key (`reports/06.md`).
+  `10 vars` and prints the first five; `cli "sensor list 5"` prints
+  `power.low_mv`, `power.crit_mv`, `obs.wake`, `client.refused` and
+  `firstboot.state` (`obs.wake` arrived with p2-03, `client.refused` with p2-04
+  and `firstboot.state` with p3-03). The first page is **160 characters** on a
+  node whose clock is not `set`, so it comes back cut at 159 and the digit of
+  `... next:5` is gone; on a release image (a longer `fw.version`) it is 163
+  and the cut is three characters — expected, counted, and the reason
+  `sensor get <key>` is the way to read one key
+  (`tasks/phase-3/reports/03.md`).
 - [ ] **p1-06** **The boot-voltage question, which is the reviewer's.** Upstream
   will not boot a node whose battery reads between 1000 and 3300 mV
   (`PWRMGT_VOLTAGE_BOOTLOCK`), and on this board the reading it checks is 0 at
@@ -503,3 +508,59 @@ of the first.
   one, or simply confirm from a `boot` line after an induced hang that `reset`
   reads `wdt`. A reset that boots into passive monitor mode is the safe end of
   a bad day on a mast; a session cannot cause one.
+
+## 10. First boot and provisioning
+
+`docs/provisioning.md` is the page. This is the one thing on it no session could
+check: a board that has never been configured, brought up twice — once at the
+USB port and once over the link.
+
+**Do this last, or on a spare module.** The first line erases the file system,
+which takes the node's **identity** with it: the key the mesh knows it by, and
+the one MeshMaster would have been told. A unit that has been adopted is a unit
+not to erase.
+
+- [ ] **p3-03** **A first boot is a first boot.** `erase` on the USB console
+  (`File system erase: OK`), then reset. The console prints `Repeater ID:` with
+  a **new** key (→ ______), then `First boot: a random admin password was set
+  (not shown; …)` and `First boot: the profile ran 1 of 1 lines (sensor get
+  firstboot.state says 'done'; …)`. Then:
+  `sensor get firstboot.state` → `> done`; `get path.hash.mode` → `> 1`;
+  `get radio` → `> 869.618,62.5,8,8`; `get name` → `> repeater`;
+  `get guest.password` → `> ` (empty).
+- [ ] **p3-03** **It runs once, and a reboot proves it.** `reboot`, and this
+  time there is **no** `First boot:` line at all; `sensor get firstboot.state`
+  → `> never`, and `get path.hash.mode` is still `> 1` — the profile's work was
+  saved, and the profile did not run again.
+- [ ] **p3-03** **A power cut in the middle leaves no half-provisioned node.**
+  `erase`, reset, and pull the power **during** the first second (before the
+  `First boot:` lines appear). On the next boot one of exactly two things is
+  true: the `First boot:` lines appear again and `firstboot.state` says `done`
+  (the write never happened, so the whole thing was done again), or they do not
+  appear and `get path.hash.mode` says `1` (the write happened and the unit is
+  finished). What must **never** be seen is no `First boot:` line together with
+  `get path.hash.mode` → `0`. Worth three or four attempts; the arrangement
+  that makes it so is one preferences write
+  (`src/roles/repeater/app/FirstBoot.h`).
+- [ ] **p3-03** **Provision it at the USB port**, `docs/provisioning.md` §3 line
+  for line: `set name`, `set lat`, `set lon`, `set owner.info`,
+  `set guest.password`, `region default dk`, `region save`, `password <new>`.
+  Every reply should be the one the page quotes — and the one to watch for is
+  `region default dk` answering ` default scope is now dk` rather than `OK`.
+  Read it back with `get name`, `get lat`, `get owner.info`, `region default`.
+- [ ] **p3-03** **A phone then logs in with that admin password**, and is an
+  admin: `sensor get link.errors` from the phone answers, and
+  `sensor set walter.wake 1` raises an attention on the link (§4 has that
+  line). The old random password is gone, and so is `not-a-password`.
+- [ ] **p3-03** **Provision it over the link.** `erase` and reset again, then
+  from the laptop: `python3 tools/linkcli.py --port <port> provision unit.txt`
+  with the file of `docs/provisioning.md` §4. Every line should be taken, the
+  `password` line should print `password ****` and `accepted`, and **the
+  password must appear nowhere on the laptop's screen**. Then take a line out
+  of the middle and break it (`set nonsens 1`): the run stops there, says which
+  line of the file it was, and `get lat` shows that nothing after it was sent.
+- [ ] **p3-03** **And the node is the same node afterwards.** `linkcli.py
+  identity` reads the public key and the name just set (→ ______), which is
+  what MeshMaster has to be told along with the admin password
+  (`docs/provisioning.md` §5). Write both down **now**: the password set above
+  is the only copy there is, and nothing in this firmware can read it back.

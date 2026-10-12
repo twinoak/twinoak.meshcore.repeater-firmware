@@ -33,8 +33,11 @@ src/
   roles/                one directory per role. An environment compiles exactly one of them
     repeater/
       main.cpp          ours: setup() and loop(), replacing upstream's example main
-      app/              TwinOakMesh (the subclass), first-boot provisioning, Settings (our keys
-                        on upstream's CLI, portable), RoleHooks.cpp (this role's half of them)
+      app/              TwinOakMesh (the subclass), FirstBoot (the one test and the one write),
+                        Settings (our keys on upstream's CLI, portable), RoleHooks.cpp (this
+                        role's half of them)
+      firstboot/        the first-boot profile: a table of console command lines, the runner that
+                        judges each reply, and what `sensor get firstboot.state` says (portable)
       clock/            ClockKeeper (the rules, portable), BoardClock (the board's ports and
                         its flash file), LinkClock (the keeper as the link's ClockAccess)
       link/             BoardLink: the one Session and the board facts it answers from
@@ -93,6 +96,7 @@ We need none of it, because what we add hangs on three kinds of thing that are *
 | be a client of one peer | `searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, `onPeerPathRecv`, `onTraceRecv` | protected virtual |
 | know when a packet of ours carried our clock (§5) | `sendSelfAdvertisement` (public, `CommonCLICallbacks`), `onAnonDataRecv` (protected) | virtual |
 | write the clock's file before a restart (§5) | `MainBoard::reboot()`, `MainBoard::powerOff()` | virtual on the board |
+| make the first boot's one write one write (§4a) | `savePrefs()` (public, `CommonCLICallbacks`) | virtual |
 | originate a packet | `createAnonDatagram`, `createDatagram`, `createTrace`, `sendDirect`, `sendFlood` | public on `Mesh` |
 
 `TwinOakMesh : public MyMesh` overrides those virtuals, calls the base for everything that is
@@ -249,7 +253,7 @@ attention per reason per hour. It also holds the belief that the Walter is aslee
 The session asks it once a pass what to put on the wire and tells it when the bytes have gone, so
 every rule about *when* is in one file with a fake clock in front of it.
 
-Nine more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
+Ten more ways in, through `TwinOakSensors`' settings — the keys and what each one does are
 `src/roles/repeater/app/Settings.{h,cpp}`, portable and tested; the board's half is a dozen one-line readers and
 writers. They work from the USB console and from a mesh admin's `sensor get/set`, in this order,
 which is the order `sensor list` prints:
@@ -265,11 +269,59 @@ which is the order `sensor list` prints:
 | `power.crit_mv` | the *battery critical* threshold | the same |
 | `obs.wake` | `0` or `1`: whether a filling observation ring may ask for a sleeping Walter | `0` or `1`; off at boot and per boot (§7) |
 | `client.refused` | mesh-client sends the ceiling refused since boot - 0 on a healthy unit (§7) | — |
+| `firstboot.state` | `done`, `partial: <n> refused`, or `never` because this boot found settings and ran nothing (§4a) | — |
 
-Nine keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
-160-byte buffer, so a fresh node prints the first five and `... next:5` and `sensor list 5` is
-the rest. The order is task 05's five with the later tasks' appended, which is the only place a
-new key can go without renumbering one a bench instruction or a document already names.
+Ten keys no longer fit one `sensor list` reply: upstream stops a listing at 134 bytes of a
+160-byte buffer, so a fresh node prints the first five and `sensor list 5` is the other five. The
+order is task 05's five with the later tasks' appended, which is the only place a new key can go
+without renumbering one a bench instruction or a document already names.
+
+The tenth key cost one character of that first page, and it is worth knowing where it went:
+upstream's own header is `10 vars` rather than `9 vars`, which makes the page 160 characters where
+it was 159 — and a reply is 159 characters and a NUL, on the console and on the link alike. So the
+digit of `... next:5` is cut. Both the console and the session keep **64 guard bytes** behind
+upstream's window, so the overrun lands in the guard and not in a stack frame; the session counts
+it (`cliTruncations`), and `src/roles/repeater/main.cpp` gained the same shape for the console,
+which until then had nothing behind its window at all.
+
+### 4a. The first boot
+
+A board fresh from the flasher has no `/prefs.json`, and that one fact decides everything a unit
+does before anybody has been to the site (`spec/SYSTEM.md` S-12, S-13; `docs/provisioning.md`):
+
+- **the channel is the build's**, from `platformio.ini`'s `[band_*]` block (§8), so a unit is on
+  the right frequency even if every step below failed;
+- **the admin password is random**, fifteen alphanumerics from the radio's own noise, never
+  printed and never on the air (`src/roles/repeater/app/AdminPassword.h`);
+- **the profile runs**: a table of console command lines through `handleCommand(0, …)`, the same
+  call a person at the USB port and the Walter over the link make
+  (`src/roles/repeater/firstboot/Profile.h`). It is text, not code, for three reasons - it touches
+  no private member of upstream's, a pin bump that renames a key comes back as a reply that is not
+  `OK` rather than as a corrupted preference, and it can be read and changed without reading C++.
+  As shipped it is one line, `set path.hash.mode 1`, because that is the one value a document of
+  this project gives (S-12 and meshmaster.dk's D-33: upstream floods this node's adverts at
+  `path_hash_mode + 1` bytes).
+
+**Once is exact, and it is one boolean.** The test is `hasSavedPrefs()`, taken before
+`the_mesh.begin()` runs upstream's `loadPrefs`; the password and the profile both happen inside one
+hold of `TwinOakMesh::savePrefs()`, which is the eleventh override and exists only for this. Every
+`set` branch of upstream's CLI saves, and `CommonCLI::savePrefs(FILESYSTEM*)` removes
+`/prefs.json` and writes it again — so a first boot that saved line by line could be interrupted
+with the file present and the work half done, and the next boot would run no profile at all. With
+the saves held the file appears **exactly once**, with everything in it: power cut before that
+moment and the next boot does the whole thing again; power cut after it and the unit is done.
+There is no second marker anywhere to disagree with the file.
+
+A refused line does not stop the run - the lines are independent settings - and the outcome is
+readable afterwards from all three ways in: `sensor get firstboot.state`. It is per boot and in
+RAM, because the question it answers is "what did *this* boot do".
+
+One consequence of running the profile at all is upstream's and worth recording: `CommonCLI::savePrefs()`
+zeroes `advert_interval` when it is below sixty minutes, "now that device has been manually
+configured". Upstream's default is two minutes, so the first-boot profile's one line turns the
+*local* advert timer off for the life of the unit. The boot advert (§5) and the 47-hour flood
+advert are what announce it, which is what the Danish standard asks for anyway
+(meshguide.dk recommends `advert.interval 0`).
 
 `walter.wake` is the out-of-band way to reach a unit whose Walter is asleep: any exit node that
 reaches the repeater can ask it to wake its own uplink. Upstream's permission check is the whole
@@ -624,6 +676,7 @@ by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §
 | shunt arithmetic, the two readers' schedules, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part, and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view |
 | job state, reply matching, the send ceiling | ✔ (the ceiling against a fake clock, and through a real session) | the overrides, the sends | a login to a real repeater |
 | the observation ring, the pull's payload fitting, the RSSI note table, `obs.wake` | ✔ against fakes, and the `OBS_PULL` fixture through the real session | advert capture, the two overrides | adverts heard on the roof |
+| the first-boot profile: the reply rule, the runner, that it runs once, and the table's own rails | ✔ against a fake command interface (`test/test_firstboot`), and the shipped table through the firmware's own session behind a pipe (`tools/linkloop/check.sh`, which also drives `linkcli.py provision`) | upstream's interpreter behind it, and the one preferences write | `erase`, reset, and `sensor get firstboot.state`; a provisioning session at the port and one over the link |
 | the descriptor builder, the names across `platformio.ini` and its consumers, the band table | ✔ against the specification's fixtures and against `platformio.ini` (`test/test_image`), and every `[img_*]` section through the release tooling (`tools/release/test_release.py`) | the `static_assert`s of `src/common/bands/BandCheck.cpp` and `src/common/fwdesc/ImageDescriptor.cpp`; the post-build check of `tools/pio/descriptor.py`, which finds the descriptor in the linked image | the Walter reads it out of what it downloaded, and holds `HELLO` against it |
 
 ## 11. Proved by task p1-01
@@ -653,6 +706,22 @@ against the build, by the task that first compiled our application onto upstream
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/common/board/UpstreamHeaders.h` and `src/roles/repeater/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Corrections and additions made above by **p3-03**, the first-boot profile: §1
+(`src/roles/repeater/firstboot/`), §2 (one more row: `savePrefs()`, the **eleventh** override -
+"the eight" of p1-01 became ten with the clock and is eleven now), §4 (the tenth setting, and what
+the tenth one cost the first `sensor list` page), §4a (new: what a unit is before anybody has
+provisioned it, and why once is exact) and §10. What that task read of upstream is cited where it
+is used - `src/roles/repeater/firstboot/Profile.{h,cpp}` for the acceptance rule, which is read off
+every reply `CommonCLI.cpp`'s `set` branch and `MyMesh.cpp` can produce, and for
+`MyMesh::sendSelfAdvertisement`'s `path_hash_mode + 1`; `src/roles/repeater/app/TwinOakMesh.h` for
+`MyMesh::savePrefs()` and `CommonCLI::savePrefs`'s remove-then-write of `/prefs.json` and its
+zeroing of `advert_interval` - and `docs/upstream.md` place 5 lists them. One claim is worth
+recording with the rest:
+
+| Claim | Evidence |
+|---|---|
+| an empty guest password makes a **stranger's blank login succeed** at guest permission | `MyMesh::handleLoginReq`, `examples/simple_repeater/MyMesh.cpp:90-110` at the pin: a blank password (`data[0] == 0`) first looks the sender up in the ACL, and when it is not there falls through to `strcmp((char*)data, _prefs.guest_password)` - which an empty `guest_password` matches, so `perms = PERM_ACL_GUEST` and the client is added. `NodePrefs`' constructor leaves `guest_password[0] = 0` and nothing of ours sets it, so that is what a fresh unit does. `docs/provisioning.md` §1 and §2 say so, and setting one is a decision a person takes rather than a default |
 
 Corrections and additions made above by **p3-02**, NoiseScope: §1 (`src/roles/scanner/`,
 `tools/noisescope/` and the second header wrapper) and §8 (*what a role compiles of `common/`*,
