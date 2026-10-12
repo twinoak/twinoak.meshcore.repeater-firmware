@@ -7,59 +7,11 @@
 #include "common/power/Environment.h"
 #include "common/power/PowerReader.h"
 #include "common/power/Prefs.h"
+#include "common/power/WireBus.h"  // the I2C master of the reader, shared with the scanner
 
 namespace twinoak {
 namespace power {
 namespace {
-
-// --- the bus ------------------------------------------------------------------------------------
-
-// One I2C master over the core's Wire, at the 100 kHz TwinOakBoard::begin() pinned it to (one set
-// of 1 k pull-ups through a 1000 pF bulkhead filter, INTERCONNECT.md).
-//
-// **What this cannot do, and the reader's back-off is why it does not have to.** The Adafruit
-// core's TWIM driver busy-waits on the peripheral's event registers with no deadline
-// (libraries/Wire/Wire_nRF52.cpp:166, :169, :230, :234 at the core's pinned commit d541301:
-// `while(!_p_twim->EVENTS_RXSTARTED && !_p_twim->EVENTS_ERROR);`). A device that is absent or
-// unpowered makes the hardware raise ERROR on the address NACK and the call returns at once,
-// which is the failure this board actually meets; a bus held low by a stuck slave would hang
-// that loop, and nothing short of our own TWIM driver could bound it. So what is measured here
-// is how long the transaction *took*, the reader gives up on a device whose transactions go past
-// its budget, and tasks/phase-1/reports/06.md records the residual risk rather than claiming a
-// timeout this layer cannot enforce.
-class WireBus : public I2cBus {
- public:
-  bool writeRegister(uint8_t address, uint8_t reg, uint16_t value) override {
-    const uint32_t started = micros();
-    Wire.beginTransmission(address);
-    Wire.write(reg);
-    Wire.write(uint8_t(value >> 8));
-    Wire.write(uint8_t(value & 0xFF));
-    const bool ok = Wire.endTransmission() == 0;
-    last_us_ = micros() - started;
-    return ok;
-  }
-
-  bool readRegister(uint8_t address, uint8_t reg, uint16_t& value) override {
-    const uint32_t started = micros();
-    Wire.beginTransmission(address);
-    Wire.write(reg);
-    bool ok = Wire.endTransmission(false) == 0;  // repeated start, as the INA3221 asks for
-    if (ok) ok = Wire.requestFrom(address, size_t(2)) == 2;
-    if (ok) {
-      const uint16_t high = uint16_t(Wire.read());
-      const uint16_t low = uint16_t(Wire.read());
-      value = uint16_t((high << 8) | low);
-    }
-    last_us_ = micros() - started;
-    return ok;
-  }
-
-  uint32_t lastTransactionMicros() const override { return last_us_; }
-
- private:
-  uint32_t last_us_ = 0;
-};
 
 // --- the BME280 ---------------------------------------------------------------------------------
 

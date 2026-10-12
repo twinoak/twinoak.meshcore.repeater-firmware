@@ -1,6 +1,7 @@
-// The rails, as a test and not a promise: nine rules, one test apiece, each failing with a
-// sentence that names the rule it holds (tasks/phase-2/04-the-rails.md, README.md's "Rails that
-// hold in every task", spec/SYSTEM.md S-12 and S-13, spec/LINK-PROTOCOL.md section 6's head).
+// The rails, as a test and not a promise: eleven rules, one test apiece, each failing with a
+// sentence that names the rule it holds (tasks/phase-2/04-the-rails.md and phase-3/02, README.md's
+// "Rails that hold in every task", spec/SYSTEM.md S-12 and S-13, spec/LINK-PROTOCOL.md section
+// 6's head).
 //
 // It reads platformio.ini, walks src/, tools/ and .github/, and hashes spec/. In the order the
 // task lists them:
@@ -54,6 +55,19 @@
 // Two rails of earlier tasks are kept beside those nine because they are the same kind of thing:
 // **a request on the box link never performs I2C** (one file reaches a bus, the handlers answer
 // out of a cache - phase 1's task 06), and the two prints rails of rule 2 above.
+//
+// And two the scanner brought with it (phase 3's task 02), which are NoiseScope's own two
+// promises and the reason a scanner-and-back round trip is safe for the repeater's identity:
+//
+//  10. **nothing under src/roles/scanner/ transmits.** Not one of RadioLib's transmit entry
+//      points is named in that directory - and the role is the only one that drives the radio
+//      itself, so the grep is over the whole of it. Does not catch: a transmit reached through a
+//      function pointer, or upstream's own radio, which this image does not contain at all.
+//  11. **nothing under src/roles/scanner/ names a file system.** The node's identity, its name
+//      and its settings live in the internal file system, and an image that cannot open it
+//      cannot lose them - which is what makes "flash the scanner, then flash the repeater back"
+//      a round trip and not a provisioning. Does not catch: a raw write through the nRF52's NVMC
+//      registers, which nothing in this repository names.
 //
 // The forbidden names are written as split strings so that a grep of the repository for them
 // finds the places that set them and not this test.
@@ -363,33 +377,56 @@ TEST(Rails, Rule1_PlatformioIniNeverEnablesPacketLoggingOrMeshDebug) {
 }
 
 TEST(Rails, Rule3_EveryBoardEnvironmentDefinesAnAdminPasswordThatIsNotUpstreamsDefault) {
+  // **Every environment that compiles upstream's repeater**, which is where the default would
+  // otherwise take effect: BUILD_EXAMPLE is what puts examples/simple_repeater/MyMesh.cpp in the
+  // build, and that file is what defaults ADMIN_PASSWORD to upstream's word when the define is
+  // absent. An environment without it compiles no MeshCore, has no admin and no mesh, and is
+  // held to the other side of the same rule instead - it must not name the define at all, so a
+  // password cannot arrive in an image that has nowhere to put it (phase 3's task 02: the
+  // scanner).
   const fs::path root = projectRoot();
   const Ini ini = readIni(root / "platformio.ini");
+  const std::string kBuildExample = std::string("BUILD_") + "EXAMPLE";
   int boards = 0;
+  int with_mesh = 0;
   for (const std::string& section : ini.order) {
     if (section.rfind("env:", 0) != 0 || section == "env:native") continue;
     boards++;
     std::set<std::string> seen;
     std::vector<std::pair<int, std::string>> lines;
     resolve(ini, section, seen, lines);
+    bool compiles_upstream = false;
+    for (const auto& entry : lines) {
+      std::string ignored;
+      if (defineValue(entry.second, kBuildExample, ignored)) compiles_upstream = true;
+    }
     bool defined = false;
     for (const auto& entry : lines) {
       std::string value;
       if (!defineValue(entry.second, kAdminPassword, value)) continue;
       defined = true;
-      if (value == kUpstreamDefault || value.empty()) {
+      if (!compiles_upstream) {
+        ADD_FAILURE() << "platformio.ini:" << entry.first << ": [" << section << "] defines "
+                      << kAdminPassword << " and compiles no MeshCore - there is no admin in"
+                                           " that image and nothing reads it (S-13)";
+      } else if (value == kUpstreamDefault || value.empty()) {
         ADD_FAILURE() << "platformio.ini:" << entry.first << ": [" << section << "] defines "
                       << kAdminPassword << " as '" << value
                       << "' - no default password is ever on the air (S-13)";
       }
     }
-    if (!defined) {
-      ADD_FAILURE() << "[" << section << "] does not define " << kAdminPassword
-                    << "; upstream's MyMesh.cpp then defaults it to '" << kUpstreamDefault
-                    << "' (S-13)";
+    if (compiles_upstream) {
+      with_mesh++;
+      if (!defined) {
+        ADD_FAILURE() << "[" << section << "] does not define " << kAdminPassword
+                      << "; upstream's MyMesh.cpp then defaults it to '" << kUpstreamDefault
+                      << "' (S-13)";
+      }
     }
   }
   EXPECT_GT(boards, 0) << "platformio.ini has no board environment";
+  EXPECT_GT(with_mesh, 0) << "no board environment compiles upstream's repeater any more, so"
+                             " this rail is checking nothing";
 }
 
 TEST(Rails, Rule7_NoBoardEnvironmentTurnsOnUpstreamsOwnIna3221OrBme280) {
@@ -520,13 +557,19 @@ TEST(Rails, Rule9_NoHeapAllocationUnderTheLinkTheClockOrTheMeshClient) {
 
 TEST(Rails, AlsoKept_NoRequestHandlerCanReachAnI2cBus) {
   // The acceptance criterion of phase 1's task 06: **a request on the box link never performs
-  // I2C**, shown from the code's structure. That structure is one file deep: src/common/power/
-  // BoardPower.cpp owns the only `Wire` of this firmware's own sources (src/common/board/target.cpp's
-  // setClock is upstream's bus being configured, not a transaction) and the only sensor driver,
-  // and it hands them to the two readers behind an interface; the readers are driven from
-  // TwinOakSensors::loop() once a pass; and POWER_GET, ENV_GET and LPP_GET answer out of the
-  // snapshot those readers leave (src/common/power/LinkPower.h). So nothing under src/common/link/, and
-  // nothing under src/common/power/ but that one file, may name a bus or a driver at all.
+  // I2C**, shown from the code's structure. That structure is two files deep:
+  // src/common/power/WireBus.cpp **is** the bus - the I2cBus of the reader's port, and the only
+  // `Wire` transactions of this firmware's own sources (src/common/board/target.cpp's setClock is
+  // upstream's bus being configured, not a transaction) - and src/common/power/BoardPower.cpp
+  // owns the one of it and the only sensor driver, and hands both to the two readers behind that
+  // port; the readers are driven from TwinOakSensors::loop() once a pass; and POWER_GET, ENV_GET
+  // and LPP_GET answer out of the snapshot those readers leave (src/common/power/LinkPower.h). So
+  // nothing under src/common/link/, and nothing under src/common/power/ but those two, may name a
+  // bus or a driver at all.
+  //
+  // WireBus is its own file because the scanner reads the same part through the same reader and
+  // compiles none of BoardPower.cpp (phase 3's task 02) - which is also why the `Wire` it uses is
+  // still exactly one implementation and not a second one beside it.
   const fs::path root = projectRoot();
   const char* const kBusNames[] = {"Wire.", "Wire1.", "TwoWire", "Adafruit_BME280",
                                    "Adafruit_INA3221"};
@@ -535,9 +578,13 @@ TEST(Rails, AlsoKept_NoRequestHandlerCanReachAnI2cBus) {
   int walked = 0;
   for (const char* name : kDirs) {
     for (const fs::path& file : filesUnder(root / "src" / name)) {
-      // The board's half of src/common/power/ is where the bus is allowed to be, and it is the only
-      // file of either directory that is.
-      if (file.filename() == "BoardPower.cpp" || file.filename() == "BoardPower.h") continue;
+      // The board's half of src/common/power/ is where the bus is allowed to be, and these are
+      // the only files of either directory that are.
+      const std::string name_of = file.filename().generic_string();
+      if (name_of == "BoardPower.cpp" || name_of == "BoardPower.h" ||
+          name_of == "WireBus.cpp" || name_of == "WireBus.h") {
+        continue;
+      }
       walked++;
       std::ifstream in(file, std::ios::binary);
       std::string line;
@@ -952,6 +999,77 @@ TEST(Rails, Rule8_NoScriptWritesIntoThePinnedMeshCoreCheckout) {
   EXPECT_EQ(int(kMayReachIntoIt.size()), named)
       << "the scripts that compile out of the pinned checkout are not the three this rail knows"
          " about - docs/upstream.md lists them among the places a pin bump re-reads";
+}
+
+// --------------------------------------------------------------------------------- rules 10, 11
+
+namespace {
+
+// Every file of the scanner role, which is the only directory of src/ that drives a radio itself
+// and the only image of this family that is flashed over a provisioned repeater and off again.
+std::vector<fs::path> scannerFiles(const fs::path& root) {
+  return filesUnder(root / "src" / "roles" / "scanner");
+}
+
+}  // namespace
+
+TEST(Rails, Rule10_NothingUnderTheScannerTransmits) {
+  // "Never transmits. RX only" is NoiseScope's first line and the reason it may be flashed on a
+  // mast whose licence is somebody else's (docs/noisescope.md). The role drives the SX1262
+  // through RadioLib directly - upstream's wrapper, which would not expose these either, is not
+  // in that image at all - so every one of RadioLib's own transmit entry points is forbidden by
+  // name in the whole directory. `begin()` takes a transmit power because RadioLib's signature
+  // has one; a power that is never applied to a packet is not a transmission, and setting it
+  // *would* be, which is why setOutputPower and setTxParams are on the list.
+  const fs::path root = projectRoot();
+  const char* const kTransmitCalls[] = {
+      "transmit(",       "startTransmit(", "finishTransmit(", "transmitDirect(",
+      "setOutputPower(", "setTxParams(",   "setPaConfig(",
+  };
+  const std::vector<fs::path> files = scannerFiles(root);
+  EXPECT_GT(files.size(), 8u) << "the walk of src/roles/scanner/ found almost nothing - is"
+                                 " PROJECT_DIR right?";
+  for (const fs::path& file : files) {
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      const std::string code = withoutComment(raw);
+      for (const char* call : kTransmitCalls) {
+        if (code.find(call) != std::string::npos) {
+          ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << call
+                        << "' - the scanner never transmits, which is what makes it safe to"
+                           " flash on a mast (docs/noisescope.md)";
+        }
+      }
+    }
+  }
+}
+
+TEST(Rails, Rule11_NothingUnderTheScannerNamesAFileSystem) {
+  // "MeshCore's on-flash config is not touched: this firmware never writes flash, so a
+  // scanner-to-repeater round trip preserves the repeater's identity" (docs/noisescope.md). The
+  // image compiles no file system at all - the whole of src/common/power/BoardPower.cpp, which is
+  // where this firmware's preferences file lives, is outside its build_src_filter - and this is
+  // the other half of that: not one line of the role names a way of opening one.
+  const fs::path root = projectRoot();
+  const char* const kFsNames[] = {"InternalFS",    "LittleFS", "FILE_O_", "FILESYSTEM",
+                                  "InternalFileSystem", "fopen",    "ofstream", "fwrite",
+                                  "SdFat",         ".open(",   "->open(", "IdentityStore"};
+  for (const fs::path& file : scannerFiles(root)) {
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      const std::string code = withoutComment(raw);
+      for (const char* name : kFsNames) {
+        if (code.find(name) != std::string::npos) {
+          ADD_FAILURE() << rel(root, file) << ":" << n << ": '" << name
+                        << "' - the scanner never writes flash, which is what makes flashing the"
+                           " repeater back a round trip and not a provisioning"
+                           " (docs/noisescope.md)";
+        }
+      }
+    }
+  }
 }
 
 int main(int argc, char** argv) {

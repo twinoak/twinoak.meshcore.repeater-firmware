@@ -668,7 +668,9 @@ they come from.
 NoiseScope, the scanner firmware a repeater can be flashed with instead, speaks
 NDJSON text lines on this same UART and not frames. A `hello` that gets no
 answer while lines beginning with `{` appear is a scanner, not a broken link
-(`spec/LINK-PROTOCOL.md` §9).
+(`spec/LINK-PROTOCOL.md` §9). It is built here, as the role `scanner`:
+[`docs/noisescope.md`](noisescope.md) is its page, and a bare `info` line is
+what to send if you want it to say so in as many words.
 
 ## 4. Testing the tool without a board
 

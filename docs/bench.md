@@ -449,3 +449,57 @@ release's files, a flash, and one `hello` over the link.
   own tests against the same fixtures (`spec/fixtures/manifest/`). No session
   and no bench of this repository can show it; it is listed here so that the
   two halves are ticked together when that firmware exists.
+
+## 9. NoiseScope
+
+`docs/noisescope.md` is the page. The scanner is the second image of the
+family: it is flashed in place of the repeater, and the repeater is flashed
+back. Both halves of that round trip are here, and the second one is the point
+of the first.
+
+- [ ] **p3-02** **Flash the scanner over USB.** The UF2 from
+  `out/build/scanner_rak4630_single/firmware.uf2` on the bootloader's drive (or
+  `adafruit-nrfutil dfu serial -pkg firmware.zip -p COMx -b 115200`). The USB
+  console at 115200 should show one `boot` line within a second: `fw` →
+  `noisescope`, `role` → `scanner`, `board` → `rak4630-single`, `ver` →
+  ______, `reset` → ______, **`radio_ok` → ______**.
+  **If `radio_ok` is false, the power-enable pin is the first thing to look
+  at** (`SX126X_POWER_EN`, P1.05): this port drives it high where NoiseScope
+  never did, and no session can tell whether the stamp needed it
+  (`tasks/phase-3/reports/02.md`).
+- [ ] **p3-02** **`info`, `stat` and `sweep` behave as the page says**, on the
+  USB console and on `Serial1` — both at 115200, both serving the same
+  protocol. `info` answers one line; `stat` answers one immediately and one
+  every 10 s; `sweep` acks `started` and answers a `sweep` line of **281
+  points** in about 7 s (n → ______, rbw → ______). Then `hist 869.4 869.8 25`
+  (the RAM patch uploads: lines, or an `err` → ______), `dwell 869.618 30`,
+  `cad`, and `stop` in the middle of a sweep — which must be answered between
+  steps and not after the pass.
+- [ ] **p3-02** **[boards] `pwr` matches the repeater's `power` numbers for the
+  same board.** `stat`'s `pwr` object against what the repeater answers for
+  POWER_GET on the same connector board, within a reading: vpanel → ______,
+  ipanel → ______, vbat → ______, ibat → ______, vload → ______, iload →
+  ______. The two now read the part through the same code
+  (`src/common/power/`), so a disagreement here is a disagreement between two
+  runs and not between two firmwares — which is exactly why this line is worth
+  walking.
+- [ ] **p3-02** **Every line is JSON, and the chatter says so.** A minute of
+  output through `python tools/noisescope/waterfall_plot.py --port COMx`, which
+  drops anything not starting with `{` — or
+  `python -c "import sys,json;[json.loads(l) for l in sys.stdin if l.startswith('{')]"`
+  over a captured log. No line should fail to parse and none should carry
+  `nan`. The native tests hold the writer to this
+  (`test/test_scanner`); what the bench adds is a real radio's readings
+  going through it, including a window with no sample.
+- [ ] **p3-02** **Flash the repeater back, and nothing of the node is gone.**
+  The repeater's `.uf2` or `.zip`, then on the USB console: the same
+  `Repeater ID:` as before the scanner (→ ______), the same `name`, the same
+  admin password still accepted, and the neighbours list filling up again.
+  `sensor get fw.version` reads `twinoak-repeater …`. **This is the promise the
+  scanner's two rails exist for** — it compiles no file system and never
+  transmits — and it is the one thing on this page that only a board can show.
+- [ ] **p3-02** **The watchdog is live.** With the scanner flashed, hold the
+  unit in a `hist` pass and pull the SX1262 into a stall if you can contrive
+  one, or simply confirm from a `boot` line after an induced hang that `reset`
+  reads `wdt`. A reset that boots into passive monitor mode is the safe end of
+  a bad day on a mast; a session cannot cause one.

@@ -62,10 +62,15 @@ nobody has flashed yet:
   manifest, an Ed25519 signature over it, and a weekly pull request that moves
   the MeshCore pin ([`docs/release.md`](docs/release.md),
   [`docs/upstream.md`](docs/upstream.md)).
+- **It is a family, not a firmware**: a second role, `scanner` — NoiseScope,
+  the SX1262 spectrum and noise scanner that is flashed in place of the
+  repeater when a site has a noise problem, from the same board target, the
+  same power code and the same release
+  ([`docs/noisescope.md`](docs/noisescope.md)).
 
 Not done, and deliberately: the bridge role and the dual adapter
-(`docs/ARCHITECTURE.md` §8 has the seams), NoiseScope, and first-boot
-provisioning over the link. Nothing above has been on a bench:
+(`docs/ARCHITECTURE.md` §8 has the seams) and first-boot provisioning over the
+link. Nothing above has been on a bench:
 [`docs/bench.md`](docs/bench.md) is the walk that would prove it, and
 `tools/verify.ps1` is what has been proved without one.
 
@@ -73,6 +78,7 @@ provisioning over the link. Nothing above has been on a bench:
 
 ```powershell
 pio run -e repeater_rak4630_single   # the repeater for the single-RAK adapter
+pio run -e scanner_rak4630_single    # NoiseScope, the scanner role (docs/noisescope.md)
 pio test -e native                   # the tests that need no board (in a container on Windows)
 .\tools\verify.ps1                   # everything CI runs, in order, with a log per step in out/verify/
 ```
