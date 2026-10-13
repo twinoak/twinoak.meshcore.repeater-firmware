@@ -42,6 +42,7 @@ namespace radio {
 enum Mode : uint8_t {
   kModeMonitor = 0,
   kModeSweep,
+  kModeScope,
   kModeHist,
   kModeDwell,
   kModeCad,
@@ -67,8 +68,21 @@ bool startHist(double f0, double f1, double step_khz, uint32_t samples, int32_t 
 bool startDwell(double f_mhz, uint32_t secs, uint32_t win_ms);
 bool startCad(double f_mhz, uint32_t count);
 
-// Aborts whatever is running - purging the spectral-scan patch with a hardware reset when a
-// histogram sweep was - and returns to the monitor.
+// The fast sweep: uploads the sweep plugin and streams frames to `out` alone - the port the
+// command came in on, which is the whole of the sink rule (docs/noisescope.md section 5). False,
+// and nothing uploaded, when the request is not a scope this firmware runs
+// (src/roles/scanner/Sweep.h: planScope), when the radio's ROM is not the plugin's, or when the
+// chip refused the mode; `plan` is what was taken, which is what the `ack` carries back.
+// `out` must outlive the mode (both are main.cpp's).
+bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan);
+
+// The radio's own ROM version string, read once at boot - the 16 characters `info`'s `rom`
+// carries, and what decides whether `scope` can run on this chip at all. Empty when the radio
+// never answered.
+const char* rom();
+
+// Aborts whatever is running - purging a RAM patch with a hardware reset when a histogram sweep
+// or a scope was, so that neither outlives its mode - and returns to the monitor.
 void stop();
 
 // The monitor channel. False when the settings are not ones the radio has.

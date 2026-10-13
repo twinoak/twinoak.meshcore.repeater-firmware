@@ -10,7 +10,11 @@ namespace {
 
 // NoiseScope's out_printf buffer. A line longer than this - a `sweep` pass is about 2.5 kB - is
 // written in fragments, so nothing here has to hold a whole line.
-constexpr size_t kFragmentBytes = 224;
+constexpr size_t kFragmentBytes = kLineFragmentBytes;
+
+// RFC 4648 section 4, which is what base64 means to every reader of a `scope` frame: Python's
+// base64.b64decode, JavaScript's atob, .NET's Convert.FromBase64String.
+const char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 // 1 and 0 where docs/noisescope.md's `info` has them, `true` and `false` where its `boot` has
 // them. Not the same field spelled twice by accident: it is what NoiseScope sent, and a reader
@@ -78,6 +82,31 @@ void Lines::doubles(const double* values, uint16_t count, int decimals) {
   raw("]");
 }
 
+void Lines::base64(const uint8_t* bytes, uint16_t count) {
+  // Three bytes in, four characters out, and the fragment is flushed before it can overflow -
+  // so a 2048-point frame costs this function 224 bytes of stack and not 2.7 kB.
+  char buf[kFragmentBytes];
+  size_t at = 0;
+  for (uint16_t i = 0; i < count; i += 3) {
+    if (at + 4 >= sizeof(buf)) {
+      buf[at] = '\0';
+      raw(buf);
+      at = 0;
+    }
+    const uint8_t b0 = bytes == nullptr ? 0u : bytes[i];
+    const bool have1 = uint32_t(i) + 1u < count;
+    const bool have2 = uint32_t(i) + 2u < count;
+    const uint8_t b1 = (have1 && bytes != nullptr) ? bytes[i + 1] : 0u;
+    const uint8_t b2 = (have2 && bytes != nullptr) ? bytes[i + 2] : 0u;
+    buf[at++] = kBase64Alphabet[b0 >> 2];
+    buf[at++] = kBase64Alphabet[((b0 & 0x03u) << 4) | (b1 >> 4)];
+    buf[at++] = have1 ? kBase64Alphabet[((b1 & 0x0Fu) << 2) | (b2 >> 6)] : '=';
+    buf[at++] = have2 ? kBase64Alphabet[b2 & 0x3Fu] : '=';
+  }
+  buf[at] = '\0';
+  if (at != 0) raw(buf);
+}
+
 void Lines::boot(const BootFields& f) {
   raw("{\"t\":\"boot\",");
   bootBody(f);
@@ -94,6 +123,9 @@ void Lines::info(const InfoFields& f) {
        f.build, (unsigned long)f.devid_high, (unsigned long)f.devid_low, f.boot.reset,
        asFlag(f.boot.rtc), asFlag(f.boot.ina), asFlag(f.boot.radio_ok), asFlag(f.boosted_gain),
        (unsigned long)f.auto_minutes);
+  // The radio's ROM string, which is what says whether `scope` can run on this chip. Empty when
+  // the radio did not answer at boot, never absent: a reader that looks for it finds a field.
+  text("\"rom\":\"%s\",", f.rom == nullptr ? "" : f.rom);
   homeBody(f.home_f_mhz, f.home_bw_khz, f.home_sf, f.home_cr);
   raw("}");
   end();
@@ -151,6 +183,30 @@ void Lines::sweep(const SweepFields& f) {
   raw(",\"max\":");
   doubles(f.max, f.plan.points, 1);
   raw("}");
+  end();
+}
+
+void Lines::scope(const ScopeFields& f) {
+  // `f0` is the first point's **centre** and `step` its spacing, so point i is at
+  // f0 + i*step/1000 MHz - the same arithmetic a `sweep` reader already does. Six decimals on a
+  // frequency and four on a step, because a 2048-point scope of one band steps by a few hertz
+  // more than three kilohertz and a reader that rounded that would bend the axis.
+  raw("{\"t\":\"scope\",");
+  meta(f.meta);
+  raw(",");
+  field("f0", f.plan.first_mhz, 6);
+  raw(",");
+  field("step", f.plan.step_khz, 4);
+  raw(",");
+  field("rbw", f.plan.rbw_khz, 1);
+  text(",\"n\":%u,", unsigned(f.plan.points));
+  // `cov` is the receiver bandwidth over the step: below 1 and a narrow carrier can fall between
+  // two points, which is a thing a reader must be able to say on the picture (section 5).
+  field("cov", f.plan.cov, 3);
+  text(",\"agg\":\"%s\",\"sweeps\":%u,\"sps\":%u,\"lv\":\"", scopeAggName(f.plan.agg),
+       unsigned(f.sweeps), unsigned(f.sps_x10));
+  base64(f.levels, f.plan.points);
+  raw("\"}");
   end();
 }
 
@@ -223,6 +279,8 @@ void Lines::err(const char* message) {
 void Lines::help(const char* version) {
   text("# NoiseScope %s - commands (NDJSON out, '#' lines are chatter)\n", version);
   raw("#   sweep [f0 f1 [step_khz [dwell_ms [passes]]]]   RSSI sweep; passes 0 = until stop\n"
+      "#   scope <f0> <f1> [points [rbw_khz [int_ms [agg]]]]  in-radio sweep, streamed to this\n"
+      "#                                                  port; agg max|mean|last; scope off\n"
       "#   hist  [f0 f1 [step_khz [samples [passes]]]]    spectral-scan histograms (33 x 4dB bins)\n"
       "#   dwell <f_mhz> [secs [win_ms]]                  time-domain stats on one frequency\n"
       "#   cad   [f_mhz [count]]                          LoRa preamble detection ratio\n"

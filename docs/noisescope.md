@@ -39,6 +39,14 @@ at commit `b798aab043281fa4c9b17802a164fa94be12e206` of that repository.
   150–960 MHz, so you can also point it at a suspected blocker (GSM/LTE
   downlink) — through the cavity filter, which is the honest view of what
   reaches the radio.
+* **Scope (the fast sweep):** the same spectrum as *sweep*, with the stepping
+  moved **inside the radio** — a 167-word program for the SX1262's own core
+  retunes after every RSSI update and leaves one level per point in the data
+  buffer, so 250 points cost tens of milliseconds where a stepped sweep of the
+  band costs seconds. Fast enough for a live waterfall, and the span is the
+  operator's: a channel, a band, or the whole 150–960 MHz the radio tunes, in
+  segments each calibrated for its own range. §6 is what the program is and
+  where it comes from.
 * **Hist:** Semtech's spectral-scan engine (the official RAM patch, the same
   mechanism SX1261-equipped LoRaWAN gateways use). Per frequency: a histogram
   of 2048 RSSI samples taken 8.2 µs apart, 33 bins × 4 dB from −11 down to
@@ -136,6 +144,32 @@ python tools/noisescope/waterfall_plot.py --port COM7 --metric max
 python tools/noisescope/waterfall_plot.py --file site.ndjson --save site.png
 ```
 
+And the fast sweep, which is the one to reach for when something is *moving*.
+The plotter sends the command itself and `stop` when it leaves, and draws the
+spectrum over a waterfall on one frequency axis:
+
+```
+python tools/noisescope/waterfall_plot.py --port COM7 --scope 863 870
+python tools/noisescope/waterfall_plot.py --port COM7 --scope 150 960 --points 2048
+python tools/noisescope/waterfall_plot.py --port COM7 --scope 791 960 \
+    --baseline dummyload.ndjson --mark 869.4,869.65 --range -130 -60
+```
+
+`--baseline` is the one worth knowing: capture a `scope` of the same span with
+a **50 Ω dummy load** in place of the antenna, and the plotter subtracts that
+capture's per-frequency median from what it draws. The receiver's own spurs
+and the shape of the front end cancel, and what is left is the site (§7:
+deltas are the signal).
+
+By hand, over any console:
+
+```
+scope 863 870                  # the band, 250 points, a frame per sweep
+scope 150 960 2048             # everything the radio tunes, in 26 segments
+scope 869.4 869.8 512 19.5 200 mean
+stop                           # or `scope off`
+```
+
 ## 5. The protocol
 
 Line-oriented, both directions, **115200 8N1** on the Walter management UART
@@ -167,9 +201,10 @@ host is attached.
 | Command | Effect |
 |---|---|
 | `help` | human-readable command list (`# ` lines) |
-| `info` | one `info` line (fw/version/role/board/devid/reset reason/peripherals/home cfg) |
+| `info` | one `info` line (fw/version/role/board/devid/reset reason/peripherals/radio ROM/home cfg) |
 | `stat` | one `stat` line immediately (the heartbeat also fires every 10 s) |
 | `sweep [f0 f1 [step_khz [dwell_ms [passes]]]]` | RSSI sweep. Defaults: the band's range, 25 kHz, 20 ms, 1 pass. `passes 0` = repeat until `stop` |
+| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`. `scope off` ends it |
 | `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples |
 | `dwell <f_mhz> [secs [win_ms]]` | time-domain statistics on one frequency (defaults 60 s, 1000 ms windows). Uses the home LoRa RX filter |
 | `cad [f_mhz [count]]` | LoRa channel-activity detections out of `count` tries (default the home frequency, 100) |
@@ -184,7 +219,21 @@ host is attached.
 **Both ends of a range are read together or not at all**: `sweep 865` is the
 default sweep, not a sweep from 865 MHz. A sweep is refused when the ends are
 crossed, either end is outside 150–960 MHz, the step is below 1 kHz or above
-1 MHz, or the range comes to fewer than 2 or more than 512 points.
+1 MHz, or the range comes to fewer than 2 or more than 512 points. `scope`
+goes further and **requires** both ends — it has no default span, because the
+span is the whole point of it — and is refused for a step below 100 Hz (finer
+than the radio tunes) as well.
+
+A `scope` ack carries what was *taken*, which is not always what was asked:
+
+```
+{"t":"ack","cmd":"scope","ok":true,
+ "msg":"n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=86ms"}
+```
+
+`seg` is how many plugin calls one sweep of the span is (§6), `cov` is the
+receiver bandwidth over the step — below 1 and a narrow carrier can fall
+between two points — and `interval` is what the port allowed (below).
 
 Every command is answered with an `ack` line:
 `{"t":"ack","cmd":"sweep","ok":true,"msg":"started"}`. A command arriving
@@ -204,14 +253,16 @@ the unit says and what the file said before it was flashed cannot differ.
 ```
 
 `info` — the same six identity fields, plus the build date, the nRF52's device
-id, which peripherals answered, the boosted-gain and auto-sweep settings and
-the home channel.
+id, which peripherals answered, the boosted-gain and auto-sweep settings, the
+radio's own ROM string and the home channel. `rom` is read once at boot and is
+what decides whether `scope` can run on this chip at all (§6); it is empty when
+the radio did not answer.
 
 ```json
 {"t":"info","fw":"noisescope","ver":"1.2.3","role":"scanner","board":"rak4630-single",
  "hw":"rak4630","radio":"sx1262","build":"Oct 12 2026","devid":"deadbeef01020304",
  "reset":"por","rtc":1,"ina":1,"radio_ok":1,"boost":1,"auto_min":10,
- "home":{"f":869.618,"bw":62.5,"sf":8,"cr":8}}
+ "rom":"SX1261 V2D 2D02","home":{"f":869.618,"bw":62.5,"sf":8,"cr":8}}
 ```
 
 `stat` — the heartbeat, every 10 s and on request. `rssi` is present in
@@ -245,6 +296,35 @@ filter bandwidth used (kHz), auto-picked as the smallest one at least
 {"t":"sweep","seq":17,"ts":1754820100,"ms":112000,"f0":863.000,"f1":870.000,
  "step":25.0,"rbw":29.3,"dwell":20,"n":281,"unit":"dBm","avg":[-115.2,...],"max":[-108.9,...]}
 ```
+
+`scope` — one line per frame of the fast sweep, for as long as the mode runs.
+`f0` is the **first point's centre** in MHz and `step` its spacing in kHz, so
+point *i* is at `f0 + i*step/1000` MHz, as for a `sweep`. `lv` is the base64 of
+`n` bytes, one per point, each **−2 × dBm** as the SX126x reports it (0.5 dB
+steps; `255` = no reading). Base64 and not an array of numbers: a 2048-point
+frame is then 2.7 kB instead of 9, the line is still JSON, and the Walter's
+verbatim forwarding and every NDJSON reader go on working untouched.
+
+`sweeps` is how many sweeps went into this frame and `sps` is sweeps per
+second **× 10** since the previous one (476 = 47.6 a second). `agg` is what the
+frame holds of those sweeps: `max` (the strongest level of each point, so a
+short burst shows), `mean` (in the power domain) or `last`. `cov` is the
+receiver bandwidth over the step.
+
+```json
+{"t":"scope","seq":312,"ts":1754820500,"ms":512000,"f0":863.014000,"step":28.0000,
+ "rbw":39.0,"n":250,"cov":1.393,"agg":"max","sweeps":6,"sps":476,"lv":"7Ozs7e3t7u7u…"}
+```
+
+**Where a frame goes.** Every other line of this firmware goes to the Walter's
+UART *and* to USB. A `scope` frame goes to **the port its command came in on,
+and only there** — the other port keeps getting `stat`, `boot` and everything
+else as before. The two ports are not the same pipe: USB CDC takes every sweep
+there is, while the Walter's UART is 115200 baud, so a `scope` started on the
+UART has its interval raised to what that port can carry for that frame size
+(a frame may take at most half the port's time). The `ack` says the interval it
+took. A scope can therefore never block the UART writer or starve the watchdog,
+whatever it was asked for.
 
 `hist` — one line per frequency per pass. `bins[i]` counts RSSI samples in the
 4 dB slot starting at `b0 - 4*i` dBm (bin 0 = −11 dBm, bin 32 = −139 dBm); `n`
@@ -297,6 +377,13 @@ A `sweep` line at the default settings is about 2.5 kB, so ~0.25 s of UART
 time at 115200; at `auto 10` that is about 15 kB/h of LTE traffic including
 the heartbeats.
 
+A `scope` frame is 0.5 kB at 250 points and 2.9 kB at 2048, and it arrives as
+often as the interval says — which on this UART the device has already raised
+to what the port can carry (§5). It is a **stream and not a measurement a unit
+leaves running**: start one when somebody is watching, and `stop` it. Forwarding
+it needs nothing new, since it is one NDJSON line with a `t` like any other, but
+the LTE budget is the Walter's problem and not this firmware's.
+
 ### Telling this firmware from the repeater
 
 `spec/LINK-PROTOCOL.md` §9: a Walter that gets no `HELLO` response but sees
@@ -317,6 +404,48 @@ before it is flashed: its descriptor's role byte is 3.
   each `hist` session and purged by a hardware reset at the end. Volatile by
   design: a PWR_KILL cycle, an NRST pulse or a reboot always returns the radio
   to stock.
+* **The sweep plugin (`scope`):** a second RAM patch, and not Semtech's. It is
+  **167 words of code for the SX1262's own core** (a CoolRISC 816), uploaded
+  into the chip's program RAM with the same `SX126x::uploadPatch` the histogram
+  uses; it adds the command `0x9B`, which retunes the receiver after every RSSI
+  update and leaves one level per point in the data buffer. One SPI command is
+  then a whole sweep: 250 points in about 86 ms at the narrowest bandwidth and
+  about 5 ms at 78 kHz, where the MCU-stepped `sweep` takes seconds.
+
+  It comes from MeshCore issue
+  [#3578](https://github.com/meshcore-dev/MeshCore/issues/3578) and is vendored
+  under `src/roles/scanner/vendor/sx126x_spectrum/` — the host class and the
+  binary from `sleeply4cat/MeshCore` branch `spectrum-stream` at `41472f97`,
+  its assembler source `spectrum.asm` and `README.md` from branch
+  `mesh-pocket-spectrum` at `f40f469d`, MIT, each file naming where it came
+  from. The assembler is **not** vendored and nothing rebuilds the binary here:
+  `test/test_scanner` pins the 167 words by hash instead, so a word cannot be
+  changed by hand unnoticed. The `.asm` is checked in beside it to be read.
+
+  **The ROM gate.** The plugin is made for, and was verified by its author on,
+  an SX1262 whose ROM version string (register `0x0320`, 16 characters) reads
+  `SX1261 V2D 2D02`. This firmware reads that string once at boot and `info`
+  carries it as `rom`; a `scope` on any other ROM uploads **nothing**, answers
+  an `err` naming the ROM it met, and says that `sweep` is the fallback.
+
+  **It never outlives the mode.** The plugin is uploaded when a `scope` starts
+  and the chip is hardware-reset when it ends — `stop`, `scope off`, another
+  command, or any error — exactly as the histogram's patch is. Once loaded it
+  sets the last character of the ROM string (`0x032E`) to `P`, and that tag is
+  checked before *every* sweep: a chip that was reset under us (a brownout) has
+  no `0x9B` command, so the mode ends with an `err` rather than running
+  whatever is left in the chip's RAM.
+
+  **Why a wide span is several sweeps.** `setFrequency()` calibrates the image
+  rejection for one band — one of five Semtech presets, or ±4 MHz around the
+  frequency (RadioLib 7.8.0, `SX126x::calibrateImage`) — so a point far from
+  the centre is measured through a worse calibration. A `scope` therefore cuts
+  its span into **segments**, each at most 32 MHz wide and at most 250 points,
+  each calibrated for its own range with `calibrateImageRejection()`, and one
+  segment runs per pass of the main loop. `150 960 2048` is 26 of them; the
+  `ack` says how many. The 32 MHz is `kScopeSegmentMhz` in
+  `src/roles/scanner/Sweep.h`, and the bench lowers it if an image ever shows
+  (`docs/bench.md` §9).
 * **Power telemetry:** the B-board INA3221 in every heartbeat, so a scanning
   session doubles as a power-budget check. Missing peripherals (a bench setup)
   are detected and skipped.
@@ -338,32 +467,47 @@ before it is flashed: its descriptor's role byte is 3.
   (level and true duty cycle), then `sweep` with the max-hold to find its
   frequency.
 * A high `cad.det` on a clean-looking channel = other LoRa traffic.
+* A **`scope` with `--baseline`** is that comparison made automatic: capture
+  the same span on a 50 Ω dummy load, and the plotter subtracts its
+  per-frequency median from everything it draws. What is left is the site and
+  not the receiver.
 * A raised floor across the whole sweep that disappears on a dummy load =
   in-band interference or front-end compression from a strong out-of-band
   carrier. Step the sweep across the likely blockers (LTE800 DL 791–821,
   GSM-R/GSM900 DL 921–960) and remember that you are looking through the
   cavity filter — that attenuation is part of the honest answer.
 
-## 8. Where it is going: the fast sweep
+## 8. The fast sweep, as built
 
-*Planned, task [`p3.1-01`](../tasks/phase-3.1/01-the-fast-sweep.md); nothing of it
-is built yet.*
+*Phase 3.1's task [`01`](../tasks/phase-3.1/01-the-fast-sweep.md); the page for
+it is §1, §5 and §6 above, and this is what was decided and where it lives.*
 
 MeshCore issue [#3578](https://github.com/meshcore-dev/MeshCore/issues/3578),
-*Radio spectrum visualization* (sleeply4cat, 12 October 2026), shows what this
-scanner should become: a live spectrum with a waterfall under it. Its trick is
-to run the sweep **inside the SX1262**: a 167-word program for the radio's own
-core, uploaded into its program RAM the way `hist` uploads Semtech's patch,
-retunes after every RSSI update and leaves one level per point in the data
-buffer - 250 points in about 5 to 56 ms depending on the RBW, where `sweep`,
-stepped by the MCU, takes seconds. The source is `spectrum.asm` in the fork
-`sleeply4cat/MeshCore` (branch `mesh-pocket-spectrum`, MIT); it is made for the
-ROM `SX1261 V2D 2D02` and is gone at the next reset of the chip.
+*Radio spectrum visualization* (sleeply4cat, 12 October 2026), is where the
+trick comes from: run the sweep **inside the SX1262** rather than stepping it
+from the MCU. What this firmware does with it differs from the issue in four
+ways, each of them a line of `src/roles/scanner/Sweep.h` with a native test:
 
-What this firmware will do with it differs from the issue in three ways: the
-span goes **as wide as the radio tunes, 150–960 MHz**, in segments each
-calibrated for its own image rejection (the issue caps one sweep at 32 MHz for
-that reason); the frames go to the port that asked, sized for it, because the
-Walter UART is 115200 baud and USB is not; and there is no Bluetooth - the
-waterfall is drawn by `tools/noisescope/waterfall_plot.py`, and later from the
-Walter's MQTT.
+| | the issue | here |
+|---|---|---|
+| span | one sweep, at most 32 MHz | **150–960 MHz**, cut into segments of at most 32 MHz and 250 points, each calibrated for its own range |
+| where frames go | a Bluetooth companion client | the port the command came in on, sized for it: USB CDC gets every sweep, the Walter's 115200 UART gets the interval that port can carry |
+| the frame | a binary push of a companion protocol | one NDJSON line like every other, with the levels base64-encoded so that the Walter's verbatim forwarding and every reader go on working |
+| the picture | a screen on the device | `tools/noisescope/waterfall_plot.py --scope`, and later the Walter's MQTT |
+
+Where it lives:
+
+| | |
+|---|---|
+| the plan — segments, bandwidth, coverage, the sink's interval, the duration bounds | `src/roles/scanner/Sweep.h`, host-portable, `test/test_scanner` |
+| the frame and its base64 | `src/roles/scanner/Lines.{h,cpp}` |
+| the command | `src/roles/scanner/Commands.{h,cpp}` |
+| the radio half — calibrate, set the sweep, run it, read the buffer | `src/roles/scanner/Radio.cpp`, which is thin |
+| the plugin and its host class, vendored | `src/roles/scanner/vendor/sx126x_spectrum/` |
+| the picture | `tools/noisescope/waterfall_plot.py` |
+
+**Not done here, on purpose:** the Walter's forwarding of `scope` frames to
+MQTT and the LTE budget that goes with it (the Walter firmware is its own
+repository), a web or MeshMaster view of the waterfall (later, once frames
+reach MQTT), and the issue's BLE companion protocol — this firmware has no
+Bluetooth at all.

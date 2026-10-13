@@ -26,6 +26,15 @@
 namespace twinoak {
 namespace scanner {
 
+// The longest fragment this writer ever hands a sink in one call. A line is not held in memory -
+// a `sweep` pass is about 2.5 kB and a 2048-point `scope` frame about 2.9 kB - so this is the
+// whole of the buffer the writer needs, and test/test_scanner holds every fragment to it.
+constexpr size_t kLineFragmentBytes = 224;
+
+// The longest message an `ack` or an `err` may carry. Those two lines are written through one
+// fragment, so the message plus its envelope has to fit above.
+constexpr size_t kMaxAckMessageBytes = 160;
+
 // Where a line goes. The board's writes to the Walter's UART always and to USB CDC when a host
 // is attached; the tests' appends to a string.
 struct LineSink {
@@ -64,6 +73,9 @@ struct InfoFields {
   uint32_t devid_low = 0;
   bool boosted_gain = false;
   uint32_t auto_minutes = 0;
+  // The radio's own ROM version string, read once at boot: what decides whether `scope` can run
+  // at all, because the sweep plugin is made for one of them (docs/noisescope.md section 6).
+  const char* rom = "";
   double home_f_mhz = 0.0;
   double home_bw_khz = 0.0;
   uint8_t home_sf = 0;
@@ -113,6 +125,18 @@ struct HistFields {
   const uint16_t* bins = nullptr;  // kHistBins of them
 };
 
+// `scope`, one line per frame of the fast sweep. `lv` is the base64 of `n` bytes, one per point,
+// each **-2 x dBm** as the SX126x reports it (0.5 dB steps, kScopeNoReading = no reading) - which
+// keeps the line JSON at a third of the length a number array would be, so the Walter's verbatim
+// forwarding and every NDJSON reader still work (docs/noisescope.md section 5).
+struct ScopeFields {
+  Meta meta;
+  ScopePlan plan;
+  uint16_t sweeps = 0;            // how many sweeps went into this frame
+  uint16_t sps_x10 = 0;           // sweeps per second x10 since the previous frame
+  const uint8_t* levels = nullptr;  // plan.points of them
+};
+
 // `dwell`, one line per window: `stat.rssi`'s statistics at the commanded frequency.
 struct DwellFields {
   Meta meta;
@@ -141,6 +165,7 @@ class Lines {
   void info(const InfoFields& fields);
   void stat(const StatFields& fields);
   void sweep(const SweepFields& fields);
+  void scope(const ScopeFields& fields);
   void hist(const HistFields& fields);
   void dwell(const DwellFields& fields);
   void cad(const CadFields& fields);
@@ -167,6 +192,8 @@ class Lines {
   void bootBody(const BootFields& fields);
   void homeBody(double f_mhz, double bw_khz, uint8_t sf, uint8_t cr);
   void doubles(const double* values, uint16_t count, int decimals);
+  // The base64 of `count` bytes, written in fragments of at most kLineFragmentBytes.
+  void base64(const uint8_t* bytes, uint16_t count);
   void text(const char* fmt, ...)
 #if defined(__GNUC__)
       __attribute__((format(printf, 2, 3)))
