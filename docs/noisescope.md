@@ -343,3 +343,27 @@ before it is flashed: its descriptor's role byte is 3.
   carrier. Step the sweep across the likely blockers (LTE800 DL 791–821,
   GSM-R/GSM900 DL 921–960) and remember that you are looking through the
   cavity filter — that attenuation is part of the honest answer.
+
+## 8. Where it is going: the fast sweep
+
+*Planned, task [`p3.1-01`](../tasks/phase-3.1/01-the-fast-sweep.md); nothing of it
+is built yet.*
+
+MeshCore issue [#3578](https://github.com/meshcore-dev/MeshCore/issues/3578),
+*Radio spectrum visualization* (sleeply4cat, 12 October 2026), shows what this
+scanner should become: a live spectrum with a waterfall under it. Its trick is
+to run the sweep **inside the SX1262**: a 167-word program for the radio's own
+core, uploaded into its program RAM the way `hist` uploads Semtech's patch,
+retunes after every RSSI update and leaves one level per point in the data
+buffer - 250 points in about 5 to 56 ms depending on the RBW, where `sweep`,
+stepped by the MCU, takes seconds. The source is `spectrum.asm` in the fork
+`sleeply4cat/MeshCore` (branch `mesh-pocket-spectrum`, MIT); it is made for the
+ROM `SX1261 V2D 2D02` and is gone at the next reset of the chip.
+
+What this firmware will do with it differs from the issue in three ways: the
+span goes **as wide as the radio tunes, 150–960 MHz**, in segments each
+calibrated for its own image rejection (the issue caps one sweep at 32 MHz for
+that reason); the frames go to the port that asked, sized for it, because the
+Walter UART is 115200 baud and USB is not; and there is no Bluetooth - the
+waterfall is drawn by `tools/noisescope/waterfall_plot.py`, and later from the
+Walter's MQTT.

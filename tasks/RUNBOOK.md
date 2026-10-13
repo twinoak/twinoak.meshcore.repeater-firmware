@@ -44,7 +44,8 @@ git -C ../<repo-folder> show <commit>:<path>
 ```
 
 Never check out, pull, commit or write in a sibling repository. The two
-MeshMaster repositories (`meshmaster.dk`, `meshmaster-agent-firmware`) and the
+MeshMaster repositories (`meshmaster.dk`, `twinoak.meshmaster.exitnode-firmware`,
+named `meshmaster-agent-firmware` until 11 October 2026) and the
 hardware repository are read-only to every task here.
 
 ## 1. Branch

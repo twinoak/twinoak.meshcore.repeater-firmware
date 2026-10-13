@@ -73,6 +73,7 @@ pick them up. Merging never releases; a release is a person pushing a tag.
 | [1](phase-1/README.md) | a repeater that is ours: the application, the link, the clock, local management, power | 6 |
 | [2](phase-2/README.md) | the exit-node half: the mesh client, observations, the rails | 4 |
 | [3](phase-3/README.md) | the family: roles and boards, NoiseScope, first-boot provisioning | 3 |
+| [3.1](phase-3.1/README.md) | the fast sweep: the in-radio sweep of MeshCore #3578 as the scanner's `scope`, 150–960 MHz, a live waterfall | 1 |
 
 Not in these piles, on purpose: anything that needs the rig (a bench pile
 follows the first boards), the bridge role and the dual adapter (the structure

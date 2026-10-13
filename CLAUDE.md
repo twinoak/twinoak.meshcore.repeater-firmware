@@ -15,7 +15,8 @@ procedure and it wins over this file.
 - **Verify locally with `tools/verify.ps1`** before pushing anything. CI runs
   the same script and is not where debugging happens.
 - **Sibling repositories are read-only**, and `meshmaster.dk` and
-  `meshmaster-agent-firmware` may have other sessions working in them: read
+  `twinoak.meshmaster.exitnode-firmware` (named `meshmaster-agent-firmware`
+  until 11 October 2026) may have other sessions working in them: read
   with `git -C ../<folder> show <commit>:<path>` or `gh api`, never check out
   or write there.
 - **The hardware's interfaces are frozen** (`INTERCONNECT.md` in the hardware
