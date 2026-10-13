@@ -15,6 +15,10 @@
 //   3. **the sweep** - src/roles/scanner/Sweep.h. How many points a sweep has and where each one
 //      is, which receiver bandwidth a step needs, what the other three activities clamp their
 //      arguments to, and the window of RSSI samples that `stat.rssi` and `dwell` report.
+//   4. **the scope** - the fast sweep of phase 3.1's task 01, which is one subject across all
+//      three of those and is therefore kept together at the end: the command, the plan (the
+//      span cut into segments, each with its own image calibration), the frame and its base64,
+//      the three aggregates, and the pinned binary of the plugin that runs inside the radio.
 //
 // ArduinoJson is the native environment's fixture reader already (test/test_link_codec) and it
 // is here for the same reason: a line is held against a real parser and not against a string
@@ -26,12 +30,17 @@
 #include <ArduinoJson.h>
 
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <vector>
 
 #include "roles/scanner/Commands.h"
 #include "roles/scanner/Lines.h"
 #include "roles/scanner/Sweep.h"
+// The vendored sweep plugin's binary, pinned by the last test of this file: a program for the
+// radio's own core, and the one file under src/roles/scanner/vendor/ that is host-portable (it
+// is an array of words and a #define, and nothing else).
+#include "roles/scanner/vendor/sx126x_spectrum/SX126xSpectrumPlugin.h"
 
 namespace {
 
@@ -44,7 +53,16 @@ using namespace twinoak::scanner;  // NOLINT: this is that namespace's own test
 // this splits.
 class StringSink : public LineSink {
  public:
-  void write(const char* text) override { all_ += text; }
+  void write(const char* text) override {
+    // The longest fragment, because that is the whole of the buffer the writer is allowed: a
+    // 2048-point `scope` frame is about 2.9 kB and no part of it may be held in one piece
+    // (src/roles/scanner/Lines.h, kLineFragmentBytes).
+    const size_t n = std::strlen(text);
+    if (n > longest_) longest_ = n;
+    all_ += text;
+  }
+
+  size_t longestFragment() const { return longest_; }
 
   const std::string& text() const { return all_; }
 
@@ -63,10 +81,14 @@ class StringSink : public LineSink {
     return out;
   }
 
-  void clear() { all_.clear(); }
+  void clear() {
+    all_.clear();
+    longest_ = 0;
+  }
 
  private:
   std::string all_;
+  size_t longest_ = 0;
 };
 
 // The one line a message wrote, parsed. Fails the test when there is not exactly one, when it
@@ -158,10 +180,10 @@ TEST(Commands, EveryWordOfTheProtocolIsAVerbAndNothingElseIs) {
     Verb verb;
   } kTable[] = {
       {"help", kVerbHelp},     {"info", kVerbInfo},   {"stat", kVerbStat},
-      {"sweep", kVerbSweep},   {"hist", kVerbHist},   {"dwell", kVerbDwell},
-      {"cad", kVerbCad},       {"stop", kVerbStop},   {"home", kVerbHome},
-      {"boost", kVerbBoost},   {"auto", kVerbAuto},   {"time", kVerbTime},
-      {"reboot", kVerbReboot}, {"dfu", kVerbDfu},
+      {"sweep", kVerbSweep},   {"scope", kVerbScope}, {"hist", kVerbHist},
+      {"dwell", kVerbDwell},   {"cad", kVerbCad},     {"stop", kVerbStop},
+      {"home", kVerbHome},     {"boost", kVerbBoost}, {"auto", kVerbAuto},
+      {"time", kVerbTime},     {"reboot", kVerbReboot}, {"dfu", kVerbDfu},
   };
   for (const auto& row : kTable) {
     EXPECT_EQ(row.verb, verbOf(row.word)) << row.word;
@@ -321,7 +343,7 @@ TEST(Commands, DfuIsTheDriveUnlessTheWordIsSerial) {
 }
 
 TEST(Commands, EveryCommandThatCanBeRefusedHasAUsageLine) {
-  for (Verb verb : {kVerbDwell, kVerbHome, kVerbBoost, kVerbAuto, kVerbTime}) {
+  for (Verb verb : {kVerbScope, kVerbDwell, kVerbHome, kVerbBoost, kVerbAuto, kVerbTime}) {
     const std::string usage = usageOf(verb);
     EXPECT_EQ(0u, usage.find("usage: ")) << "verb " << int(verb) << ": " << usage;
     EXPECT_NE(std::string::npos, usage.find(nameOf(verb)))
@@ -630,6 +652,12 @@ TEST(Lines, TheHelpTextIsChatterAndEveryLineOfItSaysSo) {
 // ================================================================= 3. the sweep
 
 TEST(Sweep, TheReceiverBandwidthIsTheSmallestOneWiderThanTheStep) {
+  EXPECT_DOUBLE_EQ(kScopeRbwMaxKhz, kFskRbwKhz[kFskRbwCount - 1])
+      << "the cap a `rbw_khz` is held to is the widest filter the part has";
+  EXPECT_DOUBLE_EQ(4.8, narrowestRbwKhz(0.0)) << "a bandwidth lands on one of the part's filters";
+  EXPECT_DOUBLE_EQ(23.4, narrowestRbwKhz(20.0));
+  EXPECT_DOUBLE_EQ(23.4, narrowestRbwKhz(23.4));
+  EXPECT_DOUBLE_EQ(kScopeRbwMaxKhz, narrowestRbwKhz(5000.0));
   EXPECT_DOUBLE_EQ(29.3, pickRbwKhz(25.0)) << "1.1 x 25 kHz is 27.5, and 29.3 is the next one up";
   EXPECT_DOUBLE_EQ(4.8, pickRbwKhz(1.0));
   EXPECT_DOUBLE_EQ(117.3, pickRbwKhz(100.0));
@@ -769,6 +797,642 @@ TEST(Window, AnEmptyWindowCarriesNothingOverAndARestartForgetsEverything) {
   window.restart();
   EXPECT_DOUBLE_EQ(kFirstThresholdDbm, window.threshold());
   EXPECT_EQ(0u, window.count());
+}
+
+// ================================================================= 4. the scope
+//
+// The fast sweep (phase 3.1's task 01), which is one subject across all three of the above and so
+// is kept together: what `scope` means as a command, what its plan asks the radio for, and what
+// a frame of it says. Its arithmetic is the part no bench can check afterwards - a segment that
+// is a megahertz too wide is a reading through the wrong image calibration and looks like a
+// signal - so it is all here.
+
+namespace {
+
+// The base64 of a frame, decoded the way a reader of the protocol decodes it (RFC 4648 section
+// 4). Empty for text that is not base64, which is itself a failure worth seeing.
+std::vector<uint8_t> fromBase64(const std::string& text) {
+  static const char* kAlphabet =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::vector<uint8_t> out;
+  if (text.size() % 4 != 0) return out;
+  uint32_t acc = 0;
+  int bits = 0;
+  for (char c : text) {
+    if (c == '=') break;
+    const char* at = std::strchr(kAlphabet, c);
+    if (at == nullptr || c == '\0') return {};
+    acc = (acc << 6) | uint32_t(at - kAlphabet);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push_back(uint8_t((acc >> bits) & 0xFFu));
+    }
+  }
+  return out;
+}
+
+ScopeRequest request(double f0, double f1) {
+  ScopeRequest r;
+  r.f0 = f0;
+  r.f1 = f1;
+  return r;
+}
+
+// Every segment of a plan, so that a test can say something about all of them at once.
+std::vector<ScopeSegment> segmentsOf(const ScopePlan& plan) {
+  std::vector<ScopeSegment> out;
+  for (uint16_t i = 0; i < plan.segments; i++) {
+    ScopeSegment seg;
+    if (scopeSegment(plan, i, seg)) out.push_back(seg);
+  }
+  return out;
+}
+
+}  // namespace
+
+// ----------------------------------------------------------------- the command
+
+TEST(Scope, BothEndsAreRequiredAndTheRestHasDefaults) {
+  Line line("scope 863 870");
+  ScopeArgs args;
+  ASSERT_TRUE(parseScope(tokensOf(line), args));
+  EXPECT_FALSE(args.off);
+  EXPECT_DOUBLE_EQ(863.0, args.f0);
+  EXPECT_DOUBLE_EQ(870.0, args.f1);
+  EXPECT_EQ(0u, args.points) << "0 is 'the plan's default' and not 'no points'";
+  EXPECT_DOUBLE_EQ(0.0, args.rbw_khz);
+  EXPECT_EQ(0u, args.interval_ms);
+  EXPECT_EQ(kScopeAggMax, args.agg);
+
+  // Unlike `sweep`, which has a band to fall back on: a scope's span is the operator's whole
+  // point, so one end alone is not a command.
+  Line one("scope 863");
+  EXPECT_FALSE(parseScope(tokensOf(one), args));
+  Line none("scope");
+  EXPECT_FALSE(parseScope(tokensOf(none), args));
+}
+
+TEST(Scope, EveryArgumentIsReadWhereThePageSaysItIs) {
+  Line line("scope 150 960 2048 467 500 mean");
+  ScopeArgs args;
+  ASSERT_TRUE(parseScope(tokensOf(line), args));
+  EXPECT_DOUBLE_EQ(150.0, args.f0);
+  EXPECT_DOUBLE_EQ(960.0, args.f1);
+  EXPECT_EQ(2048u, args.points);
+  EXPECT_DOUBLE_EQ(467.0, args.rbw_khz);
+  EXPECT_EQ(500u, args.interval_ms);
+  EXPECT_EQ(kScopeAggMean, args.agg);
+}
+
+TEST(Scope, OffIsTheOneWordAndAnUnknownAggregateIsNotACommand) {
+  ScopeArgs args;
+  Line off("scope off");
+  ASSERT_TRUE(parseScope(tokensOf(off), args));
+  EXPECT_TRUE(args.off);
+
+  Line bad("scope 863 870 250 0 0 median");
+  EXPECT_FALSE(parseScope(tokensOf(bad), args)) << "there are three aggregates, and that is not"
+                                                  " one of them";
+
+  for (const char* word : {"max", "mean", "last"}) {
+    ScopeAgg agg = kScopeAggLast;
+    ASSERT_TRUE(scopeAggOf(word, agg)) << word;
+    EXPECT_STREQ(word, scopeAggName(agg)) << "the frame says the word the command took";
+  }
+  ScopeAgg agg = kScopeAggMax;
+  EXPECT_FALSE(scopeAggOf("", agg));
+  EXPECT_FALSE(scopeAggOf("MAX", agg)) << "an argument is case-sensitive (docs/noisescope.md)";
+}
+
+// ----------------------------------------------------------------- the ROM gate
+
+TEST(Scope, ThePluginIsUploadedToOneRomAndNoOther) {
+  EXPECT_TRUE(scopeRomSupported("SX1261 V2D 2D02"));
+  EXPECT_TRUE(scopeRomSupported("SX1261 V2D 2D02 and whatever follows the fifteenth character"));
+  EXPECT_FALSE(scopeRomSupported("SX1261 V1B 2D00")) << "an older ROM is a different core";
+  EXPECT_FALSE(scopeRomSupported("SX1261 V2D 2D0"));
+  EXPECT_FALSE(scopeRomSupported(""));
+  EXPECT_FALSE(scopeRomSupported(nullptr));
+  // Once the plugin has loaded, the fifteenth character is its tag and not the ROM's own - which
+  // is why this is asked **before** anything is uploaded (SX126xSpectrumScanner::begin).
+  EXPECT_FALSE(scopeRomSupported("SX1261 V2D 2D0P"));
+}
+
+// ----------------------------------------------------------------- the plan
+
+TEST(Scope, AHomeBandScopeIsOnePluginCallAndCoversItsSpan) {
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(request(863.0, 870.0), plan));
+  EXPECT_EQ(kScopeDefaultPoints, plan.points) << "no point count given: one plugin call";
+  EXPECT_EQ(1, plan.segments) << "7 MHz is inside one segment";
+  EXPECT_NEAR(28.0, plan.step_khz, 1e-9) << "7 MHz over 250 points";
+  EXPECT_DOUBLE_EQ(39.0, plan.rbw_khz) << "the narrowest bandwidth at least 1.1 x 28 kHz";
+  EXPECT_GT(plan.cov, 1.0) << "no gaps, so a narrow carrier cannot hide between two points";
+  EXPECT_NEAR(863.014, plan.first_mhz, 1e-9) << "the first point's centre is half a step in";
+
+  const std::vector<ScopeSegment> segs = segmentsOf(plan);
+  ASSERT_EQ(1u, segs.size());
+  EXPECT_EQ(0, segs[0].first);
+  EXPECT_EQ(250, segs[0].points);
+  // What the one segment is calibrated for is what it measures: the first point's centre and the
+  // last one's, half a 39 kHz filter either side.
+  EXPECT_NEAR(863.014 - 0.0195, segs[0].cal_lo_mhz, 1e-9);
+  EXPECT_NEAR(869.986 + 0.0195, segs[0].cal_hi_mhz, 1e-9);
+}
+
+TEST(Scope, ASpanWiderThanOneCallIsCutIntoSegmentsThatEachCalibrateForThemselves) {
+  // 20 MHz at 2048 points: 9.766 kHz a step, so the plugin's 250 points a call is what bites and
+  // the cut is nine calls - each of them well inside kScopeSegmentMhz.
+  ScopeRequest r = request(860.0, 880.0);
+  r.points = 2048;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_EQ(2048, plan.points);
+  EXPECT_EQ(9, plan.segments);
+
+  const std::vector<ScopeSegment> segs = segmentsOf(plan);
+  ASSERT_EQ(9u, segs.size());
+  uint32_t total = 0;
+  for (size_t i = 0; i < segs.size(); i++) {
+    EXPECT_LE(segs[i].points, kScopePluginMaxPoints) << "segment " << i;
+    EXPECT_LE(segs[i].cal_hi_mhz - segs[i].cal_lo_mhz, kScopeSegmentMhz) << "segment " << i;
+    EXPECT_EQ(total, segs[i].first) << "the segments are consecutive and leave no point out";
+    // A segment is calibrated for the frequencies it measures: its first point's centre, half a
+    // receiver bandwidth below, to its last point's centre, half a bandwidth above.
+    EXPECT_NEAR(segs[i].first_mhz - plan.rbw_khz / 2000.0, segs[i].cal_lo_mhz, 1e-9) << i;
+    EXPECT_NEAR(segs[i].first_mhz + double(segs[i].points - 1) * plan.step_khz / 1000.0 +
+                    plan.rbw_khz / 2000.0,
+                segs[i].cal_hi_mhz, 1e-9)
+        << i;
+    total += segs[i].points;
+  }
+  EXPECT_EQ(2048u, total);
+  EXPECT_NEAR(plan.first_mhz - plan.rbw_khz / 2000.0, segs.front().cal_lo_mhz, 1e-9);
+  EXPECT_NEAR(860.0 + plan.step_khz / 2000.0, plan.first_mhz, 1e-9)
+      << "and the frame starts half a step inside the span that was asked for";
+  ScopeSegment past;
+  EXPECT_FALSE(scopeSegment(plan, plan.segments, past)) << "and there is no tenth";
+}
+
+TEST(Scope, TheWholeTuningRangeIsSegmentedByBothBoundsAtOnce) {
+  // 150-960 MHz at 2048 points: 395.5 kHz a step, so a segment of 32 MHz holds 80 points and
+  // *that* is what bites, not the plugin's 250.
+  ScopeRequest r = request(kRadioLowMhz, kRadioHighMhz);
+  r.points = 2048;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_EQ(26, plan.segments) << "810 MHz in segments of at most 32 MHz";
+
+  const std::vector<ScopeSegment> segs = segmentsOf(plan);
+  ASSERT_EQ(26u, segs.size());
+  const double step_mhz = plan.step_khz / 1000.0;
+  for (size_t i = 0; i < segs.size(); i++) {
+    EXPECT_LE(segs[i].points, kScopePluginMaxPoints) << "segment " << i;
+    EXPECT_LE(segs[i].cal_hi_mhz - segs[i].cal_lo_mhz, kScopeSegmentMhz) << "segment " << i;
+    // The radio is only ever *tuned* to a point's centre, and every one of those is inside the
+    // range the chip has. The calibration band reaches half a filter past the span's own edge,
+    // which is a fact about what the receiver sees and not a frequency it is set to.
+    const double last_mhz = segs[i].first_mhz + double(segs[i].points - 1) * step_mhz;
+    EXPECT_GE(segs[i].first_mhz, kRadioLowMhz) << "segment " << i;
+    EXPECT_LE(last_mhz, kRadioHighMhz) << "segment " << i;
+  }
+  // 32 MHz holds 80 points of 395.5 kHz, and 2048 points over 26 segments spread as evenly as
+  // whole points can: twenty segments of 79 and six of 78, none of them over the bound.
+  EXPECT_EQ(79, segs.front().points);
+  EXPECT_EQ(78, segs.back().points);
+  EXPECT_DOUBLE_EQ(467.0, plan.rbw_khz) << "nothing is wider than 467 kHz";
+}
+
+TEST(Scope, CoverageBelowOneIsReportedAndNotRefused) {
+  // The acceptance criterion's own case: the whole tuning range at 1024 points is 791 kHz a step
+  // through the widest filter there is, so more than two fifths of the span is not looked at at
+  // all. That is a legitimate thing to ask for - it is how a blocker is found - and the frame
+  // says so with `cov`, which the plotter draws as a grey band.
+  ScopeRequest r = request(kRadioLowMhz, kRadioHighMhz);
+  r.points = 1024;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_NEAR(791.015625, plan.step_khz, 1e-6);
+  EXPECT_DOUBLE_EQ(467.0, plan.rbw_khz);
+  EXPECT_NEAR(467.0 / 791.015625, plan.cov, 1e-9);
+  EXPECT_LT(plan.cov, 1.0);
+  EXPECT_DOUBLE_EQ(plan.rbw_khz / plan.step_khz, plan.cov);
+}
+
+TEST(Scope, ABandwidthAskedForDecidesHowManyPointsHaveNoGaps) {
+  // 150-960 MHz at 467 kHz needs 1735 points to leave no gap, which is what a `rbw` with no
+  // point count asks for (tasks/phase-3.1/01-the-fast-sweep.md).
+  ScopeRequest r = request(kRadioLowMhz, kRadioHighMhz);
+  r.rbw_khz = 467.0;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_EQ(1735, plan.points);
+  EXPECT_DOUBLE_EQ(467.0, plan.rbw_khz);
+  EXPECT_GE(plan.cov, 1.0) << "which is the whole point of that default";
+
+  // A bandwidth lands on one of the radio's own filters, rounded up, and never above 467.
+  ScopeRequest narrow = request(869.0, 869.5);
+  narrow.rbw_khz = 20.0;
+  ASSERT_TRUE(planScope(narrow, plan));
+  EXPECT_DOUBLE_EQ(23.4, plan.rbw_khz) << "20 kHz is not a filter the part has; 23.4 is the next";
+  ScopeRequest wide = request(kRadioLowMhz, kRadioHighMhz);
+  wide.rbw_khz = 5000.0;
+  ASSERT_TRUE(planScope(wide, plan));
+  EXPECT_DOUBLE_EQ(kScopeRbwMaxKhz, plan.rbw_khz) << "nothing is wider than 467 kHz";
+  EXPECT_EQ(1735, plan.points);
+
+  // And where no gaps would need more points than a frame holds, the frame wins and `cov` says
+  // what was given up: 810 MHz through a 100 kHz filter would be 8100 points.
+  ScopeRequest fine = request(kRadioLowMhz, kRadioHighMhz);
+  fine.rbw_khz = 100.0;
+  ASSERT_TRUE(planScope(fine, plan));
+  EXPECT_EQ(kScopeMaxPoints, plan.points);
+  EXPECT_LT(plan.cov, 1.0);
+}
+
+TEST(Scope, ARequestThatIsNotAScopeIsRefused) {
+  ScopePlan plan;
+  EXPECT_FALSE(planScope(request(870.0, 863.0), plan)) << "the ends crossed";
+  EXPECT_FALSE(planScope(request(869.0, 869.0), plan)) << "and a span of nothing";
+  EXPECT_FALSE(planScope(request(149.0, 870.0), plan)) << "below the radio's range";
+  EXPECT_FALSE(planScope(request(863.0, 961.0), plan)) << "and above it";
+
+  ScopeRequest few = request(863.0, 870.0);
+  few.points = kScopeMinPoints - 1;
+  EXPECT_FALSE(planScope(few, plan)) << "fewer points than a spectrum is";
+  ScopeRequest many = request(863.0, 870.0);
+  many.points = kScopeMaxPoints + 1;
+  EXPECT_FALSE(planScope(many, plan)) << "more points than a frame holds";
+
+  ScopeRequest tiny = request(869.6, 869.6001);
+  tiny.points = 2048;
+  EXPECT_FALSE(planScope(tiny, plan)) << "a step below a hundred hertz, which is finer than the"
+                                        " radio tunes";
+
+  ScopeRequest slow = request(863.0, 870.0);
+  slow.interval_ms = kScopeIntervalMaxMs + 1;
+  EXPECT_FALSE(planScope(slow, plan)) << "longer than a minute between frames is not a stream";
+
+  // And the one that is not a refusal: 150-960 is exactly what this mode is for.
+  EXPECT_TRUE(planScope(request(kRadioLowMhz, kRadioHighMhz), plan));
+}
+
+TEST(Scope, NoLegalRequestNeedsMoreSegmentsThanThereIsRoomFor) {
+  // kScopeMaxSegments is a claim about the arithmetic, so it is checked against the arithmetic
+  // and not against a memory of it: every point count the command takes, over the widest span
+  // there is, which is where both bounds on a segment are at their worst.
+  uint32_t worst = 0;
+  uint32_t worst_points = 0;
+  for (uint32_t points = kScopeMinPoints; points <= kScopeMaxPoints; points++) {
+    ScopeRequest r = request(kRadioLowMhz, kRadioHighMhz);
+    r.points = points;
+    ScopePlan plan;
+    ASSERT_TRUE(planScope(r, plan)) << points << " points over the whole tuning range";
+    ASSERT_LE(plan.segments, kScopeMaxSegments) << points << " points";
+    const std::vector<ScopeSegment> segs = segmentsOf(plan);
+    ASSERT_EQ(size_t(plan.segments), segs.size()) << points << " points";
+    uint32_t total = 0;
+    for (const ScopeSegment& seg : segs) {
+      ASSERT_GE(seg.points, 1) << points << " points";
+      ASSERT_LE(seg.points, kScopePluginMaxPoints) << points << " points";
+      ASSERT_LE(seg.cal_hi_mhz - seg.cal_lo_mhz, kScopeSegmentMhz + 1e-9) << points << " points";
+      total += seg.points;
+    }
+    ASSERT_EQ(points, total) << "every point of the frame is measured exactly once";
+    if (plan.segments > worst) {
+      worst = plan.segments;
+      worst_points = points;
+    }
+  }
+  EXPECT_EQ(26u, worst) << "the worst case of the two bounds together, over the widest span";
+  EXPECT_EQ(51u, worst_points) << "810 MHz in 51 points: 15.9 MHz a step, two to a segment";
+  EXPECT_LE(worst, kScopeMaxSegments);
+}
+
+TEST(Scope, ASweepStaysInsideWhatTheChipAndTheWatchdogAllow) {
+  // One plugin call holds BUSY for its whole duration and nothing feeds the watchdog inside it,
+  // so two bounds matter: RadioLib waits 1000 ms for BUSY (Module.h:224) and the hardware
+  // watchdog is 8 s. The worst a request can be is the narrowest filter there is, which is where
+  // an RSSI update takes longest.
+  EXPECT_EQ(86u, scopeSegmentMs(kScopePluginMaxPoints, 4.8))
+      << "250 points at 4.8 kHz: (250 + 8) x 1.6 / 4.8 ms";
+  EXPECT_EQ(22u, scopeSegmentMs(250, 19.5)) << "about the fork's own number for 19.5 kHz";
+  EXPECT_EQ(6u, scopeSegmentMs(250, 78.2)) << "and for 78 kHz";
+
+  uint32_t worst_segment = 0;
+  uint32_t worst_sweep = 0;
+  for (uint32_t points = kScopeMinPoints; points <= kScopeMaxPoints; points++) {
+    // Three spans: the whole tuning range (the widest step there is), one megahertz, and the
+    // narrowest span this point count may have - which is the narrowest step, and so the
+    // narrowest filter and the slowest RSSI update.
+    const double spans[][2] = {{kRadioLowMhz, kRadioHighMhz},
+                               {869.0, 870.0},
+                               {869.6, 869.6 + double(points) * kScopeMinStepKhz / 1000.0}};
+    for (const auto& span : spans) {
+      ScopeRequest r = request(span[0], span[1]);
+      r.points = points;
+      ScopePlan plan;
+      if (!planScope(r, plan)) continue;
+      if (plan.segment_ms > worst_segment) worst_segment = plan.segment_ms;
+      if (plan.sweep_ms > worst_sweep) worst_sweep = plan.sweep_ms;
+    }
+  }
+  EXPECT_LT(worst_segment, 1000u) << "a plugin call must answer before RadioLib stops waiting"
+                                     " for BUSY";
+  EXPECT_LT(worst_sweep, 4000u) << "and a whole sweep inside half the watchdog - with every"
+                                   " segment a separate pass of loop() on top of that";
+}
+
+TEST(Scope, ASlowSinkGetsAnIntervalItCanCarry) {
+  // The Walter's UART is 115200 baud and a frame is bytes: a scope that asked for every sweep
+  // gets the interval the port can actually carry, and the `ack` says which (docs/noisescope.md
+  // section 5). USB CDC is handed 0 and keeps what was asked for.
+  EXPECT_EQ(0u, scopeIntervalFloorMs(2048, 0)) << "a sink with no floor worth computing";
+
+  const uint32_t floor_2048 = scopeIntervalFloorMs(2048, 115200);
+  const uint32_t floor_250 = scopeIntervalFloorMs(250, 115200);
+  EXPECT_GT(floor_2048, floor_250) << "a bigger frame needs longer";
+  // A frame must fit into one part in kScopeSinkDutyDivisor of the interval it is sent at, so
+  // that a scope can never block the UART writer or starve the watchdog.
+  for (uint16_t points : {uint16_t(16), uint16_t(250), uint16_t(1024), uint16_t(2048)}) {
+    const uint32_t floor_ms = scopeIntervalFloorMs(points, 115200);
+    const double frame_ms = double(scopeFrameBytes(points)) * 10.0 * 1000.0 / 115200.0;
+    EXPECT_GE(double(floor_ms), frame_ms * double(kScopeSinkDutyDivisor)) << points << " points";
+    EXPECT_LE(floor_ms, kScopeIntervalMaxMs) << "and never longer than the longest interval";
+  }
+
+  ScopeRequest r = request(863.0, 870.0);
+  r.points = 2048;
+  r.sink_baud = 115200;
+  ScopePlan uart;
+  ASSERT_TRUE(planScope(r, uart));
+  EXPECT_EQ(floor_2048, uart.interval_ms) << "'a frame per sweep' on the UART is the floor";
+
+  r.interval_ms = kScopeIntervalMaxMs;
+  ASSERT_TRUE(planScope(r, uart));
+  EXPECT_EQ(kScopeIntervalMaxMs, uart.interval_ms) << "a slower interval is kept";
+
+  r.interval_ms = 0;
+  r.sink_baud = 0;
+  ScopePlan usb;
+  ASSERT_TRUE(planScope(r, usb));
+  EXPECT_EQ(0u, usb.interval_ms) << "USB gets every sweep if it asked for one";
+}
+
+// ----------------------------------------------------------------- the frame
+
+TEST(Scope, AFrameCarriesOneByteAPointAndSaysWhatWasTaken) {
+  StringSink sink;
+  Lines lines(sink);
+  ScopeFields f;
+  f.meta = someMeta();
+  ScopeRequest r = request(863.0, 870.0);
+  r.points = 32;
+  r.agg = kScopeAggMean;
+  ASSERT_TRUE(planScope(r, f.plan));
+  std::vector<uint8_t> levels(32);
+  for (size_t i = 0; i < levels.size(); i++) levels[i] = uint8_t(200 + i);
+  levels[7] = kScopeNoReading;
+  f.levels = levels.data();
+  f.sweeps = 12;
+  f.sps_x10 = 476;
+  lines.scope(f);
+
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_STREQ("scope", doc["t"].as<const char*>());
+  EXPECT_EQ(17u, doc["seq"].as<uint32_t>());
+  EXPECT_EQ(32, doc["n"].as<int>());
+  EXPECT_STREQ("mean", doc["agg"].as<const char*>());
+  EXPECT_EQ(12, doc["sweeps"].as<int>());
+  EXPECT_EQ(476, doc["sps"].as<int>()) << "sweeps per second x10, as the page says";
+  EXPECT_NEAR(863.109375, doc["f0"].as<double>(), 1e-6) << "the first point's centre";
+  EXPECT_NEAR(218.75, doc["step"].as<double>(), 1e-6);
+  EXPECT_NEAR(f.plan.rbw_khz, doc["rbw"].as<double>(), 1e-6);
+  EXPECT_NEAR(f.plan.cov, doc["cov"].as<double>(), 1e-3);
+
+  const std::vector<uint8_t> back = fromBase64(doc["lv"].as<std::string>());
+  ASSERT_EQ(levels.size(), back.size()) << "one byte a point, and base64 is what carries them";
+  EXPECT_EQ(levels, back);
+  EXPECT_EQ(kScopeNoReading, back[7]) << "255 is 'no reading' and survives the trip";
+}
+
+TEST(Scope, ATwoThousandPointFrameIsWrittenInFragmentsAndStaysInsideItsBound) {
+  StringSink sink;
+  Lines lines(sink);
+  ScopeFields f;
+  f.meta.seq = 0xFFFFFFFFu;
+  f.meta.ts = 0xFFFFFFFFu;
+  f.meta.ms = 0xFFFFFFFFu;
+  ScopeRequest r = request(kRadioLowMhz, kRadioHighMhz);
+  r.points = kScopeMaxPoints;
+  ASSERT_TRUE(planScope(r, f.plan));
+  std::vector<uint8_t> levels(kScopeMaxPoints);
+  for (size_t i = 0; i < levels.size(); i++) levels[i] = uint8_t(i & 0xFFu);
+  f.levels = levels.data();
+  f.sweeps = 0xFFFFu;
+  f.sps_x10 = 0xFFFFu;
+  lines.scope(f);
+
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_EQ(kScopeMaxPoints, doc["n"].as<int>());
+  const std::vector<uint8_t> back = fromBase64(doc["lv"].as<std::string>());
+  ASSERT_EQ(size_t(kScopeMaxPoints), back.size());
+  EXPECT_EQ(levels, back);
+
+  // The two things that bound is for: no part of the line is ever held in one piece, and the
+  // whole line is no longer than what the sink's interval floor was computed from.
+  EXPECT_LE(sink.longestFragment(), kLineFragmentBytes)
+      << "a fragment longer than the writer's buffer would have been truncated";
+  EXPECT_LE(sink.text().size(), scopeFrameBytes(kScopeMaxPoints))
+      << "the frame is longer than scopeIntervalFloorMs() was told it would be, so the UART's"
+         " floor is too low";
+  EXPECT_GT(sink.text().size(), scopeBase64Length(kScopeMaxPoints));
+}
+
+TEST(Scope, AFrameOfOnePointIsStillInsideItsBound) {
+  StringSink sink;
+  Lines lines(sink);
+  ScopeFields f;
+  f.meta = someMeta();
+  f.plan.points = 1;
+  f.plan.first_mhz = 869.618;
+  f.plan.step_khz = 25.0;
+  f.plan.rbw_khz = 29.3;
+  f.plan.cov = 29.3 / 25.0;
+  const uint8_t level = 230;
+  f.levels = &level;
+  lines.scope(f);
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_EQ(1, doc["n"].as<int>());
+  const std::vector<uint8_t> back = fromBase64(doc["lv"].as<std::string>());
+  ASSERT_EQ(1u, back.size());
+  EXPECT_EQ(230, back[0]);
+  EXPECT_LE(sink.text().size(), scopeFrameBytes(1));
+}
+
+TEST(Scope, AFrameOfNumbersThatAreNotNumbersIsStillJson) {
+  // The same rule as every other line: a number that is not one is written `null` and never
+  // `nan`, because a line a parser drops carries nothing at all.
+  StringSink sink;
+  Lines lines(sink);
+  ScopeFields f;
+  f.meta = someMeta();
+  f.plan.points = 2;
+  f.plan.first_mhz = NAN;
+  f.plan.step_khz = INFINITY;
+  f.plan.rbw_khz = -INFINITY;
+  f.plan.cov = NAN;
+  f.levels = nullptr;
+  lines.scope(f);
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_TRUE(doc["f0"].isNull());
+  EXPECT_TRUE(doc["step"].isNull());
+  EXPECT_TRUE(doc["cov"].isNull());
+  EXPECT_EQ(2, doc["n"].as<int>());
+}
+
+TEST(Scope, InfoCarriesTheRadiosRom) {
+  StringSink sink;
+  Lines lines(sink);
+  InfoFields f;
+  f.boot = bootFields();
+  f.build = "Oct 13 2026";
+  f.rom = kScopeRom;
+  f.home_f_mhz = 869.618;
+  f.home_bw_khz = 62.5;
+  f.home_sf = 8;
+  f.home_cr = 8;
+  lines.info(f);
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_STREQ(kScopeRom, doc["rom"].as<const char*>());
+  // And the rest of `info` is what it was: phase 3's task 02 settled those fields and this task
+  // adds exactly one.
+  EXPECT_STREQ("info", doc["t"].as<const char*>());
+  EXPECT_STREQ("scanner", doc["role"].as<const char*>());
+  EXPECT_FLOAT_EQ(869.618, doc["home"]["f"].as<double>());
+}
+
+// ----------------------------------------------------------------- the aggregates
+
+TEST(Scope, TheThreeAggregatesAreTheStrongestTheMeanAndTheLatest) {
+  ScopeAccumulator acc;
+  acc.reset(4);
+  EXPECT_EQ(4, acc.points());
+  EXPECT_EQ(0, acc.sweeps());
+
+  // Three sweeps of four points. Point 0 gets one strong reading among weak ones, and point 3
+  // never gets a reading at all. A level is -2 x dBm, so the *lowest* number is the strongest
+  // signal: 200 is -100 dBm and 230 is -115 dBm.
+  const uint8_t sweep1[4] = {230, 230, 220, kScopeNoReading};
+  const uint8_t sweep2[4] = {200, 230, 220, kScopeNoReading};
+  const uint8_t sweep3[4] = {230, 230, 210, kScopeNoReading};
+  acc.add(0, sweep1, 4);
+  acc.sweepDone();
+  acc.add(0, sweep2, 4);
+  acc.sweepDone();
+  acc.add(0, sweep3, 4);
+  acc.sweepDone();
+  EXPECT_EQ(3, acc.sweeps());
+
+  uint8_t out[4] = {0, 0, 0, 0};
+  acc.take(kScopeAggMax, out);
+  EXPECT_EQ(200, out[0]) << "a burst in one sweep of three still shows, which is what max is for";
+  EXPECT_EQ(230, out[1]);
+  EXPECT_EQ(210, out[2]);
+  EXPECT_EQ(kScopeNoReading, out[3]) << "a point with no reading has no maximum";
+
+  acc.take(kScopeAggLast, out);
+  EXPECT_EQ(230, out[0]) << "the latest sweep, where the burst had gone";
+  EXPECT_EQ(210, out[2]);
+  EXPECT_EQ(kScopeNoReading, out[3]);
+
+  acc.take(kScopeAggMean, out);
+  // The mean is taken in the power domain, so one reading at -100 dBm among two at -115 lands
+  // near -104.8 dBm and not near -110: level = -20 log10((10^-10 + 2 x 10^-11.5) / 3).
+  const double expected = -20.0 * std::log10((std::pow(10.0, -200.0 / 20.0) +
+                                              2.0 * std::pow(10.0, -230.0 / 20.0)) / 3.0);
+  EXPECT_NEAR(expected, double(out[0]), 1.0);
+  EXPECT_LT(out[0], 230) << "a mean in the power domain is pulled up by the burst";
+  EXPECT_EQ(230, out[1]) << "three equal readings average to themselves";
+  EXPECT_EQ(kScopeNoReading, out[3]) << "and a point with no reading has no mean either";
+}
+
+TEST(Scope, AMeanIsOfTheReadingsAPointGotAndNotOfTheSweepsThatHappened) {
+  // A segment that failed must not pull its points down: the sweep still counted, but those
+  // points got nothing, and the mean of the readings that did arrive is the honest answer.
+  ScopeAccumulator acc;
+  acc.reset(4);
+  const uint8_t two[2] = {220, 220};
+  acc.add(0, two, 2);
+  acc.add(2, two, 2);
+  acc.sweepDone();
+  acc.add(0, two, 2);  // the second segment failed this time round
+  acc.sweepDone();
+
+  uint8_t out[4] = {0, 0, 0, 0};
+  acc.take(kScopeAggMean, out);
+  for (int i = 0; i < 4; i++) EXPECT_EQ(220, out[i]) << "point " << i;
+  EXPECT_EQ(2, acc.sweeps());
+}
+
+TEST(Scope, ASegmentIsAddedWhereItBelongsAndNeverPastTheEnd) {
+  ScopeAccumulator acc;
+  acc.reset(5);
+  const uint8_t two[2] = {100, 101};
+  acc.add(3, two, 2);
+  acc.add(4, two, 2);  // one point past the end: the second byte is dropped, not written
+  uint8_t out[5] = {0, 0, 0, 0, 0};
+  acc.take(kScopeAggLast, out);
+  EXPECT_EQ(kScopeNoReading, out[0]);
+  EXPECT_EQ(kScopeNoReading, out[2]);
+  EXPECT_EQ(100, out[3]);
+  EXPECT_EQ(100, out[4]) << "the point at the end got the second segment's first byte";
+}
+
+TEST(Scope, TheSweepRateIsTenTimesWhatItSays) {
+  EXPECT_EQ(0, scopeSweepsPerSecondX10(10, 0)) << "no time has passed, so nothing is known yet";
+  EXPECT_EQ(100, scopeSweepsPerSecondX10(1, 100)) << "one sweep in 100 ms is 10.0 a second";
+  EXPECT_EQ(476, scopeSweepsPerSecondX10(476, 10000));
+  EXPECT_EQ(0xFFFF, scopeSweepsPerSecondX10(1000000, 1)) << "and it never wraps";
+}
+
+// ----------------------------------------------------------------- the plugin
+
+TEST(Scope, ThePluginBinaryIsTheOneTheForkAssembled) {
+  // The 167 words of src/roles/scanner/vendor/sx126x_spectrum/SX126xSpectrumPlugin.h are a
+  // program for the **radio's** core, assembled from spectrum.asm beside it with the sxplug
+  // assembler of sleeply4cat/MeshCore (branch mesh-pocket-spectrum, commit
+  // f40f469d1e00eb8ae1b8ca07390dfc96a33ab707); the header itself is that fork's branch
+  // spectrum-stream at 41472f9734cecdfa5c795eddedd6b15e2553b6b3. The assembler is not vendored
+  // and nothing here rebuilds the binary, so this is the pin: a word changed by hand fails it.
+  //
+  // FNV-1a/64 over the words big-endian, which is the order uploadPatch() writes them to the
+  // chip (RadioLib 7.8.0, SX126x::uploadPatch). Reproduce it, and the SHA-256 below, with:
+  //
+  //   python -c "import re,struct,hashlib;w=[int(x,16) for x in re.findall(r'0x([0-9a-f]{6}),',
+  //   open('src/roles/scanner/vendor/sx126x_spectrum/SX126xSpectrumPlugin.h').read())];
+  //   b=b''.join(struct.pack('>I',v) for v in w);print(len(w),hashlib.sha256(b).hexdigest())"
+  //
+  //   167 c0030c0a8748d4312d2b8ae8d1c5482a5eb5773a8bfa239492dceb724b01435f
+  const size_t words = sizeof(SX126X_SPECTRUM_PLUGIN) / sizeof(SX126X_SPECTRUM_PLUGIN[0]);
+  ASSERT_EQ(167u, words) << "the plugin is 167 words of the radio's own instruction set";
+
+  uint64_t hash = 0xcbf29ce484222325ull;
+  for (size_t i = 0; i < words; i++) {
+    const uint32_t word = SX126X_SPECTRUM_PLUGIN[i];
+    ASSERT_EQ(0u, word & 0xFF000000u) << "word " << i << " is wider than the core's 24 bits";
+    for (int shift = 24; shift >= 0; shift -= 8) {
+      hash ^= uint64_t((word >> shift) & 0xFFu);
+      hash *= 0x100000001b3ull;
+    }
+  }
+  EXPECT_EQ(0x5fbe6ee8bea43853ull, hash)
+      << "the sweep plugin's binary is not the one the fork assembled from spectrum.asm";
+
+  // And the tag it writes into the ROM string once it is loaded, which is what says it is still
+  // there before every sweep (spectrum.asm: SX_TAG = 'P').
+  EXPECT_EQ('P', SX126X_SPECTRUM_PLUGIN_TAG);
 }
 
 int main(int argc, char** argv) {

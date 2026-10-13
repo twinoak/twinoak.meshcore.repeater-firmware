@@ -16,6 +16,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// For ScopeAgg, which is a `scope` argument and a `scope` field both: what the words mean is
+// settled once, where the rest of that mode's arithmetic is.
+#include "roles/scanner/Sweep.h"
+
 namespace twinoak {
 namespace scanner {
 
@@ -23,8 +27,8 @@ namespace scanner {
 // docs/noisescope.md and short enough that two of them are nothing beside the sweep buffers.
 constexpr size_t kMaxLineBytes = 160;
 
-// At most this many words are looked at; `sweep f0 f1 step dwell passes` is the longest command
-// and has six.
+// At most this many words are looked at; `scope f0 f1 points rbw interval agg` is the longest
+// command and has seven.
 constexpr int kMaxTokens = 8;
 
 // A `time` before this is not a time: it is a host that sent a counter, a zero or a parse
@@ -38,6 +42,7 @@ enum Verb : uint8_t {
   kVerbStat,
   kVerbStop,
   kVerbSweep,
+  kVerbScope,
   kVerbHist,
   kVerbDwell,
   kVerbCad,
@@ -95,6 +100,24 @@ struct ScanArgs {
 // firmware runs is src/roles/scanner/Sweep.h's answer and not the parser's. Both ends are read
 // together or not at all, as NoiseScope read them - `sweep 865` is the default sweep.
 ScanArgs parseScan(const Tokens& tokens, bool is_hist, const ScanDefaults& defaults);
+
+// `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]`, and `scope off`.
+//
+// Unlike `sweep`, both ends are **required**: there is no default span for a mode whose point is
+// that the span is the operator's choice, from a channel to the whole of what the radio tunes.
+// Whether the numbers are a scope this firmware runs is src/roles/scanner/Sweep.h's answer
+// (planScope) and not the parser's; what the parser refuses is a missing end and an `agg` that
+// is not one of the three words.
+struct ScopeArgs {
+  bool off = false;  // `scope off`, which is `stop` for this mode alone
+  double f0 = 0.0;
+  double f1 = 0.0;
+  uint32_t points = 0;       // 0 = the plan's default
+  double rbw_khz = 0.0;      // 0 = the plan's default
+  uint32_t interval_ms = 0;  // 0 = a frame per sweep
+  ScopeAgg agg = kScopeAggMax;
+};
+bool parseScope(const Tokens& tokens, ScopeArgs& out);
 
 // `dwell <f_mhz> [secs [win_ms]]`. False when no frequency was given; the two optional numbers
 // are clamped by src/roles/scanner/Sweep.h.

@@ -56,6 +56,7 @@ Verb verbOf(const char* word) {
   if (same(word, "stat")) return kVerbStat;
   if (same(word, "stop")) return kVerbStop;
   if (same(word, "sweep")) return kVerbSweep;
+  if (same(word, "scope")) return kVerbScope;
   if (same(word, "hist")) return kVerbHist;
   if (same(word, "dwell")) return kVerbDwell;
   if (same(word, "cad")) return kVerbCad;
@@ -75,6 +76,7 @@ const char* nameOf(Verb verb) {
     case kVerbStat: return "stat";
     case kVerbStop: return "stop";
     case kVerbSweep: return "sweep";
+    case kVerbScope: return "scope";
     case kVerbHist: return "hist";
     case kVerbDwell: return "dwell";
     case kVerbCad: return "cad";
@@ -90,6 +92,7 @@ const char* nameOf(Verb verb) {
 
 const char* usageOf(Verb verb) {
   switch (verb) {
+    case kVerbScope: return "usage: scope <f0> <f1> [points [rbw_khz [interval_ms [max|mean|last]]]] | scope off";
     case kVerbDwell: return "usage: dwell <f_mhz> [secs [win_ms]]";
     case kVerbHome: return "usage: home <f_mhz> [bw_khz sf cr]";
     case kVerbBoost: return "usage: boost on|off";
@@ -116,6 +119,28 @@ ScanArgs parseScan(const Tokens& tokens, bool is_hist, const ScanDefaults& defau
   if (tokens.count >= 5) out.fourth = asU32(arg(tokens, 4), out.fourth);
   if (tokens.count >= 6) out.passes = asI32(arg(tokens, 5), out.passes);
   return out;
+}
+
+bool parseScope(const Tokens& tokens, ScopeArgs& out) {
+  const char* first = arg(tokens, 1);
+  if (first == nullptr) return false;
+  ScopeArgs parsed;
+  // `scope off` ends the mode and takes nothing else: the one word that is not a number here.
+  if (same(first, "off")) {
+    parsed.off = true;
+    out = parsed;
+    return true;
+  }
+  // Both ends, together and required - a span is two numbers or it is not a span.
+  if (tokens.count < 3) return false;
+  parsed.f0 = asDouble(first, 0.0);
+  parsed.f1 = asDouble(arg(tokens, 2), 0.0);
+  if (tokens.count >= 4) parsed.points = asU32(arg(tokens, 3), 0);
+  if (tokens.count >= 5) parsed.rbw_khz = asDouble(arg(tokens, 4), 0.0);
+  if (tokens.count >= 6) parsed.interval_ms = asU32(arg(tokens, 5), 0);
+  if (tokens.count >= 7 && !scopeAggOf(arg(tokens, 6), parsed.agg)) return false;
+  out = parsed;
+  return true;
 }
 
 bool parseDwell(const Tokens& tokens, DwellArgs& out) {

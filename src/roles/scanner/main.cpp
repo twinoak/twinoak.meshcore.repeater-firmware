@@ -18,6 +18,7 @@
 // the home channel and the default sweep come from.
 // ------------------------------------------------------------------------------------------------
 
+#include <stdio.h>
 #include <string.h>
 
 #include "common/fwdesc/ImageDescriptor.h"
@@ -36,30 +37,46 @@ namespace {
 
 // --- where a line goes --------------------------------------------------------------------------
 
-// The Walter's UART always, and USB CDC when a host is attached. `Serial` on this core is
-// non-blocking with nobody on the other end, but writing to it while a host is absent still
-// costs the loop nothing only because the driver drops it - so the attached state is read once
-// per loop() and not once per fragment.
-class SerialSink : public LineSink {
- public:
-  void begin() {
-    WALTER_SERIAL.begin(WALTER_BAUD);
-    Serial.begin(115200);  // USB CDC; non-blocking if no host
-  }
+// Which ports a line goes to. The Walter's UART always and USB CDC when a host is attached is
+// what every line of this firmware has always done, and `g_lines` is still that - but a `scope`
+// stream goes to **the port its command came in on and only there**: 115200 baud and USB CDC are
+// not the same pipe, a waterfall belongs to the laptop that asked for it, and the other port
+// must keep getting its `stat` (docs/noisescope.md section 5). So there are three sinks over the
+// same two ports, and the one difference between them is which of the two they write to.
+//
+// `Serial` on this core is non-blocking with nobody on the other end, but the attached state is
+// still read once per loop() and not once per fragment.
+bool g_usb_attached = false;
 
-  void service() { usb_ = (bool)Serial; }
+class PortSink : public LineSink {
+ public:
+  PortSink(bool walter, bool usb) : walter_(walter), usb_(usb) {}
 
   void write(const char* text) override {
-    WALTER_SERIAL.write(text);
-    if (usb_) Serial.write(text);
+    if (walter_) WALTER_SERIAL.write(text);
+    if (usb_ && g_usb_attached) Serial.write(text);
   }
 
  private:
-  bool usb_ = false;
+  const bool walter_;
+  const bool usb_;
 };
 
-SerialSink g_sink;
-Lines g_lines(g_sink);
+PortSink g_sink_both(true, true);
+PortSink g_sink_walter(true, false);
+PortSink g_sink_usb(false, true);
+
+Lines g_lines(g_sink_both);
+Lines g_lines_walter(g_sink_walter);
+Lines g_lines_usb(g_sink_usb);
+
+void beginPorts() {
+  WALTER_SERIAL.begin(WALTER_BAUD);
+  Serial.begin(115200);  // USB CDC; non-blocking if no host
+}
+
+// Where a command came from, which is where its `scope` frames go back to.
+enum Source : uint8_t { kFromWalter = 0, kFromUsb };
 
 // --- the two line buffers -----------------------------------------------------------------------
 
@@ -172,6 +189,7 @@ void emitInfo() {
   f.devid_low = NRF_FICR->DEVICEID[0];
   f.boosted_gain = radio::boost();
   f.auto_minutes = g_auto_minutes;
+  f.rom = radio::rom();
   f.home_f_mhz = home.f_mhz;
   f.home_bw_khz = home.bw_khz;
   f.home_sf = home.sf;
@@ -181,7 +199,7 @@ void emitInfo() {
 
 // --- the commands -------------------------------------------------------------------------------
 
-void handleCommand(char* line) {
+void handleCommand(char* line, Source from) {
   const Tokens tokens = tokenize(line);
   if (tokens.count == 0) return;
   const Verb verb = verbOf(tokens.at[0]);
@@ -215,6 +233,59 @@ void handleCommand(char* line) {
                               : radio::startSweep(args.f0, args.f1, args.step_khz, args.fourth,
                                                   args.passes);
       g_lines.ack(name, ok, ok ? "started" : "bad params or radio error");
+      return;
+    }
+
+    case kVerbScope: {
+      ScopeArgs args;
+      if (!parseScope(tokens, args)) {
+        g_lines.ack(name, false, usageOf(verb));
+        return;
+      }
+      radio::stop();  // and the plugin goes with it, whatever is being started next
+      if (args.off) {
+        g_lines.ack(name, true, "monitor");
+        return;
+      }
+      // The ROM gate, before anything is uploaded: the plugin is a program for the radio's own
+      // core, made for one ROM and verified by its author on that one. On any other chip this
+      // says which one it met and sends it nothing (docs/noisescope.md section 6).
+      if (!scopeRomSupported(radio::rom())) {
+        char msg[kMaxAckMessageBytes];
+        snprintf(msg, sizeof(msg),
+                 "scope needs the radio ROM '%s' and this chip says '%s'; nothing was uploaded -"
+                 " use sweep for a stepped spectrum instead",
+                 kScopeRom, radio::rom());
+        g_lines.err(msg);
+        g_lines.ack(name, false, "unsupported radio rom; sweep is the fallback");
+        return;
+      }
+      ScopeRequest request;
+      request.f0 = args.f0;
+      request.f1 = args.f1;
+      request.points = args.points;
+      request.rbw_khz = args.rbw_khz;
+      request.interval_ms = args.interval_ms;
+      request.agg = args.agg;
+      // The sink's own floor: the Walter's UART is 115200 baud and a frame has to fit inside a
+      // fraction of the interval, while USB CDC is asked for every sweep there is.
+      request.sink_baud = (from == kFromWalter) ? uint32_t(WALTER_BAUD) : 0u;
+      ScopePlan plan;
+      const bool ok =
+          radio::startScope(request, from == kFromWalter ? g_lines_walter : g_lines_usb, plan);
+      char msg[kMaxAckMessageBytes];
+      if (ok) {
+        // What was taken, which is not always what was asked: the points, the step they make,
+        // the bandwidth, how many segments the span was cut into, how much of it a reading
+        // covers and the interval the sink allowed.
+        snprintf(msg, sizeof(msg),
+                 "n=%u step=%.4fkHz rbw=%.1fkHz seg=%u cov=%.3f interval=%lums sweep=%lums",
+                 unsigned(plan.points), plan.step_khz, plan.rbw_khz, unsigned(plan.segments),
+                 plan.cov, (unsigned long)plan.interval_ms, (unsigned long)plan.sweep_ms);
+      }
+      g_lines.ack(name, ok, ok ? msg
+                               : "refused: 150 <= f0 < f1 <= 960 MHz, points 16..2048,"
+                                 " interval 0..60000 ms - or the radio refused the mode");
       return;
     }
 
@@ -310,12 +381,12 @@ void handleCommand(char* line) {
 
 void checkCommands() {
   if (g_from_walter.ready) {
-    handleCommand(g_from_walter.buf);
+    handleCommand(g_from_walter.buf, kFromWalter);
     g_from_walter.len = 0;
     g_from_walter.ready = false;
   }
   if (g_from_usb.ready) {
-    handleCommand(g_from_usb.buf);
+    handleCommand(g_from_usb.buf, kFromUsb);
     g_from_usb.len = 0;
     g_from_usb.ready = false;
   }
@@ -332,7 +403,7 @@ void inputPoll() {
 
 void setup() {
   captureResetReason();
-  g_sink.begin();
+  beginPorts();
   wdtBegin();
   delay(100);  // let the 3V3 rail and the TCXO settle after a power-kill cycle
   telemetry::begin();
@@ -346,7 +417,7 @@ void setup() {
 
 void loop() {
   wdtFeed();
-  g_sink.service();
+  g_usb_attached = (bool)Serial;
   inputPoll();
   checkCommands();
   radio::service();

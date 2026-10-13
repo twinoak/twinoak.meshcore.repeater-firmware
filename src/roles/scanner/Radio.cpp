@@ -6,19 +6,34 @@
 #include "roles/scanner/ScannerHeaders.h"  // Arduino, SPI, RadioLib, the scan patch
 #include "roles/scanner/Telemetry.h"
 #include "roles/scanner/config.h"
+// The in-radio sweep, vendored from the MeshCore fork of issue #3578 (that directory's own
+// headers say which commit, which branch and which licence). It is included after
+// ScannerHeaders.h because it needs RadioLib, and it is ours now - so it is compiled with our
+// own -Werror and not as a system header.
+#include "roles/scanner/vendor/sx126x_spectrum/SX126xSpectrumScanner.h"
 
 namespace twinoak {
 namespace scanner {
 namespace radio {
 namespace {
 
-SX1262 g_radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+// A SpectrumSX1262 and not an SX1262: the subclass of the vendored sweep plugin's own header,
+// which is an SX1262 plus the four members RADIOLIB_GODMODE would have made public
+// (src/roles/scanner/vendor/sx126x_spectrum/SX126xSpectrumScanner.h). Every other line of this
+// file uses it as the SX1262 it is.
+SpectrumSX1262 g_radio = new Module(P_LORA_NSS, P_LORA_DIO_1, P_LORA_RESET, P_LORA_BUSY, SPI);
+SX126xSpectrumScanner g_scanner(&g_radio);
 
 // The histogram's bin count is the engine's and not ours: if a RadioLib bump changes it, the
 // `hist` line of docs/noisescope.md changes with it, and that is a decision and not a build.
 static_assert(RADIOLIB_SX126X_SPECTRAL_SCAN_RES_SIZE == kHistBins,
               "RadioLib's spectral-scan result is no longer 33 bins; docs/noisescope.md's `hist` "
               "line says 33 x 4 dB from -11 dBm (src/roles/scanner/Sweep.h, kHistBins)");
+
+// And the plugin's own bound on one call, which the plan cuts segments to.
+static_assert(int(SX126xSpectrumScanner::MAX_POINTS) == int(kScopePluginMaxPoints),
+              "the sweep plugin's points-per-call is no longer 250; src/roles/scanner/Sweep.h's "
+              "kScopePluginMaxPoints is what the segments are cut to");
 
 Lines* g_lines = nullptr;
 bool g_ok = false;
@@ -71,6 +86,25 @@ struct CadState {
   uint16_t detections = 0;
 };
 CadState g_cad;
+
+// The scope's state. One segment of one sweep runs per service() call - at most
+// kScopePluginMaxPoints points, which is some tens of milliseconds - so the loop that feeds the
+// watchdog and drains the serial ports comes round between them however wide the span is.
+struct ScopeState {
+  ScopePlan plan;
+  Lines* out = nullptr;      // the port the command came in on, and the only one frames go to
+  uint16_t segment = 0;      // the one to run next
+  uint16_t armed = 0xFFFF;   // the one the plugin's parameters are loaded for (0xFFFF = none)
+  uint32_t beat_ms = 0;      // when the next frame is due
+  uint32_t emitted_ms = 0;   // when the last one actually left, which is what `sps` is counted on
+  ScopeAccumulator acc;
+  uint8_t levels[kScopePluginMaxPoints];  // one segment, as the plugin leaves it
+  uint8_t frame[kScopeMaxPoints];         // what take() collapses the sweeps to
+};
+ScopeState g_scope;
+
+// The radio's ROM version string (register 0x0320, 16 characters), read once at boot.
+char g_rom[17] = "";
 
 // The monitor's accumulator and its sampling pace.
 RssiWindow g_monitor;
@@ -145,6 +179,30 @@ bool toHomeRx() {
   g_monitor.restart();
   g_monitor_next_us = micros();
   return true;
+}
+
+// The chip's ROM version string, once, at boot, before the monitor's LoRa channel is set up:
+// sixteen characters at register 0x0320 (RADIOLIB_SX126X_REG_VERSION_STRING), read in FSK
+// standby because a register read needs the chip configured and this one must not leave it in
+// anything the monitor then inherits. `info` carries it and `scope` is decided by it. A
+// character a JSON string cannot carry verbatim becomes '?', and a NUL ends the string: what a
+// reader gets is what the part said, and always a line that parses.
+void readRom() {
+  g_rom[0] = '\0';
+  if (beginFsk(HOME_FREQ_MHZ, 234.3) != RADIOLIB_ERR_NONE) return;
+  if (g_radio.standby() != RADIOLIB_ERR_NONE) return;
+  uint8_t raw[16];
+  if (g_radio.readRegisters(RADIOLIB_SX126X_REG_VERSION_STRING, raw, sizeof(raw)) !=
+      RADIOLIB_ERR_NONE) {
+    return;
+  }
+  size_t at = 0;
+  for (; at < sizeof(raw); at++) {
+    const char c = char(raw[at]);
+    if (c == '\0') break;
+    g_rom[at] = (c >= 0x20 && c < 0x7F && c != '"' && c != '\\') ? c : '?';
+  }
+  g_rom[at] = '\0';
 }
 
 void retuneRx(double f_mhz) {
@@ -285,6 +343,96 @@ void serviceHist() {
   if (g_sweep.index >= g_sweep.plan.points) passFinished("hist");
 }
 
+// --- the scope ----------------------------------------------------------------------------------
+
+// Everything a segment needs before its sweep: the image rejection calibrated for *its* range
+// and not for the whole span's centre, and the plugin's parameters for its own points.
+//
+// The order matters and is the one place this differs from the fork, which has one segment and
+// lets setSweep() calibrate. `setFrequency()` recalibrates by itself when the frequency moves by
+// 20 MHz or more (RadioLib 7.8.0, SX1262::setFrequency / RADIOLIB_SX126X_CAL_IMG_FREQ_TRIG_MHZ),
+// and it would then calibrate for one of Semtech's five bands or +-4 MHz around the centre. So
+// the centre is set first - which is what setSweep() computes too, so its own call is then a
+// move of zero and calibrates nothing - and our range is calibrated for last, in standby, where
+// the CalibrateImage command belongs.
+int armSegment(const ScopeSegment& seg) {
+  const float centre = float(seg.first_mhz) +
+                       float(g_scope.plan.step_khz / 1000.0) * float(seg.points) / 2.0f;
+  int st = g_radio.standby();
+  if (st == RADIOLIB_ERR_NONE) st = g_radio.setFrequency(centre);
+  if (st == RADIOLIB_ERR_NONE) {
+    st = g_radio.calibrateImageRejection(float(seg.cal_lo_mhz), float(seg.cal_hi_mhz));
+  }
+  if (st == RADIOLIB_ERR_NONE) {
+    st = g_scanner.setSweep(float(seg.first_mhz), float(g_scope.plan.step_khz / 1000.0),
+                            uint8_t(seg.points), float(g_scope.plan.rbw_khz));
+  }
+  return st;
+}
+
+void emitScopeFrame(uint32_t now) {
+  g_scope.acc.take(g_scope.plan.agg, g_scope.frame);
+  ScopeFields f;
+  f.meta = nextMeta();
+  f.plan = g_scope.plan;
+  f.sweeps = g_scope.acc.sweeps();
+  f.sps_x10 = scopeSweepsPerSecondX10(f.sweeps, now - g_scope.emitted_ms);
+  f.levels = g_scope.frame;
+  g_scope.out->scope(f);
+  g_scope.emitted_ms = now;
+  // A steady beat while the sink keeps up, and the clock reset when it did not: the fork's rule
+  // (SpectrumSession.cpp at 41472f97), which keeps frames evenly spaced without drifting.
+  const uint32_t interval = g_scope.plan.interval_ms;
+  if (interval == 0) {
+    g_scope.beat_ms = now;
+  } else {
+    g_scope.beat_ms = (now - g_scope.beat_ms < 2u * interval) ? g_scope.beat_ms + interval : now;
+  }
+  g_scope.acc.reset(g_scope.plan.points);
+}
+
+void serviceScope() {
+  ScopeSegment seg;
+  if (!scopeSegment(g_scope.plan, g_scope.segment, seg)) {
+    error("scope segment %u of %u is not a segment", unsigned(g_scope.segment),
+          unsigned(g_scope.plan.segments));
+    stop();
+    return;
+  }
+  if (g_scope.armed != g_scope.segment) {
+    const int st = armSegment(seg);
+    if (st != RADIOLIB_ERR_NONE) {
+      error("scope setup failed (%d) at %.4f", st, seg.first_mhz);
+      stop();
+      return;
+    }
+    g_scope.armed = g_scope.segment;
+  }
+  // Blocking for the segment's duration, and the plugin's tag is checked inside: a chip that was
+  // reset under us - a brownout - has no 0x9B command and must not be sent one.
+  const int st = g_scanner.sweep(g_scope.levels);
+  if (st != RADIOLIB_ERR_NONE) {
+    if (st == RADIOLIB_ERR_CHIP_NOT_FOUND) {
+      error("scope: the sweep plugin is gone (the chip was reset); scope ended");
+    } else {
+      error("scope sweep failed (%d) at %.4f", st, seg.first_mhz);
+    }
+    stop();
+    return;
+  }
+  g_scope.acc.add(seg.first, g_scope.levels, seg.points);
+  g_scope.segment++;
+  if (g_scope.segment < g_scope.plan.segments) return;  // the rest of the span first
+
+  g_scope.segment = 0;
+  if (g_scope.plan.segments > 1) g_scope.armed = 0xFFFF;  // the next sweep re-arms segment 0
+  g_scope.acc.sweepDone();
+
+  const uint32_t now = millis();
+  if (g_scope.plan.interval_ms != 0 && int32_t(now - g_scope.beat_ms) < 0) return;
+  emitScopeFrame(now);
+}
+
 void serviceDwell() {
   const uint32_t now_us = micros();
   if (int32_t(g_dwell.next_sample_us - now_us) <= 0) {
@@ -345,6 +493,7 @@ void serviceMonitor() {
 const char* modeName(Mode mode) {
   switch (mode) {
     case kModeSweep: return "sweep";
+    case kModeScope: return "scope";
     case kModeHist: return "hist";
     case kModeDwell: return "dwell";
     case kModeCad: return "cad";
@@ -365,6 +514,7 @@ bool begin(Lines& lines) {
 
   SPI.setPins(P_LORA_MISO, P_LORA_SCLK, P_LORA_MOSI);
   SPI.begin();
+  readRom();
   g_ok = toHomeRx();
   g_mode = kModeMonitor;
   return g_ok;
@@ -405,6 +555,48 @@ bool startHist(double f0, double f1, double step_khz, uint32_t samples, int32_t 
   return true;
 }
 
+bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
+  if (!g_ok) return false;
+  // The ROM gate, here as well as in main.cpp's `err`: the plugin is made for one ROM and its
+  // author verified it on that one, and a command for a ROM that does not have it would run
+  // whatever happens to be in the chip's program RAM.
+  if (!scopeRomSupported(g_rom)) return false;
+  ScopePlan planned;
+  if (!planScope(request, planned)) return false;
+
+  #ifdef SX126X_USE_REGULATOR_LDO
+  const bool ldo = (SX126X_USE_REGULATOR_LDO != 0);
+  #else
+  const bool ldo = false;
+  #endif
+  int st = g_scanner.begin(float(planned.f0), SX126X_DIO3_TCXO_VOLTAGE, ldo, g_boost);
+  if (st != RADIOLIB_ERR_NONE) {
+    error("scope init failed (%d)", st);
+    g_scanner.end();
+    g_radio.reset();  // the plugin never outlives the mode, uploaded or not
+    toHomeRx();
+    return false;
+  }
+  // The current limit, which the vendored begin() does not set: the RX path of a reading is the
+  // repeater's, setting for setting (src/roles/scanner/config.h). The RF switch and the boosted
+  // gain it does set, to the same values this would.
+  applyRxPath();
+
+  g_scope.plan = planned;
+  g_scope.out = &out;
+  g_scope.segment = 0;
+  g_scope.armed = 0xFFFF;
+  g_scope.acc.reset(planned.points);
+  const uint32_t now = millis();
+  g_scope.beat_ms = now;
+  g_scope.emitted_ms = now;
+  g_mode = kModeScope;
+  plan = planned;
+  return true;
+}
+
+const char* rom() { return g_rom; }
+
 bool startDwell(double f_mhz, uint32_t secs, uint32_t win_ms) {
   if (!g_ok || !frequencyOk(f_mhz)) return false;
   g_dwell.f_mhz = f_mhz;
@@ -434,6 +626,11 @@ void stop() {
   if (g_mode == kModeHist) {
     g_radio.spectralScanAbort();
     g_radio.reset();  // purge the RAM patch before going back to LoRa
+  }
+  if (g_mode == kModeScope) {
+    g_scanner.end();
+    g_radio.reset();  // and the sweep plugin, the same way: a reset of the chip removes it
+    g_scope.out = nullptr;
   }
   if (g_mode != kModeMonitor) {
     toHomeRx();
@@ -470,6 +667,7 @@ void service() {
   if (!g_ok) return;
   switch (g_mode) {
     case kModeSweep: serviceSweep(); break;
+    case kModeScope: serviceScope(); break;
     case kModeHist: serviceHist(); break;
     case kModeDwell: serviceDwell(); break;
     case kModeCad: serviceCad(); break;

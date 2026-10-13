@@ -509,6 +509,53 @@ of the first.
   reads `wdt`. A reset that boots into passive monitor mode is the safe end of
   a bad day on a mast; a session cannot cause one.
 
+### The fast sweep
+
+`docs/noisescope.md` §6 is the page. Six lines, in this order: the first one
+decides whether any of the rest can be walked at all.
+
+- [ ] **p3.1-01** **The radio's ROM.** `info` on the RAK4630 and read `rom` →
+  ______. The sweep plugin is a program for the radio's own core and is made
+  for **`SX1261 V2D 2D02`**; **if it says anything else, stop here** — `scope`
+  will refuse and say so, nothing is uploaded, and the rest of this list is
+  not walkable on that part. (`sweep`, `hist`, `dwell` and `cad` are
+  unaffected: they use no plugin of this kind.)
+- [ ] **p3.1-01** **`scope 863 870` over USB, with the plotter.**
+  `python tools/noisescope/waterfall_plot.py --port COMx --scope 863 870`.
+  What to see: an `ack` naming what was taken (n → ______, rbw → ______, seg
+  → ______, cov → ______), then frames arriving at **tens of sweeps a
+  second** — `sps` → ______ — a spectrum on top and a waterfall under it, and
+  the home channel's own traffic showing as bursts in the waterfall. `sps`
+  should agree with the fork's numbers: about 21 ms for 250 points at
+  19.5 kHz, about 5 ms at 78 kHz. A `cov` below 1 draws a grey band; at this
+  span it should not.
+- [ ] **p3.1-01** **The baseline.** A **50 Ω dummy load** in place of the
+  antenna, `scope 150 960 2048`, captured to a file (`--save` writes the
+  picture; keep the NDJSON too). This is the radio's own spurs and the shape
+  of the matching network across the whole tuning range, and every later
+  reading is worth more with it to subtract (`--baseline`). Keep the file with
+  the site's notes. Peaks seen on the dummy load → ______.
+- [ ] **p3.1-01** **The image check**, which is what the segments exist for.
+  The tinySA Ultra as a generator at a known frequency, through an attenuator
+  into the RAK, and a `scope` of a wide span around it: there should be **one
+  peak where the generator is**, and nothing at the image (or no more than the
+  baseline already had). If a ghost shows, lower `kScopeSegmentMhz` in
+  `src/roles/scanner/Sweep.h` until it does not, and **write the number down**
+  → ______ (the task's follow-ups are where it goes).
+- [ ] **p3.1-01** **The site through the cavity filter.** `scope 791 960` with
+  the baseline subtracted: LTE800 downlink (791–821) and GSM900 downlink
+  (925–960) as they actually reach the radio. Strongest carrier → ______ at
+  ______ MHz. This is the picture to keep beside the repeater's own noise
+  figures.
+- [ ] **p3.1-01** **The same `scope` from the Walter UART.** Over `Serial1`,
+  `scope 863 870 2048`: the `ack`'s `interval` should be **several hundred
+  milliseconds** and not 0 — the port's own floor (→ ______ ms) — the frames
+  should arrive at about that rate, the `stat` heartbeat should keep coming on
+  **both** ports, and after **ten minutes** there should have been no reset
+  (`info` again: `reset` still → ______, uptime still climbing). A scope from
+  USB must put **no** `scope` line on the UART, and the other way round — the
+  easiest check is two consoles open at once.
+
 ## 10. First boot and provisioning
 
 `docs/provisioning.md` is the page. This is the one thing on it no session could
