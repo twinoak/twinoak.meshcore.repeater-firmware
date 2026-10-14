@@ -5,8 +5,8 @@ S-2). The pin is two lines of `platformio.ini`:
 
 ```ini
 [meshcore]
-pin = d92964352441e53b93e8667b802e04f6e072b39e
-tag = repeater-v1.17.1
+pin = 727fc0512ce08bfd7b499e46daa7fca6eeec730d
+tag = repeater-v1.17.0
 ```
 
 Those two lines are the only statement of which MeshCore this is, and a bump
