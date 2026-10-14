@@ -32,14 +32,19 @@ it, and the pull request is already open, so CI runs on every push.
    `git -C .pio/libdeps/repeater_rak4630_single/MeshCore log --oneline {{OLD_PIN}}..{{NEW_PIN}}` —
    and that checkout, not a transcription of it and not this file, is what a
    claim about MeshCore is checked against (`tasks/README.md`).
-2. **The two literals first.** `test/test_version/test_version.cpp`
-   (`Version.ThisBuildSaysThePinOfPlatformioIni`) asserts the whole version
-   string with the old tag and the old pin's first eight characters in it, and
-   `tools/release/test_release.py`'s synthetic `buildinfo.json` names the old
-   tag. Both say `{{TAG}}` / `{{NEW_PIN}}` after this bump. They are why a bump
-   is red before anything of upstream's has even been looked at
-   (`docs/upstream.md`, *What a bump costs today*) — so do them first and get a
-   clean signal for the rest.
+2. **No literal of ours to fix first.** Nothing in this repository states which
+   MeshCore release this is but `[meshcore]` and the pin history of
+   `docs/upstream.md`, and the workflow's own commit moved both:
+   `test/test_version/test_version.cpp` builds the version string and the box
+   link's `upstream` field out of the `TWINOAK_MESHCORE_TAG` and
+   `TWINOAK_MESHCORE_PIN` defines (and fails if they did not arrive, or if the
+   pin is not forty hex digits), and `tools/release/test_release.py`'s
+   synthetic `buildinfo.json` names no release at all
+   (`docs/upstream.md`, *What a bump costs today*;
+   `tasks/phase-3.2/reports/01.md`). So whatever is red is **upstream's**, which
+   is the signal you want: start from the failing job rather than from a
+   literal. The comments that cite the old pin are item 5 below, and they fail
+   nothing by themselves.
 3. **Re-read the eight places a bump re-reads.** The table in
    `docs/upstream.md` is the list; each row says what it depends on upstream
    for. In short:

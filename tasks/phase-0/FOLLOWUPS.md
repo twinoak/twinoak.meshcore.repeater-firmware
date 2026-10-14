@@ -4,7 +4,7 @@ Review findings, tagged with the task that must pick them up: `[NN]` for a task 
 A session reads this file before it starts (RUNBOOK.md section 0) and treats every open item
 tagged for its task as part of the task. Only the reviewer ticks an item.
 
-- [ ] **[reviewer]** `test/test_version/test_version.cpp`'s
+- [x] **[reviewer]** `test/test_version/test_version.cpp`'s
   `Version.ThisBuildSaysThePinOfPlatformioIni` asserts the version string with
   the pin and the tag as literals (`repeater-v1.17.1 (d9296435)`), so **every**
   MeshCore bump is red in CI before anything of upstream's has been looked at —
@@ -19,3 +19,9 @@ tagged for its task as part of the task. Only the reviewer ticks an item.
   `docs/upstream.md` (*What a bump costs today*) and `tasks/sync/TEMPLATE.md`
   step 2 both say so, so a bump is cheap either way; whether tier one should be
   reachable at all is the reviewer's call.
+  **Done by `tasks/phase-3.2/01-a-bump-can-be-green.md`**, which the reviewer
+  wrote as that call: the two tests build their strings from the
+  `TWINOAK_MESHCORE_TAG` / `TWINOAK_MESHCORE_PIN` macros and assert the defines
+  arrived, `tools/release/test_release.py` names no release, and
+  `docs/upstream.md` and `tasks/sync/TEMPLATE.md` say a green bump is merged by
+  a person with no session (`tasks/phase-3.2/reports/01.md`).

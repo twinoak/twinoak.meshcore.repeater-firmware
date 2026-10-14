@@ -59,10 +59,14 @@ How to read a line:
   \<tag\>** is open with upstream's commit list in it, and its CI run needs
   **Approve and run** (`docs/upstream.md` says why, and gives the `gh api`
   line). Green means merge; red means
-  `tools/new-sync-task.ps1 -Tag <tag> -Pr <n>` and a session. The first bump is
-  also the first test of `tasks/sync/TEMPLATE.md` — and it will be red for one
-  reason before any other, which `docs/upstream.md`'s *What a bump costs today*
-  names.
+  `tools/new-sync-task.ps1 -Tag <tag> -Pr <n>` and a session. **p3.2-01** is
+  what makes green the expected outcome: no test and no tool of ours names the
+  release any more, so a bump that changes nothing we rely on should pass on its
+  first run (`docs/upstream.md`, *What a bump costs today*;
+  `tasks/phase-3.2/reports/01.md`, where the same bump was rehearsed on
+  `repeater-v1.17.0` — a *real* tag is the thing no session can rehearse). What
+  to read before merging a green one is the eight places of
+  `tasks/sync/TEMPLATE.md`; a red one is still the first test of that file.
 
 ## 1. The repeater alone on USB
 

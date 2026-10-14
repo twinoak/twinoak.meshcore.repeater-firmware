@@ -41,6 +41,14 @@ import sign_manifest  # noqa: E402
 FIXTURES = os.path.join(REPO, "spec", "fixtures", "manifest")
 COMMIT = "abc1234" + "0" * 33
 
+# The MeshCore pin the synthetic build directories below were built against. Plainly not a
+# release: a bump moves platformio.ini's [meshcore] and nothing in this file, so these tests
+# pass unchanged and CI on a bump's pull request is about upstream rather than about a
+# literal (docs/upstream.md, "What a bump costs today"). test/test_version holds the other
+# half of the same rule.
+UPSTREAM = {"name": "MeshCore", "tag": "repeater-vX.Y.Z",
+            "commit": "0123abcd" + "ef0123456789abcdef0123456789abcd"}
+
 
 def platformio_images(path=None):
     """Every [img_*] section of platformio.ini: {section: {"role", "board", "band"}}.
@@ -130,8 +138,7 @@ class ReleaseTestCase(unittest.TestCase):
         info = {
             "env": name, "progname": "firmware", "role": role, "board": board, "band": band,
             "mcu": "nrf52840", "version": version,
-            "upstream": {"name": "MeshCore", "tag": "repeater-v1.17.1",
-                         "commit": "d92964352441e53b93e8667b802e04f6e072b39e"},
+            "upstream": dict(UPSTREAM),
             "ldscript_name": "nrf52840_s140_v6.ld", "ldscript_copy": "ldscript.ld",
         }
         self.write(os.path.join(path, "buildinfo.json"), json.dumps(info, indent=2) + "\n")
@@ -339,7 +346,9 @@ class TheManifest(ReleaseTestCase):
         self.assertEqual(self.release()["link"], {"major": int(major), "minor": int(minor)})
 
     def test_the_upstream_pin_is_the_builds(self):
-        self.assertEqual(self.release()["upstream"]["tag"], "repeater-v1.17.1")
+        # The build directory's own buildinfo.json, whatever pin that says - not a pin this
+        # file restates (tools/pio/buildinfo.py writes it from platformio.ini's [meshcore]).
+        self.assertEqual(self.release()["upstream"], UPSTREAM)
 
     def test_sha256sums_covers_every_file_and_the_manifest(self):
         self.release()
