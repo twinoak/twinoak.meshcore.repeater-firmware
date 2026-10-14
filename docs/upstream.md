@@ -5,8 +5,8 @@ S-2). The pin is two lines of `platformio.ini`:
 
 ```ini
 [meshcore]
-pin = 727fc0512ce08bfd7b499e46daa7fca6eeec730d
-tag = repeater-v1.17.0
+pin = d92964352441e53b93e8667b802e04f6e072b39e
+tag = repeater-v1.17.1
 ```
 
 Those two lines are the only statement of which MeshCore this is, and a bump
@@ -236,4 +236,5 @@ Newest first. A bump's own commit adds its row, so this table is written by
 | Tag | Commit | Moved on | How |
 |---|---|---|---|
 <!-- upstream.yml inserts the newest row directly under this line -->
+| `repeater-v1.17.1` | `d9296435` | 14 October 2026 | the weekly bump (`upstream.yml`), pull request below |
 | `repeater-v1.17.1` | `d9296435` | 11 October 2026 | the first pin, chosen because the field repeaters and the agent firmware run it (`tasks/phase-0/reports/01.md`) |
