@@ -1,6 +1,6 @@
 # Proposal 03 — the agent's job logic as a library
 
-**For:** `twinoak/meshmaster-agent-firmware`. **Status:** a proposal, written 2026-10-11 while
+**For:** `twinoak/twinoak.meshmaster.exitnode-firmware` (named `meshmaster-agent-firmware` until 2026-10-11). **Status:** accepted 2026-10-14 — built as that repository's pile 1.5, tasks 15–19, consumed by the Walter's phase 4. Written 2026-10-11 while
 that repository was closed for other work. Read against its `src/` at `be73444` (local `master`).
 
 ## Why

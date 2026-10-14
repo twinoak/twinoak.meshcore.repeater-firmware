@@ -223,7 +223,7 @@ foreach ($t in $tasks) {
         $tail = ''
         if (Test-Path $sessionLog) { $tail = (Get-Content $sessionLog -Raw -ErrorAction SilentlyContinue) -replace '\s+', ' ' }
         if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
-        $limited = $tail -match 'usage limit|rate limit|limit will reset|limit reached|overloaded|out of (tokens|credits)|529'
+        $limited = $tail -match 'usage limit|rate limit|limit will reset|limit reached|overloaded|out of (usage )?(tokens|credits)|529'
         if (-not $limited) {
             Stop-Run "task $n did not land on origin/$Trunk (no report). See $sessionLog. Resume with -Phase $Phase -From $n once fixed."
         }

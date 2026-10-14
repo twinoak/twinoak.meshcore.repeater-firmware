@@ -216,8 +216,14 @@ What is new since that was written, and therefore proposed rather than assumed:
 | [`proposals/02`](proposals/02-firmware-catalogue-and-updates.md) | a firmware catalogue fed by signed manifests, and update jobs with a canary, preconditions and an audit trail |
 | [`proposals/03`](proposals/03-agent-core-as-a-library.md) | the agent firmware's job logic as a library with a mesh seam and an uplink seam, so the Walter runs the same code as the Heltec |
 
-Until those are decided, the Walter's piles stop at a seam: a wake cycle that does everything but
-talk to a backend. Nothing in either firmware is written against a guess about the server.
+**Decided 2026-10-14 (Thomas).** All three proposals are accepted, with two choices: the TwinOak
+features are built **in MeshMaster's core, in their own folders**, not through the pack registry
+`PLUGINS.md` designed (its D-45); and the unit is a **`mesh` agent with `servesRepeaterId`**,
+transport `native`, not the `direct` kind. The work is three piles — `meshmaster.dk` pile 4.14
+(*the unit*: the sleeping exit node, the firmware catalogue served with Range, the update jobs and
+the canary), the exit-node firmware's pile 1.5 (*the agent core as a library*) and the Walter's
+phase 4 (*the agent*) — in that order of dependency. Until phase 4 lands, the Walter's wake cycle
+still stops at its seam.
 
 ## 9. Order of work
 
@@ -227,9 +233,13 @@ talk to a backend. Nothing in either firmware is written against a guess about t
 | phase 1 | our application on upstream's repeater; the link; the clock; local management; power | the link from the other end; SWD; the nRF52; the flasher |
 | phase 2 | the mesh client; observations; the rails | manifests and signatures; the image store; the RAK's update; its own; the supervisor |
 | phase 3 | roles and boards; NoiseScope moves in; first-boot provisioning | the modem; HTTPS; settings and console; the duty cycle; the wake cycle |
-| later | the bench pile; the bridge role; the dual adapter | the bench pile; the agent (proposal 03); the TwinOak pack's jobs |
+| phase 3.1, 3.2 | the fast sweep; a MeshCore bump can be green | — |
+| phase 4 | — | the agent: the library at a pin, the mesh over the link, the uplink over the modem, the firmware jobs on the update machines |
+| later | the bench pile; the bridge role; the dual adapter | the bench pile; NoiseScope as a job |
 
-The two repositories do not wait for each other: what they share is fixed here first.
+The two repositories do not wait for each other: what they share is fixed here first. Phase 4 of
+the Walter waits for two piles elsewhere (§8): `meshmaster.dk` 4.14 and the exit-node firmware's
+1.5, in that order, because 1.5's last task syncs fixtures 4.14 changes.
 
 ## 10. Open, and whose
 

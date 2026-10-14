@@ -1,6 +1,6 @@
 # Proposal 01 — the unit in MeshMaster: a direct agent that is also an exit node
 
-**For:** `twinoak/meshmaster.dk`. **Status:** a proposal, written 2026-10-11 while that repository
+**For:** `twinoak/meshmaster.dk`. **Status:** accepted 2026-10-14 — option two of A (a `mesh` agent with `servesRepeaterId`); built as pile 4.14, tasks 119–121. Written 2026-10-11 while that repository
 was closed for other work. Nothing in either firmware depends on it yet. Read against
 `spec/PLUGINS.md` §3 and §6, `spec/EXIT-NODES.md` §2, §5, §9, §10 and D-26, at `01ac515`.
 

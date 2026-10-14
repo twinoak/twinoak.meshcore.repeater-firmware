@@ -1,6 +1,6 @@
 # Proposal 02 — a firmware catalogue, and updates as jobs
 
-**For:** `twinoak/meshmaster.dk`. **Status:** a proposal, written 2026-10-11. Read against
+**For:** `twinoak/meshmaster.dk`. **Status:** accepted 2026-10-14 — built in the core, not as a pack (meshmaster.dk D-45), as pile 4.14, tasks 122–127; the job types are `twinoak.fw.offer` / `.apply` / `.state` and `twinoak.power.cycle`. Written 2026-10-11. Read against
 `spec/PLUGINS.md` §5 and §6 (`twinoak.ota.*`, `twinoak_firmware_images`, `twinoak_ota_runs`) and
 [`../FIRMWARE-MANIFEST.md`](../FIRMWARE-MANIFEST.md).
 
