@@ -95,11 +95,22 @@ Say in the report that the task was done in more than one session.
   headless session with nothing left to do *ends*, and the task dies there —
   the run unfinished, the report unwritten, the branch unpushed. Block on it
   inside the turn, or poll it inside the turn.
-- **A session cannot flash a board or hear a radio** — not in these piles.
-  It can build, run the native tests, and read the MeshCore source it builds
-  against. Everything else is Thomas's to walk with the rig on the bench, so
-  every task ends with a *Not verified here* list precise enough to be
-  walked, and the same lines are added to `docs/bench.md` in the order the
+- **A session cannot hear a radio, and it touches a board only through
+  `tools/bench/`** — only when its task says so, never with an RF port on an
+  antenna for a repeater image, and it leaves the board as it found it
+  (`bench restore`, whose last line says what went back). The rig is
+  `bench.local.json` at the repository root, by USB serial number
+  (`bench.example.json`; `docs/bench.md` §0a). *No bench* — no file, or no
+  port with that serial number — is exit code 3 and **is not a failure**: the
+  walk goes to *Not verified here*, as before this tool existed. The tool
+  flashes one kind of file (the DFU package the build or the release made)
+  after its own checks, never a UF2, never SWD, never an erase, never
+  `reboot 2`/`3`; its console refuses to send a password and never prints
+  one. Nothing else on a session's machine opens a board's port. A session can
+  otherwise build, run the native tests, and read the MeshCore source it
+  builds against; everything else is Thomas's to walk with the rig on the
+  bench, so every task ends with a *Not verified here* list precise enough to
+  be walked, and the same lines are added to `docs/bench.md` in the order the
   rig is brought up (`spec/SYSTEM.md` §7).
 - Nobody will answer a question. Where the spec and the task are silent, take
   the smallest decision consistent with the spec and record it in the report

@@ -53,7 +53,10 @@ test/                   native tests, one directory per subject
 spec/                   a copy of the system specification and its fixtures - never edited here
 keys/                   release.pub, the public half of the release key - and nothing secret, ever
 tools/                  verify.ps1, release/ (the release tooling and its tests), pio/ (build
-                        scripts), noisescope/ (the scanner's waterfall plotter)
+                        scripts), noisescope/ (the scanner's waterfall plotter), bench/ (the one
+                        way a session touches a board: DFU of our own images after its guards,
+                        a console that never sends or prints a password, a lock per board,
+                        restore - docs/bench.md section 0a; its tests run in the release step)
 docs/                   this file, release.md, upstream.md, link.md, bench.md, noisescope.md
 tasks/                  the piles
 ```
