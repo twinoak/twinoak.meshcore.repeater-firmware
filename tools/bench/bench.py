@@ -9,6 +9,7 @@
     python tools/bench/bench.py console --scanner "info"   the scanner's NDJSON console
     python tools/bench/bench.py console --scanner --collect 60
     python tools/bench/bench.py restore                    put back what was found
+    python tools/bench/bench.py walk 1 [--tick]            docs/bench.md section 1, as steps
 
 The rig is bench.local.json at the repository root (bench.example.json is the shape, config.py
 says what each field means). The rails are in the tool, not in the caller's intentions:
@@ -23,7 +24,10 @@ says what each field means). The rails are in the tool, not in the caller's inte
   * the console refuses to send a line that sets a password or the private key, `erase`, and the
     bootloader lines, and never prints `password now:` (console.py);
   * before the first flash of a run the board is recorded, and `restore` puts that role back and
-    checks the Repeater ID; a run that cannot be put back says so in capitals (exit 1).
+    checks the Repeater ID; a run that cannot be put back says so in capitals (exit 1);
+  * `walk <section>` is docs/bench.md's own lines, in the page's order, as steps with a result
+    file under out/bench/ (walk.py): one lock for the whole walk, a restore at the end of the
+    ones that flash, and a line no script can check said to be a person's rather than guessed.
 
 Exit codes: 0 done; 1 the board did not do what was asked; 2 refused by a guard, nothing opened;
 3 no bench; 4 the board is held by another process.
@@ -69,6 +73,14 @@ class Bench(object):
         self.region_for = region_for or (lambda path: images.find_region(path, self.repo))
         self.commit = commit
         self.config = None
+        # What the last restore of this process did, for `walk` to report (walk.py): the board's
+        # own answers and the line the person reads.
+        self.last_restore = None
+        self.last_restore_line = None
+        # The admin password `walk 10` sends to a disposable bench unit. None - which is what a
+        # session gets - means one generated there and written down nowhere; test_walk.py hands
+        # in a known one so that it can prove it reaches no file.
+        self.walk_password = None
 
     # ---- plumbing
 
@@ -154,8 +166,19 @@ class Bench(object):
         self.say("recorded %s" % record.describe())
         return cfg.EXIT_OK
 
-    def _flash_and_confirm(self, image, label):
-        """The flash and the reading afterwards; returns what the board said."""
+    def flash_locked(self, image, label, run=None):
+        """The flash and the reading afterwards, with the lock already held; returns what the
+        board said. `walk` holds one lock for a whole walk and calls this (walk.py).
+
+        The board must be restorable afterwards, or it is not touched: a repeater found on an RF
+        port that is not the dummy load could not be flashed back by this tool, so a run that
+        recorded one is refused here - before the touch, and whoever the caller is."""
+        if (run is not None and run.role is not None and images.role_transmits(run.role)
+                and self.config.rf != "dummy-load"):
+            raise cfg.Refused("the board carries a %s image and the RF port is %r: flashing %s would "
+                              "leave a board this tool may not restore (a %s image is flashed only "
+                              "on the dummy load). Nothing was touched."
+                              % (run.role, self.config.rf, os.path.basename(image.path), run.role))
         try:
             outcome = flash_image(image, self.config, self.ports, self.runner, self.say, self.nrfutil,
                                   python=self.python, timeouts=self.timeouts)
@@ -200,14 +223,7 @@ class Bench(object):
                 run.found_image = found_image
                 from runs import save_run
                 save_run(self.home, run)
-            # The board must be restorable afterwards, or it is not touched: a repeater found on an
-            # RF port that is not the dummy load could not be flashed back by this tool.
-            if run.role is not None and images.role_transmits(run.role) and self.config.rf != "dummy-load":
-                raise cfg.Refused("the board carries a %s image and the RF port is %r: flashing %s would "
-                                  "leave a board this tool may not restore (a %s image is flashed only "
-                                  "on the dummy load). Nothing was touched."
-                                  % (run.role, self.config.rf, os.path.basename(args.image), run.role))
-            self._flash_and_confirm(image, "flash")
+            self.flash_locked(image, "flash", run=run)
         return cfg.EXIT_OK
 
     def cmd_restore(self, args):
@@ -221,32 +237,46 @@ class Bench(object):
             return cfg.EXIT_FAILED
         image = self.inspect(path)
         with self.lock("restore"):
-            if run.version and image.version != run.version and run.found_image:
-                self.say("note: the run recorded version %s and the image given says %s" % (run.version, image.version))
-            try:
-                said = self._flash_and_confirm(image, "restore")
-            except FlashError as exc:
-                self.say("RESTORE FAILED: %s" % exc)
+            return self.restore_locked(run, image, how)
+
+    def restore_locked(self, run, image, how):
+        """The restore itself, with the lock already held: the role back, the identity checked,
+        the run closed. `walk` holds one lock for a whole walk and calls this (walk.py)."""
+        self.last_restore, self.last_restore_line = None, None
+        if run.version and image.version != run.version and run.found_image:
+            self.say("note: the run recorded version %s and the image given says %s" % (run.version, image.version))
+        try:
+            said = self.flash_locked(image, "restore")
+        except FlashError as exc:
+            self.last_restore_line = "RESTORE FAILED: %s" % exc
+            self.say(self.last_restore_line)
+            return cfg.EXIT_FAILED
+        self.last_restore = said
+        checks = []
+        if run.role == "repeater":
+            if run.repeater_id and said.get("repeater_id") == run.repeater_id:
+                checks.append("Repeater ID %s matches the one recorded" % run.repeater_id)
+            elif run.repeater_id:
+                self.last_restore_line = (
+                    "RESTORE FAILED: THE REPEATER ID IS %s AND THE RUN RECORDED %s - THE NODE'S "
+                    "IDENTITY IS NOT WHAT IT WAS" % (said.get("repeater_id"), run.repeater_id))
+                self.say(self.last_restore_line)
                 return cfg.EXIT_FAILED
-            checks = []
-            if run.role == "repeater":
-                if run.repeater_id and said.get("repeater_id") == run.repeater_id:
-                    checks.append("Repeater ID %s matches the one recorded" % run.repeater_id)
-                elif run.repeater_id:
-                    self.say("RESTORE FAILED: THE REPEATER ID IS %s AND THE RUN RECORDED %s - THE NODE'S "
-                             "IDENTITY IS NOT WHAT IT WAS" % (said.get("repeater_id"), run.repeater_id))
-                    return cfg.EXIT_FAILED
-                else:
-                    checks.append("no Repeater ID was recorded, so none could be checked")
-                if run.name and said.get("name") and said["name"] != run.name:
-                    self.say("RESTORE FAILED: THE NAME IS %r AND THE RUN RECORDED %r" % (said["name"], run.name))
-                    return cfg.EXIT_FAILED
-            if run.found_image:
-                which = "the recorded version %s, from %s" % (image.version, how)
             else:
-                which = "this run's own image of that role (%s %s, %s)" % (image.role, image.version, how.split(" (")[-1].rstrip(")"))
-            clear_run(self.home, self.config.serial)
-            self.say("restored: %s back on the board - %s; %s" % (run.role, which, "; ".join(checks) or "ok"))
+                checks.append("no Repeater ID was recorded, so none could be checked")
+            if run.name and said.get("name") and said["name"] != run.name:
+                self.last_restore_line = ("RESTORE FAILED: THE NAME IS %r AND THE RUN RECORDED %r"
+                                          % (said["name"], run.name))
+                self.say(self.last_restore_line)
+                return cfg.EXIT_FAILED
+        if run.found_image:
+            which = "the recorded version %s, from %s" % (image.version, how)
+        else:
+            which = "this run's own image of that role (%s %s, %s)" % (image.role, image.version, how.split(" (")[-1].rstrip(")"))
+        clear_run(self.home, self.config.serial)
+        self.last_restore_line = ("restored: %s back on the board - %s; %s"
+                                  % (run.role, which, "; ".join(checks) or "ok"))
+        self.say(self.last_restore_line)
         return cfg.EXIT_OK
 
     def cmd_console(self, args):
@@ -289,6 +319,12 @@ class Bench(object):
             finally:
                 port.close()
 
+    def cmd_walk(self, args):
+        """docs/bench.md's checkable lines, walked (walk.py). One lock for the whole walk."""
+        self.load()
+        import walk
+        return walk.run_walk(self, args)
+
 
 def _json(obj):
     import json
@@ -317,6 +353,20 @@ def build_parser():
     console.add_argument("--collect", default=None, metavar="SECONDS", help="(scanner) collect lines for this long")
     console.add_argument("--timeout", type=float, default=2.5)
     console.set_defaults(run="cmd_console")
+    walk = subs.add_parser("walk", help="docs/bench.md's checkable lines of a section, as steps")
+    walk.add_argument("section", help="1, 8, 9 or 10 - the sections a script can check")
+    walk.add_argument("--image", default=None,
+                      help="the repeater's DFU package (default: this checkout's own build)")
+    walk.add_argument("--scanner-image", default=None, dest="scanner_image",
+                      help="the scanner's DFU package (default: this checkout's own build)")
+    walk.add_argument("--collect", type=float, default=60.0, metavar="SECONDS",
+                      help="(9) how long the minute of scanner output is (default 60)")
+    walk.add_argument("--baseline", type=float, default=20.0, metavar="SECONDS",
+                      help="(9) how long the dummy-load baseline capture is (default 20)")
+    walk.add_argument("--tick", action="store_true",
+                      help="tick what came back ok in docs/bench.md, and write what differs into "
+                           "the follow-ups of the task that wrote the line")
+    walk.set_defaults(run="cmd_walk")
     return p
 
 

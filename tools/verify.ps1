@@ -20,7 +20,8 @@
                 in this step because it needs exactly what this step already has
     5. release  python tools/release/selfcheck.py --require-descriptor - the release tooling's
                 own tests and tools/bench's (the guards of the one tool a session may touch a
-                board with, against a fake serial layer), then a dry run of the real release
+                board with, and every walk of docs/bench.md, against a fake serial layer), then
+                a dry run of the real release
                 over out/build/<env>, what step 3
                 left: the images, each one's descriptor held against its manifest entry, a
                 validated manifest, its signature by the specification's public test key, and

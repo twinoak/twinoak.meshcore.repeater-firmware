@@ -1,0 +1,1457 @@
+"""docs/bench.md, walked: the lines a script can check, as steps the tool runs.
+
+    python tools/bench/bench.py walk 1                            the repeater alone on USB
+    python tools/bench/bench.py walk 8  [--image <zip>]           what an image says it is
+    python tools/bench/bench.py walk 9  [--scanner-image <zip>]   NoiseScope, a round trip
+    python tools/bench/bench.py walk 10                           first boot and provisioning
+
+docs/bench.md is what every task left under *Not verified here*, in the order the rig is brought
+up. Four of its sections are lines a script can check with nothing but the board on USB - §1 the
+repeater alone, §8 what an image says it is, §9 NoiseScope as a round trip, §10 first boot and
+provisioning - and this file is those sections, as walks:
+
+  * a walk is the section's bullets **in the page's order**, each bullet one step or several, and
+    a step says the line it checks, what it sent, what it saw and `ok`, `differs`, `needs a
+    person` or `skipped`. Every bullet of a walked section is in its walk, including the ones no
+    script can do: those are `needs a person`, with what the person needs (a roof antenna, a
+    phone, a scope probe, a generator, a power cut);
+  * the result is a Markdown file under `out/bench/`, named by date and commit, with every
+    `-> ______` of the walked lines filled in. `--tick` then ticks the bullets that came back
+    `ok` in docs/bench.md as `[x] ... (bench, <date>, <commit>)` and writes the ones that came
+    back `differs` into the follow-ups of the task that wrote the line - a *differs* is a finding
+    for that task and never a fix here;
+  * nothing a password passes through reaches either file: every line sent and every reply shown
+    goes through console.redact, and §10's generated admin password is never written down at all
+    (it is a bench unit's);
+  * the board is left as it was found. §8 and §9 flash, so they open a run (runs.py) and end in
+    the restore that closes it; §1 reads consoles only; §10 erases, which is why it runs only
+    with `"identity": "disposable"` in bench.local.json and refuses while a run is open - the
+    erase makes a recorded Repeater ID unrestorable.
+
+What a step expects is read and not remembered: the home channel and the duty cycle come from
+`[band_<band>]` of platformio.ini (phase 3.3's task 01 put the band's ceiling there and nowhere
+else), upstream's version from the tag the firmware's own `fw.version` names, and the role, board
+and version of an image from its descriptor. The page's quoted text is compared too, but a
+difference there is a note about a stale page and not a finding about the board.
+
+No bench (no bench.local.json, or no port with its serial number) is exit 3 here as everywhere:
+the walk is not run, and the task's report says *Not verified here*.
+"""
+
+import json
+import os
+import re
+import shutil
+import tempfile
+import time
+
+import config as cfg
+import console as consolemod
+from console import RepeaterConsole, ScannerConsole, console_guard
+from flash import Timeouts, read_repeater
+from lock import BoardLock
+from ports import same_serial
+from runs import (RestoreNotPossible, choose_restore_image, git_commit, load_run, own_image_of,
+                  parse_linkcli, record_board)
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+
+OK = "ok"
+DIFFERS = "differs"
+PERSON = "needs a person"
+SKIPPED = "skipped"
+
+# The radio ROM the fast-sweep plugin is made for (docs/bench.md section 9, *The fast sweep*,
+# first line; src/roles/scanner/Radio.cpp refuses `scope` on anything else).
+PLUGIN_ROM = "SX1261 V2D 2D02"
+
+# What the page quotes for upstream's own `ver` line and for `board`. A MeshCore bump moves the
+# first, and a walk says so as a note rather than as a finding: what it holds the board to is the
+# tag our own `fw.version` names.
+PAGE_VER = "v1.17.1 (Build: 14 Aug 2026)"
+PAGE_BOARD = "RAK 4631"
+
+# `sensor list`'s two pages, as upstream pages them (docs/provisioning.md section 3, and
+# test/test_settings, which measures the arithmetic).
+FIRST_PAGE_KEYS = ("fw.version", "walter.wake", "link.errors", "walter.seen", "clock.state")
+SECOND_PAGE_KEYS = ("power.low_mv", "power.crit_mv", "obs.wake", "client.refused", "firstboot.state")
+SETTING_COUNT = len(FIRST_PAGE_KEYS) + len(SECOND_PAGE_KEYS)
+
+
+# ----------------------------------------------------------------------------- the page
+
+class PageLine(object):
+    """One bullet of docs/bench.md: the task(s) that wrote it, a unique piece of its text - so the
+    walk can be held against the page, and the bullet found to be ticked - and what it is about."""
+
+    def __init__(self, key, tasks, anchor, about, person=None):
+        self.key = key
+        self.tasks = tuple(tasks)
+        self.anchor = anchor
+        self.about = about
+        self.person = person        # what a person needs, when no script can do it
+
+
+class Section(object):
+    def __init__(self, number, title, lines):
+        self.number = number
+        self.title = title
+        self.lines = list(lines)
+
+    def line(self, key):
+        for line in self.lines:
+            if line.key == key:
+                return line
+        raise KeyError("docs/bench.md has no line %s in this walk" % key)
+
+
+SECTIONS = {}
+
+
+def _section(number, title, lines):
+    SECTIONS[number] = Section(number, title, lines)
+
+
+_section("1", "The repeater alone on USB", [
+    PageLine("1.1", ("p1-01",), "Flash the UF2 (double-tap reset on the adapter's USB-C",
+             "the console on a repeater: the banner, `ver`, `board`, `get radio`, `sensor list` "
+             "and its cut digit, `sensor list 5`, `sensor get fw.version`, and `sensor set "
+             "fw.version x` refused"),
+    PageLine("1.2", ("p1-01",), "It hears adverts (`neighbors` after a few minutes",
+             "it hears adverts, and repeats",
+             person="the roof antenna, a few minutes on it, a second radio and a phone - a "
+                    "session cannot hear a radio"),
+    PageLine("1.3", ("p1-01",), "A phone login with the password `password` is refused",
+             "a phone's login, and the password the first boot set",
+             person="a phone on the mesh, and a `password` line this console does not send on a "
+                    "bench whose identity is kept"),
+    PageLine("1.4", ("p1-01",), "`INFO.VARIANT` of the module, for the Walter's flasher",
+             "the module's `INFO.VARIANT`",
+             person="the bootloader's own drive (INFO_UF2.TXT), which this tool never mounts"),
+    PageLine("1.5", ("p1-01",), "I2C is at 100 kHz on the scope",
+             "the I2C clock, and the BME280 if one is fitted",
+             person="a scope probe on SCL (P0.14), and a telemetry request from a phone"),
+    PageLine("1.6", ("p3.3-02",), "The board's two USB serial numbers are one",
+             "the application's USB serial number and the bootloader's",
+             person="a double-tap reset and a power cycle - a hand on the board. The "
+                    "application's half is read here and filled in below"),
+    PageLine("1.7", ("p3.3-02",), "The round trip through `tools/bench/`, with the dummy load",
+             "`status`, `flash`, `console \"ver\"`, `restore`"),
+    PageLine("1.8", ("p3.3-02",), "**What it refuses on a real board.**",
+             "the refusals, on a board, with `rf: antenna` in the config",
+             person="an edit of bench.local.json (`rf: antenna`), which is the person's own file. "
+                    "The guards themselves open no port and are host tests (test_bench.py)"),
+])
+
+_section("8", "What an image says it is", [
+    PageLine("8.1", ("p3-01",), "The file you are about to flash says what it is, before you",
+             "the descriptor in the file: role, board, band, version, offset"),
+    PageLine("8.2", ("p3-01",), "The unit then says the same thing",
+             "`hello` over the link: role, board, fw_version, slot"),
+    PageLine("8.3", ("p3-01",), "The console agrees too",
+             "the console's `sensor get fw.version` after the flash, and upstream's `ver`"),
+    PageLine("8.4", ("p3-01",), "The Walter's half, in the Walter's repository",
+             "a Walter reading the descriptor out of the file it downloaded",
+             person="another repository's tests (twinoak.meshcore.walter-firmware); no session "
+                    "and no bench of this repository can show it"),
+])
+
+_section("9", "NoiseScope", [
+    PageLine("9.1", ("p3-02",), "Flash the scanner over USB",
+             "the `boot` line: fw, role, board, ver, reset, and `radio_ok`"),
+    PageLine("9.2", ("p3-02",), "`info`, `stat` and `sweep` behave as the page says",
+             "`info` one line, `stat` at once, a 281-point `sweep` and its time, `hist`, "
+             "`dwell`, `cad`, and `stop` in the middle of a sweep"),
+    PageLine("9.3", ("p3-02",), "`pwr` matches the repeater's `power` numbers",
+             "the scanner's `pwr` against the repeater's `power` for the same board",
+             person="the production connector boards, a bench supply, and a run of each firmware "
+                    "on the same board"),
+    PageLine("9.4", ("p3-02",), "Every line is JSON, and the chatter says so",
+             "a minute of output: every line parses, none carries `nan`, and the heartbeat is "
+             "there"),
+    PageLine("9.5", ("p3-02",), "Flash the repeater back, and nothing of the node is gone",
+             "the restore: the same `Repeater ID`, the same name, a repeater's `fw.version` again"),
+    PageLine("9.6", ("p3-02",), "The watchdog is live",
+             "a watchdog reset, and `reset` reading `wdt` after it",
+             person="an induced hang; a session cannot contrive one"),
+    PageLine("9.7", ("p3.1-01",), "**The radio's ROM.**",
+             "`info`'s `rom`, which decides whether any `scope` can run on this part"),
+    PageLine("9.8", ("p3.1-01",), "**`scope 863 870` over USB, with the plotter.**",
+             "the `ack`'s n, rbw, seg and cov, and the frames' `sps`"),
+    PageLine("9.9", ("p3.1-01",), "**The baseline.**",
+             "`scope 150 960 2048` on the dummy load, the NDJSON kept and the picture saved"),
+    PageLine("9.10", ("p3.1-01",), "**The image check**, which is what the segments exist for",
+             "one peak where the generator is, and nothing at the image",
+             person="the tinySA Ultra as a generator, an attenuator, and the judgement that may "
+                    "lower kScopeSegmentMhz"),
+    PageLine("9.11", ("p3.1-01",), "**The site through the cavity filter.**",
+             "`scope 791 960` with the baseline subtracted",
+             person="the site, the antenna and the cavity filter - not a bench with a dummy load"),
+    PageLine("9.12", ("p3.1-01",), "**The same `scope` from the Walter UART.**",
+             "`scope` over `Serial1`, its raised interval, and ten minutes with no reset",
+             person="the dongle on the link pins as a second console, and ten minutes of two "
+                    "ports watched at once; this tool drives the USB console only"),
+])
+
+_section("10", "First boot and provisioning", [
+    PageLine("10.1", ("p3-03", "p3.3-01"), "**A first boot is a first boot.**",
+             "`erase`, a reset, a new `Repeater ID`, both `First boot:` lines, "
+             "`firstboot.state`, `get dutycycle`, `get path.hash.mode`, `get radio`, `get name` "
+             "and `get guest.password`"),
+    PageLine("10.2", ("p3-03", "p3.3-01"), "**It runs once, and a reboot proves it.**",
+             "a second boot: no `First boot:` line, `firstboot.state` never, and the two "
+             "settings still as the profile left them"),
+    PageLine("10.3", ("p3-03",), "**A power cut in the middle leaves no half-provisioned node.**",
+             "the power pulled during the first second, three or four times",
+             person="a hand on the power, timed to the first second of a boot"),
+    PageLine("10.4", ("p3-03",), "**Provision it at the USB port**",
+             "docs/provisioning.md section 3, line for line, and read back"),
+    PageLine("10.5", ("p3-03",), "**A phone then logs in with that admin password**",
+             "a phone as admin, and the old password gone",
+             person="a phone on the mesh - and the password this walk set is one nobody has, "
+                    "which is what a bench unit is"),
+    PageLine("10.6", ("p3-03",), "**Provision it over the link.**",
+             "the same lines through `linkcli.py provision`, with the password printed as stars"),
+    PageLine("10.7", ("p3-03",), "**And the node is the same node afterwards.**",
+             "the public key and the name just set"),
+])
+
+WALKABLE = tuple(sorted(SECTIONS, key=lambda number: float(number)))
+
+
+# ----------------------------------------------------------------------------- what a walk leaves
+
+class Step(object):
+    def __init__(self, line, what, status, sent=None, saw=None, expected=None, blanks=None,
+                 note=None):
+        self.line = line
+        self.what = what
+        self.status = status
+        self.sent = list(sent or [])
+        self.saw = saw
+        self.expected = expected
+        self.blanks = dict(blanks or {})
+        self.note = note
+
+
+class WalkResult(object):
+    def __init__(self, section, config, commit, started):
+        self.section = section
+        self.config = config
+        self.commit = commit
+        self.started = started
+        self.steps = []
+        self.notes = []
+        self.files = []
+
+    # ---- building it
+
+    def add(self, step):
+        self.steps.append(step)
+        return step
+
+    def note(self, text):
+        self.notes.append(text)
+
+    def file(self, path, what):
+        self.files.append((path, what))
+
+    # ---- reading it
+
+    def of(self, status):
+        return [step for step in self.steps if step.status == status]
+
+    def line_status(self, line):
+        """A bullet's own status: the worst of its steps' - a differs beats a person, which beats
+        a skip, which beats an ok."""
+        mine = [step.status for step in self.steps if step.line is line]
+        for status in (DIFFERS, PERSON, SKIPPED, OK):
+            if status in mine:
+                return status
+        return SKIPPED
+
+    def confirmed_lines(self):
+        return [line for line in self.section.lines if self.line_status(line) == OK]
+
+    def differing_lines(self):
+        return [line for line in self.section.lines if self.line_status(line) == DIFFERS]
+
+    @property
+    def date(self):
+        return self.started[:10]
+
+    @property
+    def short_commit(self):
+        return (self.commit or "nocommit")[:7]
+
+    def counts(self):
+        return dict((status, len(self.of(status))) for status in (OK, DIFFERS, PERSON, SKIPPED))
+
+
+def _safe(text):
+    """Nothing a password passes through reaches a transcript or a file (console.redact)."""
+    if text is None:
+        return None
+    return consolemod.redact(str(text))
+
+
+def _starred(line):
+    """A line that carries a password, as it is written down: the command and four stars, which
+    is what tools/linkcli.py prints for the same line (docs/provisioning.md section 4)."""
+    words = (line or "").split()
+    if not words:
+        return line
+    if words[0].lower() == "password":
+        return "password ****"
+    if words[0].lower() == "set" and len(words) > 1 and words[1].lower() == "guest.password":
+        return "set guest.password ****"
+    return line
+
+
+# ----------------------------------------------------------------------------- what to expect
+
+_BAND_KEYS = ("freq", "bw", "sf", "cr", "duty_cycle")
+
+
+def band_expectations(repo=REPO, band="868"):
+    """`[band_<band>]` of platformio.ini: what `get radio` and `get dutycycle` must answer, read
+    from the one place the build reads them too (task p3.3-01 put the duty cycle there). None
+    when the file cannot be read, and then those steps are skipped rather than guessed."""
+    import configparser
+    parser = configparser.ConfigParser(strict=False)
+    try:
+        with open(os.path.join(repo, "platformio.ini"), "r", encoding="utf-8") as fh:
+            parser.read_file(fh)
+        section = parser["band_%s" % band]
+        values = dict((key, section[key].strip()) for key in _BAND_KEYS)
+        duty = "%.1f%%" % float(values["duty_cycle"])
+    except (IOError, OSError, KeyError, ValueError, configparser.Error):
+        return None
+    return {
+        "radio": "%s,%s,%s,%s" % (values["freq"], values["bw"], values["sf"], values["cr"]),
+        "dutycycle": duty,
+        "band": band,
+    }
+
+
+_FW_VERSION = re.compile(r"^twinoak-(\S+)\s+(\S+)\s+on\s+MeshCore\s+(\S+)\s+\(([0-9a-f]{8})\)$")
+
+
+def parse_fw_version_line(text):
+    """`> twinoak-<role> <version> on MeshCore <tag> (<pin>)` -> a dict, or None."""
+    body = (text or "").strip()
+    if body.startswith("> "):
+        body = body[2:].strip()
+    match = _FW_VERSION.match(body)
+    if not match:
+        return None
+    return {"role": match.group(1), "version": match.group(2), "tag": match.group(3),
+            "pin": match.group(4)}
+
+
+def ack_fields(msg):
+    """`n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393` -> a dict of strings
+    (docs/noisescope.md section 5: a `scope` ack carries what was *taken*)."""
+    out = {}
+    for token in str(msg or "").split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            out[key] = value
+    return out
+
+
+_NAN = re.compile(r"(?i)(?<![0-9a-z_])nan(?![0-9a-z_])")
+
+
+def nan_lines(raw):
+    """Every line of a capture that carries a bare `nan`, which is not JSON and which the writer
+    is held to never producing (docs/noisescope.md section 5; test/test_scanner)."""
+    return [line for line in (raw or "").splitlines() if _NAN.search(line)]
+
+
+def _types(batch):
+    counts = {}
+    for obj in batch.objects:
+        counts[obj.get("t")] = counts.get(obj.get("t"), 0) + 1
+    return ", ".join("%s x%d" % (t, n) for t, n in sorted(counts.items(), key=lambda kv: str(kv[0])))
+
+
+def _already(batch, kind):
+    """The line a command's own answer already carried, if it did: a scanner sends the ack and
+    the first line of a scan in one breath, and on a real board the line comes seconds later."""
+    found = batch.of_type(kind)
+    return found[0] if found else None
+
+
+def frame_summary(frame):
+    """A scanner line, short enough for a transcript: no array of 281 numbers in a result file."""
+    if not frame:
+        return "(nothing)"
+    out = {}
+    for key, value in sorted(frame.items()):
+        if isinstance(value, list):
+            out[key] = "[%d values]" % len(value)
+        elif isinstance(value, str) and len(value) > 24:
+            out[key] = value[:21] + "..."
+        else:
+            out[key] = value
+    return json.dumps(out, sort_keys=True)
+
+
+# ----------------------------------------------------------------------------- the walker
+
+class Walker(object):
+    """One walk of one section, over the layers Bench already has, so that a test hands in the
+    fake serial layer of fakes.py and the whole walk runs with no board at all."""
+
+    def __init__(self, bench, section, image=None, scanner_image=None, collect_s=60.0,
+                 baseline_s=20.0, password=None):
+        self.bench = bench
+        self.config = bench.config
+        self.ports = bench.ports
+        self.runner = bench.runner
+        self.home = bench.home
+        self.repo = bench.repo
+        self.timeouts = bench.timeouts or Timeouts()
+        self.section = SECTIONS[section]
+        self.image = image
+        self.scanner_image = scanner_image
+        self.collect_s = float(collect_s)
+        self.baseline_s = float(baseline_s)
+        self._password = password
+        self.expect = band_expectations(self.repo) or {}
+        self.result = WalkResult(self.section, self.config, bench.commit or git_commit(self.repo),
+                                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+
+    # ---- what the session reading the console sees
+
+    def say(self, line):
+        self.bench.say(line)
+
+    def _tell(self, step):
+        self.say("  %-14s %s" % (step.status, step.what))
+        for sent in step.sent:
+            self.say("                 > %s" % sent)
+        if step.saw:
+            for one in str(step.saw).splitlines():
+                self.say("                   %s" % one)
+        if step.note:
+            self.say("                 (%s)" % step.note)
+
+    # ---- steps
+
+    def safe(self, text):
+        """console.redact, and then the one secret this walk knows by heart: the password it
+        generated for a disposable unit is replaced wherever it appears, whoever printed it -
+        upstream's own echo is redacted by its shape, and a tool that printed it some other way
+        (section 10 looks) must still not be able to put it in a file."""
+        text = _safe(text)
+        if text and self._password:
+            text = text.replace(self._password, "****")
+        return text
+
+    def mask(self, line):
+        """A line as it goes into a transcript: a password line as four stars, and the secret
+        this walk generated replaced anywhere else it might sit."""
+        masked = _starred(line)
+        if self._password:
+            masked = masked.replace(self._password, "****")
+        return masked
+
+    def step(self, key, what, ok=True, sent=None, saw=None, expected=None, blanks=None, note=None,
+             status=None):
+        line = self.section.line(key)
+        step = Step(line, what, status or (OK if ok else DIFFERS),
+                    sent=[self.mask(one) for one in (sent or [])], saw=self.safe(saw),
+                    expected=expected,
+                    blanks=dict((k, self.safe(v)) for k, v in (blanks or {}).items()), note=note)
+        self.result.add(step)
+        self._tell(step)
+        return step
+
+    def person(self, key, note=None, blanks=None, saw=None):
+        line = self.section.line(key)
+        return self.step(key, line.about, status=PERSON, note=note or line.person, blanks=blanks,
+                         saw=saw)
+
+    def skip(self, key, why, what=None):
+        return self.step(key, what or self.section.line(key).about, status=SKIPPED, note=why)
+
+    # ---- a repeater's console
+
+    def _open_repeater(self, app):
+        port = self.ports.open(app.device, 115200)
+        return port, RepeaterConsole(port, log=(lambda line: None),
+                                     disposable=self.config.disposable, now=self.ports.now,
+                                     sleep=self.ports.sleep)
+
+    def ask(self, repeater, line, timeout_s=2.5):
+        """One console line; the reply's text, redacted, and "" when nothing came back."""
+        reply = repeater.send(line, timeout_s=timeout_s)
+        return "" if reply.timed_out else reply.text
+
+    def _value(self, text):
+        """`> something` -> `something`, and a bare `>` -> `` (an empty setting, which is what
+        `get guest.password` answers on a fresh unit); anything else as it stands."""
+        body = (text or "").strip()
+        return body[1:].strip() if body.startswith(">") else body
+
+    def check_line(self, key, repeater, line, expected, what=None, blank=None, note=None):
+        """Send one line and hold its reply to `expected`."""
+        saw = self.ask(repeater, line)
+        value = self._value(saw)
+        return self.step(key, what or "`%s`" % line, ok=value == expected, sent=[line], saw=saw,
+                         expected=expected, blanks={blank: value} if blank else None, note=note)
+
+    def _app_port(self, what):
+        app, boot = self.ports.find_board(self.config.serial, self.config.bootloader_serial)
+        if app is None:
+            raise cfg.Refused("the board is in its bootloader on %s: there is no console to %s "
+                              "(`bench flash` an image first)" % (boot.device, what))
+        return app
+
+    # ---- the walk
+
+    def run(self):
+        getattr(self, "walk_%s" % self.section.number.replace(".", "_"))()
+        return self.result
+
+    # -- section 1 -----------------------------------------------------------
+
+    def walk_1(self):
+        app = self._app_port("walk section 1 with")
+        self.result.note("The application's port is %s (USB serial number %s)."
+                         % (app.device, app.serial_number))
+        self.result.note("The banner is read as `bench record` reads it: if the board has been up "
+                         "and its `Repeater ID:` line is long gone, upstream's own `reboot` is "
+                         "sent once and the port reopened. That is the only reset this walk "
+                         "performs, and the clock keeper's file is written on the way down.")
+
+        # The banner is a boot line and not a command, and it is read as `bench record` reads it:
+        # upstream's own `reboot` once when the board has been up and the banner is long gone
+        # (p3.3-02's report, *Decisions* 4 - the clock file is written on the way down).
+        found = read_repeater(self.ports, app, lambda line: None, self.config.disposable,
+                              self.timeouts, expect_banner=False, reboot_for_id=True)
+        rid = found.get("repeater_id")
+        self.step("1.1", "`Repeater ID:` on the console, 64 hex digits",
+                  ok=bool(rid) and bool(re.match(r"^[0-9A-F]{64}$", rid or "")),
+                  saw="Repeater ID: %s" % (rid or "(not caught)"),
+                  expected="64 hexadecimal digits",
+                  blanks={"section 1 Repeater ID": rid or "not caught"},
+                  note=None if rid else "the banner was not caught, even after one `reboot`")
+        if found.get("first_boot"):
+            self.result.note("The banner carried %d `First boot:` line(s), so this module had "
+                             "never been booted before - or had just been erased: %s"
+                             % (len(found["first_boot"]), "; ".join(found["first_boot"])))
+
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            fw_text = self.ask(repeater, "sensor get fw.version")
+            fw = parse_fw_version_line(fw_text)
+
+            # `ver` is upstream's own line. What holds it is the tag our own `fw.version` names -
+            # a MeshCore bump moves both together, where the page's quoted text goes stale.
+            ver = self._value(self.ask(repeater, "ver"))
+            tag_version = re.sub(r"^repeater-", "", fw["tag"]) if fw else None
+            self.step("1.1", "`ver` says upstream's version, the one `fw.version` names",
+                      ok=bool(ver) and (tag_version is None or tag_version in ver),
+                      sent=["ver"], saw=ver, expected=tag_version or PAGE_VER,
+                      blanks={"section 1 ver": ver},
+                      note=None if ver == PAGE_VER else
+                      "the page quotes `%s`; a MeshCore bump moves this line, and the page with "
+                      "it" % PAGE_VER)
+
+            self.check_line("1.1", repeater, "board", PAGE_BOARD, blank="section 1 board")
+            if self.expect:
+                self.check_line("1.1", repeater, "get radio", self.expect["radio"],
+                                blank="section 1 get radio",
+                                note="[band_%s] of platformio.ini is where that comes from"
+                                     % self.expect["band"])
+            else:
+                self.skip("1.1", "platformio.ini's [band_868] could not be read, so there is "
+                                 "nothing to hold `get radio` to", what="`get radio`")
+
+            self._sensor_list(repeater)
+
+            self.step("1.1", "`sensor get fw.version` is `twinoak-<role> <version> on MeshCore "
+                             "<tag> (<pin>)`", ok=fw is not None, sent=["sensor get fw.version"],
+                      saw=fw_text, blanks={"section 1 fw.version": self._value(fw_text)})
+
+            refusal = self.ask(repeater, "sensor set fw.version x")
+            self.step("1.1", "`sensor set fw.version x` is refused",
+                      ok="can't find custom var" in refusal.lower(),
+                      sent=["sensor set fw.version x"], saw=refusal,
+                      expected="can't find custom var",
+                      note="upstream's own wording for a key that took no value")
+
+            # Task p3.3-01's line. The page has `get dutycycle` in section 10, where a first boot
+            # has just run; the task asks for it here too, on a unit whose first boot was after
+            # 01 landed.
+            if self.expect:
+                self.check_line("1.1", repeater, "get dutycycle", self.expect["dutycycle"],
+                                blank="section 1 get dutycycle",
+                                note="p3.3-01's line, read on a unit whose first boot was after "
+                                     "it; the page has it in section 10. Upstream's own default "
+                                     "is 50.0%")
+        finally:
+            port.close()
+
+        self.person("1.2")
+        self.person("1.3")
+        self.person("1.4", blanks={"section 1 INFO.VARIANT": "not read here"})
+        self.person("1.5")
+        self.person("1.6", blanks={"section 1 application serial number": app.serial_number,
+                                   "section 1 bootloader serial number": "not read here"},
+                    saw="the application's port reports %s" % app.serial_number)
+        self.skip("1.7", "`bench walk 8` is those four commands over an image, in that order - "
+                         "`status`, `flash`, a console line, `restore` - and its result file is "
+                         "the transcript",
+                  what="`status`, `flash`, `console \"ver\"`, `restore`")
+        refused = None
+        try:
+            console_guard("password x", self.config.disposable)
+        except cfg.Refused as exc:
+            refused = str(exc)
+        self.person("1.8", note=self.section.line("1.8").person +
+                    (". `bench console \"password x\"` was refused here with nothing opened: %s"
+                     % refused if refused else ""))
+
+    def _sensor_list(self, repeater):
+        page1 = self.ask(repeater, "sensor list")
+        keys = re.findall(r"^\s*([a-z._]+)=", page1, re.M)
+        cut = "... next:" in page1 and not re.search(r"\.\.\. next:\d", page1)
+        self.step("1.1", "`sensor list` says `%d vars`, prints the first five and ends in "
+                         "`... next:` with the digit cut" % SETTING_COUNT,
+                  ok=(page1.startswith("%d vars" % SETTING_COUNT) and keys == list(FIRST_PAGE_KEYS)
+                      and "... next:" in page1),
+                  sent=["sensor list"], saw=page1,
+                  expected="%d vars, then %s, then `... next:`"
+                           % (SETTING_COUNT, ", ".join(FIRST_PAGE_KEYS)),
+                  blanks={"section 1 sensor list, first page":
+                          "%d characters, keys %s, `... next:`%s"
+                          % (len(page1), ",".join(keys),
+                             " with the digit cut" if cut else " with its digit")},
+                  note=None if cut else "the digit of `... next:5` is there, where the page says "
+                                        "it is cut - a `fw.version` shorter than the one the page "
+                                        "measured")
+        page2 = self.ask(repeater, "sensor list 5")
+        keys2 = re.findall(r"^\s*([a-z._]+)=", page2, re.M)
+        self.step("1.1", "`sensor list 5` is the other five", ok=keys2 == list(SECOND_PAGE_KEYS),
+                  sent=["sensor list 5"], saw=page2, expected=", ".join(SECOND_PAGE_KEYS),
+                  blanks={"section 1 sensor list 5": ",".join(keys2)})
+
+    # -- section 8 -----------------------------------------------------------
+
+    def walk_8(self):
+        path = self.image or own_image_of("repeater", self.config.board, self.repo)
+        if not os.path.isfile(path):
+            raise cfg.Refused("there is no image to walk section 8 with: %s is not there "
+                              "(tools/verify.ps1 builds it, or name one with --image)" % path)
+        image = self.bench.inspect(path)                 # every guard, before any port is opened
+        desc = image.descriptor
+        self.step("8.1", "the descriptor in the file, read before it is flashed", ok=True,
+                  saw=image.summary(),
+                  blanks={"section 8 role": desc["role"], "section 8 board": desc["board"],
+                          "section 8 band": desc["band"], "section 8 version": desc["version"],
+                          "section 8 offset": "0x%X" % image.offset},
+                  note="spec/tools/manifestref.py's own find_descriptor, which is what "
+                       "`manifestref.py descriptor <file>` runs; exactly one descriptor, or the "
+                       "image would have been refused before this step")
+        raw_bin = os.path.join(os.path.dirname(os.path.abspath(path)), "firmware.bin")
+        if os.path.isfile(raw_bin):
+            import manifestref
+            with open(raw_bin, "rb") as fh:
+                offset, from_bin = manifestref.find_descriptor(fh.read())
+            self.step("8.1", "the raw `firmware.bin` beside it carries the same descriptor",
+                      ok=from_bin == desc and offset == image.offset,
+                      saw="%s at 0x%X" % (json.dumps(from_bin, sort_keys=True), offset),
+                      note="the page's own command is run on the `.bin`; the package carries the "
+                           "same bytes")
+
+        run = self._open_a_run()
+        said = self.bench.flash_locked(image, "walk 8", run=run)
+        self.step("8.3", "the console's `fw.version` after the flash is the descriptor's version",
+                  ok=said.get("version") == desc["version"] and said.get("role") == desc["role"],
+                  saw="the board says %s %s" % (said.get("role"), said.get("version")),
+                  expected="%s %s" % (desc["role"], desc["version"]),
+                  blanks={"section 8 the console's fw.version":
+                          "%s %s" % (said.get("role"), said.get("version"))})
+        self._hello(desc)
+
+        port, repeater = self._open_repeater(self._app_port("read `ver` after the flash"))
+        try:
+            repeater.drain(0.3)
+            ver = self._value(self.ask(repeater, "ver"))
+            self.step("8.3", "upstream's own `ver` line is unchanged", ok=bool(ver), sent=["ver"],
+                      saw=ver, blanks={"section 8 ver": ver})
+        finally:
+            port.close()
+
+        self.person("8.4")
+        self._restore("8.3", "the board back as this walk found it")
+
+    def _hello(self, desc):
+        """`hello` over the link, when a dongle is in the config and on this machine."""
+        if not self.config.dongle_serial:
+            return self.skip("8.2", "no `dongle_serial` in bench.local.json: `hello` needs the "
+                                    "3.3 V USB-UART dongle on the link pins (docs/bench.md "
+                                    "section 2)")
+        dongle = self.ports.find_serial(self.config.dongle_serial)
+        if dongle is None:
+            return self.skip("8.2", "the dongle (serial %s) is not on this machine"
+                                    % self.config.dongle_serial)
+        code, output = self.runner.run(
+            [self.bench.python, os.path.join(self.repo, "tools", "linkcli.py"), "--port",
+             dongle.device, "hello"], timeout_s=30)
+        found = parse_linkcli(output)
+        slot = re.search(r"^slot\s+(\d+)", output or "", re.M)
+        board = re.search(r"^board\s+(\S+)", output or "", re.M)
+        return self.step("8.2", "`hello` over the link says the descriptor's role, board and "
+                                "fw_version, and `slot 0`",
+                         ok=(code == 0 and found.get("role") == desc["role"]
+                             and found.get("version") == desc["version"]
+                             and board is not None and board.group(1) == desc["board"]
+                             and slot is not None and slot.group(1) == "0"),
+                         sent=["linkcli.py --port %s hello" % dongle.device], saw=output,
+                         expected="role %s, board %s, fw_version %s, slot 0"
+                                  % (desc["role"], desc["board"], desc["version"]),
+                         blanks={"section 8 hello":
+                                 "role %s, board %s, fw_version %s, slot %s"
+                                 % (found.get("role"), board and board.group(1),
+                                    found.get("version"), slot and slot.group(1))})
+
+    # -- section 9 -----------------------------------------------------------
+
+    def walk_9(self):
+        path = self.scanner_image or own_image_of("scanner", self.config.board, self.repo)
+        if not os.path.isfile(path):
+            raise cfg.Refused("there is no scanner image to walk section 9 with: %s is not there "
+                              "(tools/verify.ps1 builds it, or name one with --scanner-image)"
+                              % path)
+        image = self.bench.inspect(path)
+        if image.role != "scanner":
+            raise cfg.Refused("%s is a %s image: section 9 is the scanner's round trip, and the "
+                              "repeater is what goes back on afterwards"
+                              % (os.path.basename(path), image.role))
+
+        run = self._open_a_run()
+        before = {"repeater_id": run.repeater_id, "name": run.name, "role": run.role,
+                  "version": run.version}
+        said = self.bench.flash_locked(image, "walk 9", run=run)
+        boot = said.get("boot") or {}
+        info = said.get("info") or {}
+        ver = boot.get("ver", info.get("ver"))
+        reset = boot.get("reset", info.get("reset"))
+        radio = boot.get("radio_ok", info.get("radio_ok"))
+        radio_ok = radio in (True, 1, "1", "true")
+        self.step("9.1", "the `boot` line: fw `noisescope`, role `scanner`, board `%s`, and "
+                         "`radio_ok`" % self.config.board,
+                  ok=(boot.get("fw") == "noisescope" and boot.get("role") == "scanner"
+                      and boot.get("board") == self.config.board and radio_ok),
+                  saw=json.dumps(boot, sort_keys=True) if boot else "(no `boot` line was caught)",
+                  expected="fw noisescope, role scanner, board %s, radio_ok true"
+                           % self.config.board,
+                  blanks={"section 9 ver": ver, "section 9 reset": reset,
+                          "section 9 radio_ok": radio},
+                  note=None if radio_ok else
+                  "radio_ok is not true: the power-enable pin (SX126X_POWER_EN, P1.05) is the "
+                  "first thing to look at - this port drives it high where NoiseScope never did "
+                  "(tasks/phase-3/reports/02.md)")
+
+        port = self.ports.open(self._app_port("talk to the scanner").device, 115200)
+        try:
+            scanner = ScannerConsole(port, log=(lambda line: None),
+                                     disposable=self.config.disposable, now=self.ports.now,
+                                     sleep=self.ports.sleep)
+            rom = self._walk_9_console(scanner, info)
+        finally:
+            port.close()
+
+        for key in ("9.3", "9.6", "9.10", "9.11", "9.12"):
+            self.person(key)
+
+        # The page's own order puts the repeater back here; it is run last of all the steps
+        # because nothing after it would have a scanner to talk to (the task's own order too).
+        self._restore("9.5", "%s back on the board, and nothing of the node gone"
+                      % (before["role"] or "what was found"), before=before)
+        self.result.note("The `rom` this part reported was %r; the plugin's is %r."
+                         % (rom, PLUGIN_ROM))
+
+    def _walk_9_console(self, scanner, flashed_info):
+        info = flashed_info
+        if not info:
+            _ack, batch = scanner.send("info", timeout_s=3.0)
+            found = batch.of_type("info")
+            info = found[0] if found else {}
+        self.step("9.2", "`info` answers one line", ok=bool(info), sent=["info"],
+                  saw=frame_summary(info))
+
+        _ack, batch = scanner.send("stat", timeout_s=3.0)
+        stats = batch.of_type("stat")
+        self.step("9.2", "`stat` answers one immediately", ok=bool(stats), sent=["stat"],
+                  saw=frame_summary(stats[0] if stats else None))
+
+        began = self.ports.now()
+        ack, batch = scanner.send("sweep", timeout_s=3.0)
+        sweep = _already(batch, "sweep") or scanner.first("sweep", 30.0)
+        took = self.ports.now() - began
+        points = (sweep or {}).get("n")
+        self.step("9.2", "`sweep` is acked and answers a `sweep` line of 281 points",
+                  ok=bool(ack and ack.get("ok")) and points == 281, sent=["sweep"],
+                  saw="%s\n%s" % (frame_summary(ack), frame_summary(sweep)), expected="n 281",
+                  blanks={"section 9 sweep n": points, "section 9 sweep rbw": (sweep or {}).get("rbw"),
+                          "section 9 sweep time": "%.1f s" % took})
+
+        _ack, batch = scanner.send("hist 869.4 869.8 25", timeout_s=5.0)
+        hist = batch.of_type("hist") or [one for one in [scanner.first("hist", 10.0)] if one]
+        err = batch.of_type("err")
+        self.step("9.2", "`hist 869.4 869.8 25` answers lines, or an `err` (the RAM patch)",
+                  ok=bool(hist or err), sent=["hist 869.4 869.8 25"],
+                  saw=("%d `hist` line(s), the first %s" % (len(hist), frame_summary(hist[0])))
+                      if hist else frame_summary(err[0] if err else None),
+                  blanks={"section 9 hist": ("%d lines" % len(hist)) if hist else
+                                            ((err[0].get("msg") if err else "nothing"))})
+        scanner.send("stop", timeout_s=3.0)
+
+        _ack, batch = scanner.send("dwell 869.618 30", timeout_s=3.0)
+        dwell = _already(batch, "dwell") or scanner.first("dwell", 20.0)
+        self.step("9.2", "`dwell 869.618 30` answers a window", ok=bool(dwell),
+                  sent=["dwell 869.618 30"], saw=frame_summary(dwell),
+                  blanks={"section 9 dwell": frame_summary(dwell)})
+        scanner.send("stop", timeout_s=3.0)
+
+        _ack, batch = scanner.send("cad", timeout_s=5.0)
+        cad = _already(batch, "cad") or scanner.first("cad", 15.0)
+        self.step("9.2", "`cad` answers a detection ratio", ok=bool(cad), sent=["cad"],
+                  saw=frame_summary(cad),
+                  blanks={"section 9 cad": "det %s of %s"
+                                           % ((cad or {}).get("det"), (cad or {}).get("n"))})
+
+        scanner.send("sweep", timeout_s=3.0)
+        began = self.ports.now()
+        stopped, _batch = scanner.send("stop", timeout_s=5.0)
+        waited = self.ports.now() - began
+        self.step("9.2", "`stop` in the middle of a sweep is answered between steps",
+                  ok=bool(stopped and stopped.get("ok")) and waited < 3.0, sent=["sweep", "stop"],
+                  saw="%s after %.2f s" % (frame_summary(stopped), waited),
+                  expected="an ack in well under one pass (7 s)",
+                  blanks={"section 9 stop": "%.2f s" % waited})
+
+        batch, raw = scanner.collect_raw(self.collect_s)
+        bad = nan_lines(raw)
+        heartbeats = batch.of_type("stat")
+        self.step("9.4", "every line of %.0f s of output parses, and none carries `nan`"
+                         % self.collect_s,
+                  ok=batch.unparsed_count == 0 and not bad,
+                  saw="%d JSON line(s) (%s), %d that did not parse, %d with `nan`"
+                      % (len(batch.objects), _types(batch), batch.unparsed_count, len(bad)),
+                  blanks={"section 9 a minute's output":
+                          "%d JSON lines, %d not JSON, %d with `nan`"
+                          % (len(batch.objects), batch.unparsed_count, len(bad))},
+                  note=("what did not parse: %s" % self.safe(" | ".join(batch.unparsed[:3])))
+                       if batch.unparsed else None)
+        self.step("9.4", "the `stat` heartbeat kept coming, ten seconds apart",
+                  ok=len(heartbeats) >= max(1, int(self.collect_s // 10) - 1),
+                  saw="%d `stat` line(s) in %.0f s" % (len(heartbeats), self.collect_s),
+                  expected="one every 10 s",
+                  blanks={"section 9 heartbeats": "%d in %.0f s"
+                                                  % (len(heartbeats), self.collect_s)})
+
+        rom = info.get("rom")
+        self.step("9.7", "`info`'s `rom` is the part the plugin is made for", ok=rom == PLUGIN_ROM,
+                  sent=["info"], saw="rom %r" % rom, expected=PLUGIN_ROM,
+                  blanks={"section 9 rom": rom},
+                  note=None if rom == PLUGIN_ROM else
+                  "the fast sweep is not walkable on this part: `scope` refuses and nothing is "
+                  "uploaded. `sweep`, `hist`, `dwell` and `cad` are unaffected")
+        if rom != PLUGIN_ROM:
+            why = ("`info` says rom %r and the plugin is for %r: the first line of *The fast "
+                   "sweep* stops the rest of it" % (rom, PLUGIN_ROM))
+            self.skip("9.8", why)
+            self.skip("9.9", why)
+            return rom
+        self._walk_9_scope(scanner)
+        return rom
+
+    def _walk_9_scope(self, scanner):
+        ack, batch = scanner.send("scope 863 870", timeout_s=5.0)
+        fields = ack_fields((ack or {}).get("msg"))
+        frames = list(batch.of_type("scope"))
+        deadline = self.ports.now() + 10.0
+        while len(frames) < 3 and self.ports.now() < deadline:
+            frame = scanner.first("scope", 2.0)
+            if frame is None:
+                break
+            frames.append(frame)
+        rates = [frame.get("sps") for frame in frames if frame.get("sps") is not None]
+        fastest = max(rates) / 10.0 if rates else None
+        self.step("9.8", "`scope 863 870`: the ack says what was taken, and frames arrive",
+                  ok=bool(ack and ack.get("ok")) and bool(frames), sent=["scope 863 870"],
+                  saw="%s\n%d frame(s), %s"
+                      % (frame_summary(ack), len(frames),
+                         ("sps up to %.1f a second" % fastest) if fastest else "no `sps` yet"),
+                  blanks={"section 9 scope n": fields.get("n"),
+                          "section 9 scope rbw": fields.get("rbw"),
+                          "section 9 scope seg": fields.get("seg"),
+                          "section 9 scope cov": fields.get("cov"),
+                          "section 9 scope sps": ("%.1f" % fastest) if fastest else None},
+                  note="the plotter sends the same command and draws it; what is held here is the "
+                       "ack's own fields and that frames come at all "
+                       "(`waterfall_plot.py --port <port> --scope 863 870` is the picture)")
+        scanner.send("stop", timeout_s=3.0)
+
+        if self.config.rf != "dummy-load":
+            return self.skip("9.9", "the baseline is a capture of the radio's own spurs and of "
+                                    "the matching network: it needs the 50 ohm dummy load on the "
+                                    "antenna port, and bench.local.json says rf is %r"
+                                    % self.config.rf)
+        out_dir = os.path.join(self.repo, "out", "bench")
+        os.makedirs(out_dir, exist_ok=True)
+        stem = "baseline-150-960-%s-%s" % (_stamp(self.result.started), self.result.short_commit)
+        ndjson = os.path.join(out_dir, stem + ".ndjson")
+        ack, batch = scanner.send("scope 150 960 2048", timeout_s=8.0)
+        more, raw = scanner.collect_raw(self.baseline_s)
+        scanner.send("stop", timeout_s=3.0)
+        frames = batch.of_type("scope") + more.of_type("scope")
+        with open(ndjson, "w", encoding="utf-8") as fh:
+            for obj in batch.objects:
+                fh.write(json.dumps(obj, sort_keys=True) + "\n")
+            if raw:
+                fh.write(raw if raw.endswith("\n") else raw + "\n")
+        self.result.file(os.path.relpath(ndjson, self.repo),
+                         "the baseline's NDJSON, which `--baseline` subtracts from a later scope")
+        picture = os.path.join(out_dir, stem + ".png")
+        code, _output = self.runner.run(
+            [self.bench.python, os.path.join(self.repo, "tools", "noisescope", "waterfall_plot.py"),
+             "--file", ndjson, "--save", picture], timeout_s=300)
+        drawn = code == 0 and os.path.isfile(picture)
+        if drawn:
+            self.result.file(os.path.relpath(picture, self.repo),
+                             "the baseline's picture (`waterfall_plot.py --save`)")
+        return self.step("9.9", "the baseline: `scope 150 960 2048` on the dummy load, kept",
+                         ok=bool(ack and ack.get("ok")) and bool(frames),
+                         sent=["scope 150 960 2048"],
+                         saw="%s\n%d frame(s) in %.0f s -> %s"
+                             % (frame_summary(ack), len(frames), self.baseline_s,
+                                _rel(ndjson, self.repo)),
+                         blanks={"section 9 baseline": "%d frames, %s"
+                                                       % (len(frames), stem + ".ndjson"),
+                                 "section 9 peaks seen on the dummy load":
+                                 "the picture is the answer and a session cannot read a peak off "
+                                 "it"},
+                         note=("the picture is %s" % _rel(picture, self.repo)) if drawn else
+                              ("the picture was not drawn (waterfall_plot.py exited %d; it needs "
+                               "the matplotlib of tools/noisescope/requirements.txt). The NDJSON "
+                               "is kept, and `--file %s --save <png>` draws it later"
+                               % (code, _rel(ndjson, self.repo))))
+
+    # -- section 10 ----------------------------------------------------------
+
+    def walk_10(self):
+        if not self.config.disposable:
+            raise cfg.Refused("section 10 erases the file system, which takes the node's identity "
+                              "with it: it is walked only with \"identity\": \"disposable\" in "
+                              "bench.local.json, and this bench says %r" % self.config.identity)
+        run = load_run(self.home, self.config.serial)
+        if run is not None:
+            raise cfg.Refused("a run is open for this board (%s): `bench restore` it first. An "
+                              "erase would make the Repeater ID that run recorded one no restore "
+                              "could ever check again." % run.describe())
+        app = self._app_port("walk section 10 with")
+
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            fw = parse_fw_version_line(self.ask(repeater, "sensor get fw.version"))
+            if fw is None or fw["role"] != "repeater":
+                raise cfg.Refused("`sensor get fw.version` said nothing a repeater says: section "
+                                  "10 is the repeater's first boot, and this board is not running "
+                                  "one")
+            was = self._value(self.ask(repeater, "get public.key"))
+            erased = self.ask(repeater, "erase", timeout_s=10.0)
+            self.step("10.1", "`erase` wipes the file system", ok="OK" in erased, sent=["erase"],
+                      saw=erased, expected="File system erase: OK")
+        finally:
+            port.close()
+
+        banner = self._reboot_and_read(app)
+        rid = banner.get("repeater_id")
+        self.step("10.1", "the console prints `Repeater ID:` with a new key",
+                  ok=bool(rid) and rid != (was or "").upper(),
+                  saw="Repeater ID: %s" % (rid or "(not caught)"),
+                  expected="64 hex digits, and not the ones before the erase",
+                  blanks={"section 10 the new Repeater ID": rid})
+        first = banner.get("first_boot") or []
+        self.step("10.1", "both `First boot:` lines are printed", ok=len(first) == 2,
+                  saw="\n".join(first) or "(none)",
+                  expected="the random admin password, and the profile's 2 of 2 lines",
+                  blanks={"section 10 First boot": "%d line(s)" % len(first)})
+
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            self.check_line("10.1", repeater, "sensor get firstboot.state", "done",
+                            blank="section 10 firstboot.state")
+            if self.expect:
+                self.check_line("10.1", repeater, "get dutycycle", self.expect["dutycycle"],
+                                blank="section 10 get dutycycle",
+                                note="the band's, from [band_%s]; upstream's own default is 50.0%%"
+                                     % self.expect["band"])
+                self.check_line("10.1", repeater, "get radio", self.expect["radio"],
+                                blank="section 10 get radio")
+            self.check_line("10.1", repeater, "get path.hash.mode", "1",
+                            blank="section 10 path.hash.mode")
+            self.check_line("10.1", repeater, "get name", "repeater", blank="section 10 get name")
+            guest = self.ask(repeater, "get guest.password")
+            self.step("10.1", "`get guest.password` is empty", ok=self._value(guest) == "",
+                      sent=["get guest.password"], saw=guest or "(empty)", expected="(empty)",
+                      blanks={"section 10 guest.password":
+                              "empty" if self._value(guest) == "" else "not empty"})
+        finally:
+            port.close()
+
+        second = self._reboot_and_read(app)
+        self.step("10.2", "the second boot prints no `First boot:` line",
+                  ok=not second.get("first_boot"),
+                  saw="\n".join(second.get("first_boot") or []) or "(no `First boot:` line)",
+                  blanks={"section 10 the second boot's Repeater ID": second.get("repeater_id")})
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            self.check_line("10.2", repeater, "sensor get firstboot.state", "never",
+                            blank="section 10 firstboot.state, second boot")
+            self.check_line("10.2", repeater, "get path.hash.mode", "1")
+            if self.expect:
+                self.check_line("10.2", repeater, "get dutycycle", self.expect["dutycycle"])
+        finally:
+            port.close()
+
+        self.person("10.3")
+        self._provision(app)
+        self.person("10.5")
+        self._identity_afterwards(app, rid)
+
+    def _reboot_and_read(self, app):
+        """Upstream's own `reboot`, then the banner. It is the only reset this tool performs, and
+        the clock keeper's file is written on the way down (docs/bench.md section 3)."""
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.send("reboot", timeout_s=0.5)
+        finally:
+            port.close()
+        self.ports.sleep(self.timeouts.settle_s)
+        again = self.ports.wait_for(
+            lambda info: info.is_application and same_serial(info.serial_number, self.config.serial),
+            self.timeouts.application_port_s)
+        if again is None:
+            raise cfg.Refused("the board did not come back after `reboot`: section 10 cannot go on")
+        port, repeater = self._open_repeater(again)
+        try:
+            return repeater.read_banner(self.timeouts.banner_s)
+        finally:
+            port.close()
+
+    def password(self):
+        """A password nobody keeps: generated here, sent once, written down nowhere. The unit is a
+        bench unit (the task's own words), and this is the only copy there ever was."""
+        if self._password is None:
+            import secrets
+            self._password = secrets.token_urlsafe(18)
+        return self._password
+
+    # docs/provisioning.md section 3, with a bench unit's own values. The reply to expect, or
+    # None where upstream's wording is not quoted anywhere and only "not an error" is held.
+    PROVISION = (
+        ("set name bench-walk", "OK"),
+        ("set lat 55.3250", "OK"),
+        ("set lon 10.4900", "OK"),
+        ("set owner.info a bench unit|tools/bench walk", "OK"),
+        ("set guest.password hello", "OK"),
+        ("region default dk", None),
+        ("region save", "OK"),
+    )
+
+    def _provision(self, app):
+        """docs/provisioning.md section 3 at the console, or section 4 over the link when the
+        dongle is there - the task's "through `linkcli.py provision` (if the dongle is there) or
+        the console", and never both."""
+        dongle = (self.ports.find_serial(self.config.dongle_serial)
+                  if self.config.dongle_serial else None)
+        if dongle is not None:
+            self.skip("10.4", "the dongle is on this machine, so the same lines go over the link "
+                              "- the page's line below - and not twice")
+            return self._provision_over_the_link(dongle)
+        self.skip("10.6", "no dongle on this machine (bench.local.json's `dongle_serial`): the "
+                          "same lines went in at the USB port, above")
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            sent, saw, bad = [], [], []
+            for line, expected in self.PROVISION:
+                reply = self.ask(repeater, line)
+                sent.append(line)
+                saw.append("%s -> %s" % (_starred(line), self.safe(reply) or "(nothing)"))
+                if expected is None:
+                    if not reply or reply.strip().lower().startswith("err"):
+                        bad.append(line)
+                elif expected not in reply:
+                    bad.append(line)
+            accepted = self._set_the_password(repeater)
+            self.step("10.4", "docs/provisioning.md section 3, line for line, at the USB port",
+                      ok=not bad and accepted, sent=sent + ["password ****"], saw="\n".join(saw),
+                      blanks={"section 10 provisioned": "%d line(s) and the password, at the "
+                                                        "console" % len(self.PROVISION)},
+                      note=("these were not taken: %s" % ", ".join(bad)) if bad else
+                           "the admin password was generated here, sent once and written down "
+                           "nowhere: this is a bench unit (docs/provisioning.md section 5)")
+            for line, expected in (("get name", "bench-walk"), ("get lat", "55.3250"),
+                                   ("get owner.info", "a bench unit|tools/bench walk")):
+                self.check_line("10.4", repeater, line, expected, blank="section 10 %s" % line)
+            scope = self.ask(repeater, "region default")
+            self.step("10.4", "`region default` reads back", ok=bool(scope),
+                      sent=["region default"], saw=scope,
+                      blanks={"section 10 region default": scope})
+        finally:
+            port.close()
+
+    def _set_the_password(self, repeater):
+        """`password <generated>`: refused outright unless the bench is disposable (console.py),
+        and its reply redacted before it reaches anything at all (console.redact)."""
+        reply = self.ask(repeater, "password %s" % self.password())
+        return consolemod.PASSWORD_ECHO_SHOWN in (reply or "")
+
+    def _provision_over_the_link(self, dongle):
+        work = tempfile.mkdtemp(prefix="twinoak-bench-provision-")
+        try:
+            path = os.path.join(work, "unit.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# a bench unit, provisioned by `bench walk 10`\n")
+                for line, _expected in self.PROVISION:
+                    fh.write(line + "\n")
+                fh.write("password %s\n" % self.password())
+            code, output = self.runner.run(
+                [self.bench.python, os.path.join(self.repo, "tools", "linkcli.py"), "--port",
+                 dongle.device, "provision", path], timeout_s=120)
+            leaked = self.password() in (output or "")
+            return self.step("10.6", "the same lines through `linkcli.py provision`, the password "
+                                     "as stars",
+                             ok=code == 0 and not leaked and "****" in (output or ""),
+                             sent=["linkcli.py --port %s provision <a temporary file>"
+                                   % dongle.device],
+                             saw=self.safe(output),
+                             expected="every line taken, `password ****`, `accepted`",
+                             blanks={"section 10 provisioned": "%d line(s) and the password, over "
+                                                               "the link" % len(self.PROVISION)},
+                             note="the file was written to a temporary directory and removed with "
+                                  "it; the password was generated here and is written down "
+                                  "nowhere" if not leaked else
+                                  "THE PASSWORD APPEARED IN THE TOOL'S OUTPUT - a finding against "
+                                  "tools/linkcli.py, and the reason this walk looks")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _identity_afterwards(self, app, rid):
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            key = self._value(self.ask(repeater, "get public.key"))
+            name = self._value(self.ask(repeater, "get name"))
+        finally:
+            port.close()
+        self.step("10.7", "the node is the same node: `get public.key` is the `Repeater ID:` of "
+                          "the first boot, and the name is the one just set",
+                  ok=bool(key) and key.upper() == (rid or "").upper(),
+                  sent=["get public.key", "get name"], saw="%s, name %r" % (key, name),
+                  expected=rid, blanks={"section 10 public key": key, "section 10 name": name},
+                  note="MeshMaster needs this key and the admin password; the password this walk "
+                       "set is one nobody has, which is what a bench unit is "
+                       "(docs/provisioning.md section 5)")
+
+    # ---- the run, and the restore that closes it
+
+    def _open_a_run(self):
+        """What is on the board now, recorded before the first flash of this walk (runs.py)."""
+        run = load_run(self.home, self.config.serial)
+        if run is None:
+            run = record_board(self.config, self.ports, self.runner, self.say, self.home,
+                               found_image=self.image, timeouts=self.timeouts,
+                               python=self.bench.python, repo=self.repo)
+            self.result.note("This walk opened the run: %s" % run.describe())
+        else:
+            self.result.note("A run was already open for this board: %s" % run.describe())
+        return run
+
+    def _restore(self, key, what, before=None):
+        run = load_run(self.home, self.config.serial)
+        try:
+            path, how = choose_restore_image(run, self.config.board, self.repo)
+        except RestoreNotPossible as exc:
+            return self.step(key, what, ok=False, saw="RESTORE NOT POSSIBLE: %s" % exc)
+        image = self.bench.inspect(path)
+        code = self.bench.restore_locked(run, image, how)
+        said = self.bench.last_restore or {}
+        ok = code == cfg.EXIT_OK
+        checks = []
+        for field, label in (("repeater_id", "Repeater ID"), ("name", "name"),
+                             ("version", "fw.version")):
+            if (before or {}).get(field):
+                same = (said.get(field) or None) == before[field]
+                checks.append("%s %s" % (label, "matches" if same else
+                                         "is %r and was %r" % (said.get(field), before[field])))
+                ok = ok and same
+        return self.step(key, what, ok=ok, sent=["bench restore"],
+                         saw="%s%s" % (self.bench.last_restore_line or "(no last line)",
+                                       ("\n" + "; ".join(checks)) if checks else ""),
+                         blanks={"section %s the restore" % self.section.number:
+                                 self.bench.last_restore_line or "none"})
+
+
+def _stamp(started):
+    return started.replace("-", "").replace(":", "").replace("T", "-").rstrip("Z")
+
+
+def _rel(path, repo):
+    return os.path.relpath(path, repo).replace("\\", "/")
+
+
+# ----------------------------------------------------------------------------- the result file
+
+def result_markdown(result):
+    """The walk as the file under out/bench/: every step, every blank, and what a person owes."""
+    section = result.section
+    counts = result.counts()
+    lines = []
+    say = lines.append
+    say("# bench walk section %s - %s" % (section.number, section.title))
+    say("")
+    say("Walked **%s** at commit `%s` by `tools/bench/walk.py` (`bench walk %s`)."
+        % (result.started, result.commit or "unknown", section.number))
+    config = result.config
+    say("The bench: board `%s`, serial `%s`, rf `%s`, identity `%s`, dongle `%s`."
+        % (config.board, config.serial, config.rf, config.identity,
+           config.dongle_serial or "none"))
+    say("")
+    say("**%d ok, %d differs, %d need a person, %d skipped** over %d step(s) and the %d line(s) "
+        "of docs/bench.md section %s."
+        % (counts[OK], counts[DIFFERS], counts[PERSON], counts[SKIPPED], len(result.steps),
+           len(section.lines), section.number))
+    say("")
+    for note in result.notes:
+        say("- %s" % note)
+    if result.notes:
+        say("")
+    say("| the line | what was checked | status |")
+    say("|---|---|---|")
+    for step in result.steps:
+        say("| %s %s | %s | %s |" % (step.line.key, "/".join(step.line.tasks),
+                                     step.what.replace("|", "\\|"), step.status))
+    say("")
+    say("## The steps")
+    for line in section.lines:
+        mine = [step for step in result.steps if step.line is line]
+        if not mine:
+            continue
+        say("")
+        say("### %s - %s (`%s`)" % (line.key, line.about, "`, `".join(line.tasks)))
+        say("")
+        say("> %s" % line.anchor)
+        say("")
+        say("**%s.**" % result.line_status(line))
+        for step in mine:
+            say("")
+            say("- **%s** - %s" % (step.status, step.what))
+            for sent in step.sent:
+                say("  - sent: `%s`" % sent)
+            if step.saw:
+                say("  - saw:")
+                say("")
+                say("    ```")
+                for one in str(step.saw).splitlines():
+                    say("    %s" % one)
+                say("    ```")
+            if step.expected is not None:
+                say("  - expected: `%s`" % step.expected)
+            if step.note:
+                say("  - %s" % step.note)
+    blanks = [(key, value) for step in result.steps for key, value in sorted(step.blanks.items())]
+    say("")
+    say("## The blanks of docs/bench.md, filled in")
+    say("")
+    if blanks:
+        for key, value in blanks:
+            say("- **%s** -> %s"
+                % (key, "______ (not read here)" if value in (None, "") else value))
+    else:
+        say("- none: nothing this walk checked has a blank in it.")
+    person = result.of(PERSON)
+    say("")
+    say("## Still a person's")
+    say("")
+    if person:
+        for step in person:
+            say("- **%s (%s)** %s - %s" % (step.line.key, "/".join(step.line.tasks), step.what,
+                                           step.note or "a person's"))
+    else:
+        say("- nothing: every line of this section is a script's.")
+    differs = result.of(DIFFERS)
+    if differs:
+        say("")
+        say("## What differs - a follow-up for the task that wrote the line, never a fix here")
+        say("")
+        for step in differs:
+            say("- **%s (%s)** %s: saw %s, expected `%s`"
+                % (step.line.key, "/".join(step.line.tasks), step.what,
+                   ("`%s`" % str(step.saw).replace("\n", " / ")) if step.saw else "nothing",
+                   step.expected))
+    if result.files:
+        say("")
+        say("## What else this walk left on disk")
+        say("")
+        for path, what in result.files:
+            say("- `%s` - %s" % (path.replace("\\", "/"), what))
+    say("")
+    return "\n".join(lines)
+
+
+def result_path(result, out_dir):
+    return os.path.join(out_dir, "walk-%s-%s-%s.md" % (result.section.number,
+                                                       _stamp(result.started),
+                                                       result.short_commit))
+
+
+def write_result(result, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    path = result_path(result, out_dir)
+    text = result_markdown(result)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return path, text
+
+
+# ----------------------------------------------------------------------------- ticking the page
+
+def bullet_bounds(text, anchor):
+    """(start, end) of the `- [ ] ...` bullet of docs/bench.md that carries `anchor`, or None when
+    the anchor is not there or is not unique - a walk whose page has moved ticks nothing."""
+    where = text.find(anchor)
+    if where < 0 or text.find(anchor, where + 1) >= 0:
+        return None
+    start = text.rfind("\n- ", 0, where)
+    if start < 0:
+        return None
+    start += 1
+    end = len(text)
+    for probe in (text.find("\n- ", where), text.find("\n\n", where), text.find("\n#", where)):
+        if 0 <= probe < end:
+            end = probe
+    return start, end
+
+
+def tick_page(text, result):
+    """docs/bench.md with every line this walk confirmed ticked `[x] ... (bench, <date>,
+    <commit>)`. Returns (the page, the keys ticked, the keys it could not find)."""
+    ticked, missing = [], []
+    tag = " (bench, %s, %s)" % (result.date, result.short_commit)
+    for line in result.confirmed_lines():
+        bounds = bullet_bounds(text, line.anchor)
+        if bounds is None:
+            missing.append(line.key)
+            continue
+        start, end = bounds
+        bullet = text[start:end]
+        if not bullet.startswith("- [ ] "):
+            missing.append(line.key)
+            continue
+        body = "- [x] " + bullet[len("- [ ] "):]
+        if tag.strip() not in body:
+            body = body.rstrip() + tag
+        text = text[:start] + body + text[end:]
+        ticked.append(line.key)
+    return text, ticked, missing
+
+
+def followups_for(result, repo=REPO):
+    """{the path of a phase's FOLLOWUPS.md: the item(s) to add} for every line that differs. A
+    differs is a finding for the task that wrote the line and never a fix in the walking task."""
+    out = {}
+    for line in result.differing_lines():
+        steps = [step for step in result.steps if step.line is line and step.status == DIFFERS]
+        for task in line.tasks:
+            match = re.match(r"^p([0-9.]+)-(\d+)$", task)
+            if not match:
+                continue
+            path = os.path.join(repo, "tasks", "phase-%s" % match.group(1), "FOLLOWUPS.md")
+            item = ["- [ ] **[%s] `docs/bench.md` %s differs from the board** (a bench walk of %s "
+                    "at `%s`). %s" % (match.group(2), line.key, result.date, result.short_commit,
+                                      line.about)]
+            for step in steps:
+                item.append("  %s: saw `%s`, expected `%s`."
+                            % (step.what,
+                               str(step.saw).replace("\n", " / ") if step.saw else "nothing",
+                               step.expected))
+            item.append("  The walk's result file under `out/bench/` has the transcript.")
+            out.setdefault(path, []).append("\n".join(item))
+    return out
+
+
+def write_followups(result, repo=REPO):
+    """Each differing line, appended to the follow-ups of the task that wrote it."""
+    written = []
+    for path, items in sorted(followups_for(result, repo).items()):
+        if not os.path.isfile(path):
+            continue
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        block = "\n## From a bench walk of section %s (%s)\n\n%s\n" % (result.section.number,
+                                                                      result.date,
+                                                                      "\n".join(items))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n" + block)
+        written.append(path)
+    return written
+
+
+# ----------------------------------------------------------------------------- the command
+
+def run_walk(bench, args):
+    """`bench walk <section>`: one lock, one walk, one result file. Exit 1 when a step differs -
+    a board that did not do what the page says, which is this tool's exit 1."""
+    section = str(args.section)
+    if section not in SECTIONS:
+        raise cfg.Refused("there is no walk for section %s: docs/bench.md's walkable sections are "
+                          "%s (the rest need a radio, a phone, a scope probe or the roof)"
+                          % (section, ", ".join(WALKABLE)))
+    bench.require_board()
+    walker = Walker(bench, section, image=args.image, scanner_image=args.scanner_image,
+                    collect_s=args.collect, baseline_s=args.baseline,
+                    password=getattr(bench, "walk_password", None))
+    bench.say("walk section %s - %s" % (walker.section.number, walker.section.title))
+    with BoardLock(bench.config.serial, "walk %s" % section, probe=bench.probe, home=bench.home,
+                   log=bench.say):
+        result = walker.run()
+    path, _text = write_result(result, os.path.join(bench.repo, "out", "bench"))
+    counts = result.counts()
+    bench.say("walked section %s: %d ok, %d differs, %d need a person, %d skipped -> %s"
+              % (section, counts[OK], counts[DIFFERS], counts[PERSON], counts[SKIPPED],
+                 _rel(path, bench.repo)))
+    if args.tick:
+        page = os.path.join(bench.repo, "docs", "bench.md")
+        with open(page, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        new, ticked, missing = tick_page(text, result)
+        if new != text:
+            with open(page, "w", encoding="utf-8") as fh:
+                fh.write(new)
+        bench.say("ticked in docs/bench.md: %s" % (", ".join(ticked) or "nothing"))
+        if missing:
+            bench.say("not found in docs/bench.md, so not ticked: %s" % ", ".join(missing))
+        for written in write_followups(result, bench.repo):
+            bench.say("a differs was written into %s" % _rel(written, bench.repo))
+    else:
+        confirmed = [line.key for line in result.confirmed_lines()]
+        if confirmed:
+            bench.say("to tick %s in docs/bench.md: the same walk with --tick"
+                      % ", ".join(confirmed))
+    return cfg.EXIT_FAILED if counts[DIFFERS] else cfg.EXIT_OK

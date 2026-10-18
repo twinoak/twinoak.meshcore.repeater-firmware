@@ -98,7 +98,7 @@ def git_commit(repo=REPO):
 
 # ----------------------------------------------------------------------------- recording
 
-def _parse_linkcli(output):
+def parse_linkcli(output):
     """`role 1 (repeater)`, `fw_version X`, `pubkey <64 hex>`, `name ...` out of linkcli's output."""
     found = {}
     for raw in (output or "").splitlines():
@@ -135,7 +135,7 @@ def record_over_link(config, ports, runner, log, python=None, repo=REPO):
         if code != 0:
             log("linkcli %s on %s exited %d; the console it is" % (command, dongle.device, code))
             return None
-        found.update(_parse_linkcli(output))
+        found.update(parse_linkcli(output))
     if "role" not in found:
         return None
     found["how"] = "link (%s)" % dongle.device

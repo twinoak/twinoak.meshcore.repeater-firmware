@@ -6,9 +6,10 @@
 Two things, in this order, so that the release path is exercised on every commit without GitHub
 and without the release key:
 
-  1. tools/release/test_release.py - every test of the tooling - and tools/bench/test_bench.py,
-     the guards of the bench tool a session may touch a board with, against its fake serial
-     layer (no board here and none needed).
+  1. tools/release/test_release.py - every test of the tooling - and tools/bench's own,
+     test_bench.py and test_walk.py: the guards of the bench tool a session may touch a board
+     with, and every walk of docs/bench.md run end to end, both against its fake serial layer
+     (no board here and none needed).
   2. a dry run over the build this machine has just made: build_release.py writes out/release/,
      sign_manifest.py signs the manifest with the specification's public test key (which it would
      refuse to do for a release version), and spec/tools/manifestref.py verifies the signature.
@@ -38,11 +39,12 @@ import test_release  # noqa: E402
 # place a refusal must be proved on every commit is a step that runs without a board - this one.
 sys.path.insert(0, os.path.join(REPO, "tools", "bench"))
 import test_bench  # noqa: E402
+import test_walk  # noqa: E402  (phase 3.3's task 03: the walks of docs/bench.md)
 
 
 def run_tests():
     suite = unittest.TestSuite()
-    for module in (test_release, test_bench):
+    for module in (test_release, test_bench, test_walk):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
     result = unittest.TextTestRunner(verbosity=2, stream=sys.stdout).run(suite)
     return result.wasSuccessful(), result.testsRun

@@ -92,7 +92,9 @@ _REDACTED_STARTS = (PASSWORD_ECHO, "password ", "set guest.password ")
 def redact(text):
     """Every line that begins `password now:` replaced - and so is the console's echo of a
     `password ...` or `set guest.password ...` line, which is the same secret typed rather than
-    answered. The rest is untouched."""
+    answered. A line whose value is already four stars is left as it is, so that a transcript can
+    say which line was sent (walk.py writes `password ****`, as tools/linkcli.py does). The rest
+    is untouched."""
     if text is None:
         return None
     out = []
@@ -101,7 +103,8 @@ def redact(text):
         if body.startswith("->"):
             body = body[2:].strip()
         lowered = body.lower()
-        if any(lowered.startswith(start) for start in _REDACTED_STARTS):
+        starts = [start for start in _REDACTED_STARTS if lowered.startswith(start)]
+        if starts and body[len(starts[0]):].strip() != "****":
             out.append(PASSWORD_ECHO_SHOWN)
         else:
             out.append(line)
@@ -276,11 +279,22 @@ class ScannerConsole(object):
 
     def collect(self, seconds):
         """Everything the scanner says for `seconds`, parsed."""
+        batch, _raw = self.collect_raw(seconds)
+        return batch
+
+    def collect_raw(self, seconds):
+        """The same, with the lines as they arrived beside the parsed batch: a capture kept on
+        disk is the device's own bytes and not a re-serialisation of them (a `scope` baseline,
+        docs/bench.md section 9, is read back by tools/noisescope/waterfall_plot.py)."""
         batch = LineBatch()
+        raw = []
         deadline = self.now() + seconds
         while self.now() < deadline:
-            batch.take(self._read_lines(min(0.1, max(0.0, deadline - self.now()))))
-        return batch
+            text = self._read_lines(min(0.1, max(0.0, deadline - self.now())))
+            if text:
+                raw.append(text)
+            batch.take(text)
+        return batch, "".join(raw)
 
     def send(self, line, timeout_s=3.0):
         """One command, LF-terminated. Returns (ack or None, LineBatch of everything else seen)."""
