@@ -21,6 +21,38 @@ How to read a line:
   `[boards]` lines are about.
 - A line that needs a **second radio**, a **phone** or **ten minutes on the
   roof antenna** says so where it stands.
+- A line ticked **`[x] … (bench, <date>, <commit>)`** was walked by a session
+  through `tools/bench/` (§0a) and not by a person: the date and the commit are
+  the run's, and the result file under `out/bench/` has what it saw. A line a
+  person walked is ticked without that tag.
+
+## 0a. The bench a session may use
+
+`tools/bench/` is the one way a session touches a board (`tasks/RUNBOOK.md`
+§2). It needs **`bench.local.json`** at the repository root — git-ignored,
+because it carries this machine's USB serial numbers; `bench.example.json` is
+the shape — saying:
+
+| Key | What |
+|---|---|
+| `board` | `rak4630-single`: the board as `spec/FIRMWARE-MANIFEST.md` spells it; an image for another board is refused |
+| `serial` | the RAK's **USB serial number** — the nRF52840's FICR device id, 16 hex digits, which the application's port reports (the Adafruit core's `TinyUSB_Port_GetSerialNumber`) and the bootloader's port is expected to report too. The tool finds the board by it and by nothing else: it never picks "the only COM port" |
+| `rf` | what is on the antenna port: `dummy-load`, `antenna` or `nothing`. **A repeater image is flashed only on `dummy-load`**; the scanner, which never transmits, on any |
+| `identity` | `keep`, or `disposable` if this module's identity may be thrown away (§10 erases it). Only `disposable` lets the console send `erase` or a `password` line |
+| `dongle_serial` | optional: the 3.3 V USB-UART dongle on the link pins, so `record` can use `hello` and `identity` instead of the console |
+| `bootloader_serial` | optional: only if the bootloader's port turns out to report another serial number than the application's |
+
+With no file, or no port with that serial number, every command exits **3,
+*no bench***, and that is not a failure. What the commands are:
+`bench status`, `bench check <zip>` (the guards alone), `bench record`,
+`bench flash <zip>`, `bench console "<line>"` (and `--scanner`),
+`bench restore`. Before the first flash of a run the tool records what is on
+the board — role, version, `Repeater ID`, name — and `restore` puts that role
+back and checks the identity; a run that cannot be put back says so in its
+last line, in capitals. Every flash is logged with the image's descriptor and
+SHA-256 in `out/bench/flash.log` and under the user's local application data,
+where the lock per board also lives (one user at a time). SWD is never used by
+this tool: the `[boards]` SWD lines of this page stay a person's.
 
 ## 0. Before the rig
 
@@ -99,6 +131,32 @@ How to read a line:
   after upstream's `begin()`; the BME280, if fitted, is found by itself
   (`sensor list` does not show it - upstream lists no setting for it - but a
   telemetry request from a phone carries temperature, humidity and pressure).
+- [ ] **p3.3-02** **The board's two USB serial numbers are one.** With the
+  repeater running, `python -m serial.tools.list_ports -v` shows the RAK as
+  `239A:8029` with a 16-hex-digit serial number (→ ______________); after a
+  double-tap reset the bootloader's port shows `239A:0029` with — this is the
+  line — **the same** serial number. If it differs, that number goes in
+  `bench.local.json` as `bootloader_serial`, and the report of p3.3-02 says why
+  it could not be read off a file (the bootloader's source is not on disk).
+  Then a power cycle, and the repeater is back.
+- [ ] **p3.3-02** **The round trip through `tools/bench/`, with the dummy load
+  on the antenna port** and `bench.local.json` filled in (§0a):
+  `python tools/bench/bench.py status` finds the board; `bench flash
+  out/build/repeater_rak4630_single/firmware.zip` records what was there
+  (`Repeater ID` → ______, caught from the banner or after one `reboot`),
+  touches at 1200 baud, waits for the bootloader's port, runs
+  adafruit-nrfutil (`Device programmed.`), and reads `sensor get fw.version`
+  back as the descriptor's version; `bench console "ver"` answers upstream's
+  version line; `bench restore` ends in a line beginning `restored:` that
+  names the image it used and says the `Repeater ID` matches. Time from touch
+  to application back → ______ s (the tool allows 15 s for the bootloader and
+  40 s for the application; a board slower than that is a finding).
+- [ ] **p3.3-02** **What it refuses on a real board.** With the RF port set to
+  `antenna` in `bench.local.json`: `bench flash` of the repeater image is
+  refused before any port is opened (exit 2) and so is a scanner image while
+  the board carries a repeater (it could not be put back); `bench console
+  "password x"` is refused with `identity: keep`. Nothing on the board changes
+  — `ver` and `get name` read as before.
 
 ## 2. The link from a laptop
 

@@ -1,0 +1,9 @@
+{
+  "_about": "The rig on this machine, for tools/bench (tasks/RUNBOOK.md section 2). Copy to bench.local.json - git-ignored - and fill in the RAK's USB serial number: Device Manager > the port > Details > Parent (the 16 hex digits after the last backslash), or `python -m serial.tools.list_ports -v`. tools/bench/config.py says what every field means.",
+  "board": "rak4630-single",
+  "serial": "E6614C311B5C2E35",
+  "rf": "dummy-load",
+  "identity": "keep",
+  "dongle_serial": null,
+  "bootloader_serial": null
+}
