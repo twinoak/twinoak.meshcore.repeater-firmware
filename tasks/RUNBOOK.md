@@ -133,7 +133,14 @@ PR description and what the reviewer reads:
 
 1. `git push -u origin task/pP-NN-<name>`
 2. `gh pr create --title "pP-NN: <name>" --body-file tasks/phase-P/reports/NN.md`
-3. `gh pr checks --watch --fail-fast`.
+3. `gh pr checks --watch --fail-fast`, **in the foreground, in calls of at most
+   nine minutes**: a CI run takes ten to fifteen minutes here, and one tool call
+   may not take more than ten, so `timeout 540 gh pr checks --watch --fail-fast`
+   and, when it times out, the same again - until it answers. Never in the
+   background, never with a monitor, never by ending the turn to be told: a
+   headless session is woken by nothing, and p3-06's first session ended that
+   way with its pull request open and unmerged (the driver now continues such a
+   session once or twice, but a nudge is a second session's cost).
 4. Green: `gh pr merge --merge --delete-branch`, then
    `git checkout main && git pull --ff-only`.
 

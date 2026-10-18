@@ -53,6 +53,7 @@ param(
     [string]$Model = '',
     [int]$RetryWaitMinutes = 65,   # after a session died on a usage or rate limit: wait, then run the same task again
     [int]$MaxRetries = 8,          # ... this many times (8 x 65 min covers a five-hour window with room), then stop
+    [int]$MaxNudges = 2,           # a session that ended without landing, and not on a limit, is continued this many times before the run stops
     [string]$Trunk = 'main',       # the branch tasks branch from and merge to
     [switch]$SkipPreflight
 )
@@ -196,11 +197,15 @@ foreach ($t in $tasks) {
         if ($header -match '\*\*Model:\*\*\s*([A-Za-z0-9.\-]+)') { $taskModel = $Matches[1] }
     }
 
-    $prompt = "Run task $n ($($t.Name)) of phase ${Phase}: follow tasks/RUNBOOK.md exactly, for this task only."
+    # A headless session that ends its turn to wait for anything is over - nothing wakes it, the
+    # branch stays where it is and the pile stops (meshmaster.dk's tasks 20, 110 and 117; this
+    # repository's p3-06). The prompt says so, and the nudge below continues a session that did it anyway.
+    $prompt = "Run task $n ($($t.Name)) of phase ${Phase}: follow tasks/RUNBOOK.md exactly, for this task only. Never end your turn to wait for a run, a build or a notification: nothing wakes a headless session - block on it inside the turn, in foreground calls of at most nine minutes."
     $claudeArgs = @('-p', $prompt, '--dangerously-skip-permissions')
     if ($taskModel) { $claudeArgs += @('--model', $taskModel) }
     $stopped = Join-Path $logs "STOPPED-$n.md"
     Remove-Item $stopped -ErrorAction SilentlyContinue
+    $nudges = 0
 
     for ($attempt = 1; $attempt -le (1 + $MaxRetries); $attempt++) {
         $sessionLog = Join-Path $logs "$n.log"
@@ -223,9 +228,40 @@ foreach ($t in $tasks) {
         $tail = ''
         if (Test-Path $sessionLog) { $tail = (Get-Content $sessionLog -Raw -ErrorAction SilentlyContinue) -replace '\s+', ' ' }
         if ($tail.Length -gt 4000) { $tail = $tail.Substring($tail.Length - 4000) }
-        $limited = $tail -match 'usage limit|rate limit|limit will reset|limit reached|overloaded|out of (usage )?(tokens|credits)|529'
+        # Claude Code itself not logged in (an expired OAuth session, a revoked key): the session
+        # dies in seconds before a turn, and neither a nudge nor a wait will change that.
+        if ($sw.Elapsed.TotalMinutes -lt 2 -and $tail -match 'Failed to authenticate|OAuth session expired|Invalid API key|Please run /login') {
+            Stop-Run "Claude Code is not logged in on this machine (see $sessionLog). Run claude, then /login (or claude setup-token for a long-lived token), and resume with -Phase $Phase -From $n."
+        }
+        $limited = $tail -match '(usage|session|rate) limit|limit will reset|limit reached|resets \d|overloaded|out of (usage )?(tokens|credits)|529'
         if (-not $limited) {
-            Stop-Run "task $n did not land on origin/$Trunk (no report). See $sessionLog. Resume with -Phase $Phase -From $n once fixed."
+            # A session that ends its turn to wait - for CI, for a background job, for a monitor -
+            # is over, because nothing wakes a headless session. Its conversation is still on disk,
+            # so the driver continues it (`claude -c -p`, the most recent conversation in this
+            # directory) and tells it so, before it stops the run. The branch and the pull request
+            # are where the session left them; RUNBOOK section 1 picks them up.
+            $landed = $false
+            while (-not $landed -and $nudges -lt $MaxNudges) {
+                $nudges++
+                $nudgeLog = Join-Path $logs "$n.nudge$nudges.log"
+                Log "task $n ended without landing; continuing the same session (nudge $nudges of $MaxNudges)"
+                $nudge = "The driver continued this session: your turn ended before task $n landed (there is no tasks/phase-$Phase/reports/$n.md on origin/$Trunk). Nothing you started in the background will wake you, and no monitor will. Check the state now - your branch, its pull request and its CI run - and block on anything still running inside this turn, one foreground call of at most nine minutes at a time, repeated until it is done. Then finish RUNBOOK section 4: the merge, then $Trunk pulled. If something stops you, write tasks/phase-$Phase/logs/STOPPED-$n.md as section 5 says."
+                $nudgeArgs = @('-c', '-p', $nudge, '--dangerously-skip-permissions')
+                if ($taskModel) { $nudgeArgs += @('--model', $taskModel) }
+                $sw = [Diagnostics.Stopwatch]::StartNew()
+                & claude @nudgeArgs 2>&1 | ForEach-Object {
+                    if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+                } | Tee-Object -FilePath $nudgeLog
+                Log ("task $n nudge $nudges ended (exit $LASTEXITCODE) after {0} min" -f [int]$sw.Elapsed.TotalMinutes)
+                [void](Quiet { git checkout $Trunk })
+                [void](Quiet { git pull --ff-only })
+                $landed = Report-Landed $n
+                if (-not $landed -and (Test-Path $stopped)) {
+                    Stop-Run "task $n stopped on purpose: the session wrote $stopped. Resume with -Phase $Phase -From $n once fixed."
+                }
+            }
+            if ($landed) { Remove-Merged-Branch $n $t.Name; break }
+            Stop-Run "task $n did not land on origin/$Trunk (no report), also after $nudges nudge(s). See $sessionLog. Resume with -Phase $Phase -From $n once fixed."
         }
         if ($attempt -gt $MaxRetries) {
             Stop-Run "task $n hit a usage or rate limit $MaxRetries times in a row (last: $sessionLog). Resume with -Phase $Phase -From $n when the limit has reset; the branch keeps the work done so far."

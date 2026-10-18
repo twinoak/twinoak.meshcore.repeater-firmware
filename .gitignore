@@ -27,3 +27,6 @@ cmake-build-*/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# the bench rig of this machine (tools/bench, task p3.3-02): serial numbers, never committed
+bench.local.json
