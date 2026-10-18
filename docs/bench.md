@@ -46,13 +46,35 @@ With no file, or no port with that serial number, every command exits **3,
 *no bench***, and that is not a failure. What the commands are:
 `bench status`, `bench check <zip>` (the guards alone), `bench record`,
 `bench flash <zip>`, `bench console "<line>"` (and `--scanner`),
-`bench restore`. Before the first flash of a run the tool records what is on
+`bench restore`, and `bench walk <section>` (§0b). Before the first flash of a run the tool records what is on
 the board — role, version, `Repeater ID`, name — and `restore` puts that role
 back and checks the identity; a run that cannot be put back says so in its
 last line, in capitals. Every flash is logged with the image's descriptor and
 SHA-256 in `out/bench/flash.log` and under the user's local application data,
 where the lock per board also lives (one user at a time). SWD is never used by
 this tool: the `[boards]` SWD lines of this page stay a person's.
+
+## 0b. What a session walks, and what stays yours
+
+`python tools/bench/bench.py walk <section>` (§0a, task `p3.3-03`) runs the
+lines of four sections of this page as steps, in the page's order: it prints the
+line, what it sent, what it saw and *ok*, *differs* or *needs a person*, and
+leaves a result file under `out/bench/` with every `→ ______` of the lines it
+walked filled in. `--tick` then ticks what came back *ok* here and writes what
+came back *differs* into the follow-ups of the task that wrote the line. The
+rest of this page is a person's, and so are the lines in the right-hand column:
+
+| | `bench walk` runs | Yours |
+|---|---|---|
+| §1 | the console on a repeater: the banner's `Repeater ID`, `ver`, `board`, `get radio`, both `sensor list` pages with the cut digit, `sensor get fw.version`, `sensor set fw.version x` refused, and `get dutycycle` | the adverts and the repeating, a phone's login, `INFO.VARIANT`, the scope on SCL, the two USB serial numbers (a double-tap), and the refusals with `rf: antenna` in the config |
+| §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the three agreeing | the Walter's half, which is another repository's |
+| §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline — and the repeater back with its identity | `pwr` against the boards, the watchdog, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
+| §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
+| §0, §2–§7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
+
+A walk needs the board (§0a): with no `bench.local.json`, or no port with its
+serial number, it exits 3 and the task that would have walked it says *Not
+verified here*, as before the tool existed.
 
 ## 0. Before the rig
 

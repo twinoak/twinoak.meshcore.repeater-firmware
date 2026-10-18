@@ -1,0 +1,724 @@
+#!/usr/bin/env python3
+"""Every walk of docs/bench.md, run end to end with no board at all.
+
+    python tools/bench/test_walk.py
+
+tools/verify.ps1's release step runs these beside tools/bench/test_bench.py (selfcheck.py), so
+CI - which has no board and needs none - proves on every commit that each walk runs through to
+its result file, that what it says about docs/bench.md is true of the page as committed, and that
+no password reaches a transcript, a file or the follow-ups.
+
+The board is tools/bench/fakes.py: a fake serial layer that records every open, a fake repeater
+console with upstream's two `sensor list` pages and a first boot after an `erase`, a fake scanner
+that answers the page's own lines, and a runner that runs nothing. The repository the walks read
+is a temporary one with the real platformio.ini and the real docs/bench.md copied in, so the
+band's numbers and the page's bullets are the committed ones and not a copy of them here.
+
+What is held:
+  * the page: every line of every walk is a bullet that is in docs/bench.md, exactly once, and
+    every bullet of a walked section is a step of its walk - a page that moves fails here;
+  * section 1: the console's eight lines, the blanks filled, and the five lines that are a
+    person's said to be;
+  * section 8: the descriptor, the flash, `hello` over the link (and skipped without a dongle),
+    and the restore that closes the run;
+  * section 9: the round trip - the `boot` line, `sweep` at 281 points, `hist`, `dwell`, `cad`,
+    `stop` mid-sweep, a minute of output with its heartbeats, the `rom` gate, `scope`, the
+    dummy-load baseline on disk - and the repeater back with its identity;
+  * section 10: refused unless the identity is disposable and refused while a run is open; then
+    the erase, both `First boot:` lines, `done` and `never`, the provisioning at the console and
+    over the link, and the password nowhere;
+  * a board that answers differently: exit 1, a *differs* in the result file, and an item for the
+    follow-ups of the task that wrote the line - never a fix;
+  * `--tick`: the bullets that came back ok ticked `(bench, <date>, <commit>)` in the page, twice
+    without harm, and nothing else touched.
+"""
+
+import io
+import json
+import os
+import re
+import shutil
+import sys
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+for _p in (HERE, os.path.join(REPO, "spec", "tools"), os.path.join(REPO, "tools", "release")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import bench as benchcli  # noqa: E402
+import config as cfg  # noqa: E402
+import walk  # noqa: E402
+from fakes import (FakePorts, FakeRepeaterFirmware, FakeRunner, FakeScannerFirmware)  # noqa: E402
+from lock import BoardLock  # noqa: E402
+from ports import PortInfo  # noqa: E402
+from runs import RunRecord, load_run, save_run  # noqa: E402
+from test_bench import BenchCase, REPEATER_ID, SERIAL, firmware_for  # noqa: E402
+
+COMMIT = "0123456789abcdef0123456789abcdef01234567"
+PASSWORD = "a-password-nobody-keeps"
+DONGLE = "A50285BI"
+
+HELLO = """protocol 1.0
+role 1 (repeater)
+slot 0
+max_payload 240
+caps 0x61
+boot_id 7
+fw_version 0.0.0-dev
+board rak4630-single
+upstream repeater-v1.17.1+d9296435
+"""
+
+PROVISIONED = """provision unit.txt: 8 line(s)
+  2:   set name bench-walk
+       -> OK
+  8:   region default dk
+       ->  default scope is now dk
+  11:  password ****
+       -> accepted (the reply to a password line is not printed)
+every line was taken
+"""
+
+
+class WalkCase(BenchCase):
+    """A temporary repository with the real platformio.ini and docs/bench.md in it, so that a
+    walk reads the band's numbers and the page's bullets as they are committed."""
+
+    def setUp(self):
+        super().setUp()
+        shutil.copy(os.path.join(REPO, "platformio.ini"), os.path.join(self.repo, "platformio.ini"))
+        os.makedirs(os.path.join(self.repo, "docs"), exist_ok=True)
+        shutil.copy(os.path.join(REPO, "docs", "bench.md"),
+                    os.path.join(self.repo, "docs", "bench.md"))
+        self.config()
+        self.repeater_zip = self.package()
+        self.scanner_zip = self.package(role="scanner", where="scanner_rak4630_single")
+
+    # ---- the rig
+
+    def fakes(self, board=None, others=None, **kw):
+        board = board or self.board()
+        ports = FakePorts(boards=[board], clock=self.clock, others=others)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for, **kw)
+        return board, ports, runner
+
+    def walk(self, argv, ports=None, runner=None, probe=None, region=None, commit=COMMIT):
+        bench = self.bench(ports=ports, runner=runner, probe=probe, region=region)
+        bench.commit = commit
+        code = benchcli.main(argv, bench=bench)
+        return code, self.out.getvalue()
+
+    def result_file(self):
+        out_dir = os.path.join(self.repo, "out", "bench")
+        found = sorted(name for name in os.listdir(out_dir) if name.startswith("walk-"))
+        self.assertEqual(len(found), 1, found)
+        with open(os.path.join(out_dir, found[0]), "r", encoding="utf-8") as fh:
+            return found[0], fh.read()
+
+    def page(self):
+        with open(os.path.join(self.repo, "docs", "bench.md"), "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    def phase_followups(self, phase, text="# Phase %s\n\nNothing yet.\n"):
+        path = os.path.join(self.repo, "tasks", "phase-%s" % phase, "FOLLOWUPS.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text % phase if "%s" in text else text)
+        return path
+
+    # ---- what every walk must look like afterwards
+
+    def assertEveryLineHasAStep(self, section, text):
+        for line in walk.SECTIONS[section].lines:
+            self.assertIn("### %s " % line.key, text,
+                          "docs/bench.md section %s line %s is in no step of the result file"
+                          % (section, line.key))
+
+    def assertNoPassword(self, text):
+        self.assertNotIn(PASSWORD, text)
+        self.assertNotIn("not-a-password", text)
+        self.assertFalse(re.search(r"(?i)password now:\s*\S", text.replace(
+            walk.consolemod.PASSWORD_ECHO_SHOWN, "")), text[:2000])
+
+
+# ----------------------------------------------------------------------------- the page itself
+
+class ThePage(unittest.TestCase):
+    """What the walks say about docs/bench.md, held against the page as committed."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, "docs", "bench.md"), "r", encoding="utf-8") as fh:
+            cls.text = fh.read()
+
+    def test_the_walkable_sections_are_the_tasks_four(self):
+        self.assertEqual(walk.WALKABLE, ("1", "8", "9", "10"))
+
+    def test_every_anchor_is_a_bullet_of_the_page_exactly_once(self):
+        for number in walk.WALKABLE:
+            for line in walk.SECTIONS[number].lines:
+                hits = self.text.count(line.anchor)
+                self.assertEqual(hits, 1, "section %s line %s: %d hits for %r"
+                                 % (number, line.key, hits, line.anchor))
+                bounds = walk.bullet_bounds(self.text, line.anchor)
+                self.assertIsNotNone(bounds, line.key)
+                bullet = self.text[bounds[0]:bounds[1]]
+                self.assertTrue(bullet.startswith("- [ ] ") or bullet.startswith("- [x] "),
+                                "%s is not a tickable bullet: %r" % (line.key, bullet[:40]))
+                head = bullet.split("\n")[0]
+                for task in line.tasks:
+                    self.assertIn(task, head,
+                                  "%s: the bullet does not name %s" % (line.key, task))
+
+    def test_every_bullet_of_a_walked_section_is_a_line_of_its_walk(self):
+        """The other way round: a bullet added to §1, §8, §9 or §10 and not to a walk fails."""
+        body = self.text
+        sections = dict()
+        for match in re.finditer(r"(?m)^## (\d+(?:\.\d+)?)\. ", body):
+            number = match.group(1)
+            end = body.find("\n## ", match.end())
+            sections[number] = body[match.start():end if end > 0 else len(body)]
+        for number in walk.WALKABLE:
+            self.assertIn(number, sections, "docs/bench.md has no section %s" % number)
+            bullets = re.findall(r"(?m)^- \[[ x]\] (.*)$", sections[number])
+            anchors = [line.anchor for line in walk.SECTIONS[number].lines]
+            self.assertEqual(len(bullets), len(anchors),
+                             "section %s has %d bullets and the walk has %d lines"
+                             % (number, len(bullets), len(anchors)))
+
+    def test_a_page_whose_bullet_moved_ticks_nothing_rather_than_the_wrong_thing(self):
+        result = walk.WalkResult(walk.SECTIONS["1"], None, COMMIT, "2026-10-18T00:00:00Z")
+        line = walk.SECTIONS["1"].line("1.1")
+        result.add(walk.Step(line, "a step", walk.OK))
+        text, ticked, missing = walk.tick_page("# a page with no such line\n", result)
+        self.assertEqual((ticked, missing), ([], ["1.1"]))
+        self.assertEqual(text, "# a page with no such line\n")
+
+    def test_the_head_table_says_which_sections_a_walk_covers(self):
+        head = self.text.split("## 0.")[0]
+        self.assertIn("bench walk", head)
+        for number in walk.WALKABLE:
+            self.assertIn("§%s" % number, head)
+
+
+# ----------------------------------------------------------------------------- no bench, no walk
+
+class NoBench(WalkCase):
+    def test_no_board_is_exit_three_and_nothing_opened(self):
+        for section in walk.WALKABLE:
+            self.out = io.StringIO()
+            code, out = self.walk(["walk", section])
+            self.assertEqual(code, cfg.EXIT_NO_BENCH, out)
+            self.assertIn("no bench", out)
+            self.assertNothingOpened()
+
+    def test_no_config_is_exit_three(self):
+        os.remove(os.path.join(self.repo, cfg.BENCH_FILE))
+        code, out = self.walk(["walk", "1"])
+        self.assertEqual(code, cfg.EXIT_NO_BENCH)
+        self.assertNothingOpened()
+
+    def test_a_section_with_no_walk_is_refused(self):
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "5"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED)
+        self.assertIn("there is no walk for section 5", out)
+        self.assertEqual(self.ports.opened, [])
+
+    def test_a_board_held_by_another_process_is_exit_four(self):
+        _board, ports, runner = self.fakes()
+        from fakes import FakeProbe
+        probe = FakeProbe({os.getpid(): 1.0, 4242: 500.0})
+        BoardLock(SERIAL, "a person's terminal", probe=probe, home=self.home).acquire()
+        with open(os.path.join(self.home, "locks", "%s.lock" % SERIAL), "w") as fh:
+            json.dump({"pid": 4242, "process_started": 500.0, "command": "console",
+                       "taken": "now", "host": "elsewhere"}, fh)
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner, probe=probe)
+        self.assertEqual(code, cfg.EXIT_LOCKED, out)
+        self.assertIn("one user at a time", out)
+
+
+# ----------------------------------------------------------------------------- section 1
+
+class SectionOne(WalkCase):
+    def test_the_console_lines_of_section_one(self):
+        board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        name, text = self.result_file()
+        self.assertTrue(name.startswith("walk-1-"), name)
+        self.assertIn("0123456", name)                       # the commit is in the file's name
+        self.assertEveryLineHasAStep("1", text)
+        # the eight lines the task names, each one ok
+        for sent in ("ver", "board", "get radio", "sensor list", "sensor list 5",
+                     "sensor get fw.version", "sensor set fw.version x", "get dutycycle"):
+            self.assertIn("sent: `%s`" % sent, text)
+        self.assertIn("Repeater ID: %s" % REPEATER_ID, text)
+        self.assertNotIn("| differs |", text)
+        # the blanks, filled in from the board and from platformio.ini
+        self.assertIn("**section 1 get radio** -> 869.618,62.5,8,8", text)
+        self.assertIn("**section 1 get dutycycle** -> 10.0%", text)
+        self.assertIn("**section 1 board** -> RAK 4631", text)
+        self.assertIn("**section 1 application serial number** -> %s" % SERIAL, text)
+        # upstream's own `reboot` was the only reset, and it was for the banner
+        self.assertEqual(board.firmware.rebooted, 1)
+        self.assertEqual(board.flashes, [])
+        self.assertIsNone(load_run(self.home, SERIAL))        # section 1 opens no run
+        self.assertNoPassword(text)
+        self.assertNoPassword(out)
+
+    def test_the_sensor_list_paging_is_what_the_page_says(self):
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertIn("characters, keys fw.version,walter.wake,link.errors,walter.seen,"
+                      "clock.state, `... next:` with the digit cut", text)
+        self.assertIn("**section 1 sensor list 5** -> power.low_mv,power.crit_mv,obs.wake,"
+                      "client.refused,firstboot.state", text)
+
+    def test_the_five_lines_that_need_a_person_say_what_they_need(self):
+        _board, ports, runner = self.fakes()
+        self.walk(["walk", "1"], ports=ports, runner=runner)
+        _name, text = self.result_file()
+        still = text.split("## Still a person's")[1]
+        for owed in ("roof antenna", "phone on the mesh", "INFO_UF2.TXT", "scope probe",
+                     "double-tap reset"):
+            self.assertIn(owed, still)
+        self.assertIn("`bench console \"password x\"` was refused here with nothing opened", text)
+
+    def test_a_board_that_answers_differently_is_exit_one_and_a_follow_up(self):
+        firmware = FakeRepeaterFirmware(REPEATER_ID, answers={"get radio": "> 868.000,250.0,7,5"})
+        board, ports, runner = self.fakes(self.board(firmware))
+        self.phase_followups("1")
+        code, out = self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("## What differs", text)
+        self.assertIn("868.000,250.0,7,5", text)
+        # the line is p1-01's, so the item goes to phase 1's follow-ups and the bullet is not ticked
+        with open(os.path.join(self.repo, "tasks", "phase-1", "FOLLOWUPS.md")) as fh:
+            followups = fh.read()
+        self.assertIn("**[01] `docs/bench.md` 1.1 differs from the board**", followups)
+        self.assertIn("a bench walk of", followups)
+        bounds = walk.bullet_bounds(self.page(), walk.SECTIONS["1"].line("1.1").anchor)
+        self.assertTrue(self.page()[bounds[0]:].startswith("- [ ] "))
+
+    def test_a_board_in_its_bootloader_is_refused_with_the_reason(self):
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("is in its bootloader", out)
+
+
+# ----------------------------------------------------------------------------- section 8
+
+class SectionEight(WalkCase):
+    def test_the_descriptor_the_flash_and_the_restore(self):
+        board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "8"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertEveryLineHasAStep("8", text)
+        self.assertIn("**section 8 role** -> repeater", text)
+        self.assertIn("**section 8 board** -> rak4630-single", text)
+        self.assertIn("**section 8 band** -> 868", text)
+        self.assertIn("**section 8 version** -> 0.0.0-dev", text)
+        self.assertRegex(text, r"\*\*section 8 offset\*\* -> 0x[0-9A-F]+")
+        self.assertIn("the board says repeater 0.0.0-dev", text)
+        # the image went on, and the run the walk opened was closed by the restore
+        self.assertEqual(board.flashes, [self.repeater_zip, self.repeater_zip])
+        self.assertIn("restored: repeater back on the board", text)
+        self.assertIsNone(load_run(self.home, SERIAL))
+        self.assertNotIn("| differs |", text)
+
+    def test_hello_is_skipped_without_a_dongle_and_walked_with_one(self):
+        _board, ports, runner = self.fakes()
+        self.walk(["walk", "8"], ports=ports, runner=runner)
+        _name, text = self.result_file()
+        self.assertIn("no `dongle_serial` in bench.local.json", text)
+
+        self.setUp()
+        self.config(dongle=DONGLE)
+        dongle = PortInfo("COM9", DONGLE, 0x0403, 0x6001, "FT232")
+        _board, ports, runner = self.fakes(others=[dongle], linkcli_output=HELLO)
+        code, out = self.walk(["walk", "8"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertIn("**section 8 hello** -> role repeater, board rak4630-single, "
+                      "fw_version 0.0.0-dev, slot 0", text)
+
+    def test_an_image_that_is_not_ours_is_refused_before_any_port(self):
+        _board, ports, runner = self.fakes()
+        uf2 = os.path.join(self.repo, "out", "build", "repeater_rak4630_single", "firmware.uf2")
+        with open(uf2, "wb") as fh:
+            fh.write(b"UF2\n")
+        code, out = self.walk(["walk", "8", "--image", uf2], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("is a UF2 image", out)
+        self.assertEqual(self.ports.opened, [])
+
+    def test_no_image_at_all_is_refused_with_what_builds_one(self):
+        os.remove(self.repeater_zip)
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "8"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("tools/verify.ps1 builds it", out)
+
+
+# ----------------------------------------------------------------------------- section 9
+
+class SectionNine(WalkCase):
+    def walk_nine(self, firmware=None, **kw):
+        board = self.board(firmware or FakeRepeaterFirmware(REPEATER_ID))
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for, **kw)
+        code, out = self.walk(["walk", "9", "--collect", "60", "--baseline", "20"],
+                              ports=ports, runner=runner)
+        return board, code, out
+
+    def test_the_round_trip(self):
+        board, code, out = self.walk_nine()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertEveryLineHasAStep("9", text)
+        # the scanner went on and the repeater came back, in that order
+        self.assertEqual(board.flashes, [self.scanner_zip, self.repeater_zip])
+        self.assertNotIn("| differs |", text)
+        # the boot line, the blanks, and radio_ok
+        self.assertIn("**section 9 radio_ok** -> True", text)
+        self.assertIn("**section 9 reset** -> soft", text)
+        # the scans
+        self.assertIn("**section 9 sweep n** -> 281", text)
+        self.assertIn("**section 9 hist** -> 2 lines", text)
+        self.assertRegex(text, r"\*\*section 9 cad\*\* -> det 17 of 100")
+        self.assertRegex(text, r"\*\*section 9 stop\*\* -> 0\.\d+ s")
+        # a minute of output: every line JSON, no nan, and the heartbeats
+        self.assertIn("0 not JSON, 0 with `nan`", text)
+        self.assertRegex(text, r"\*\*section 9 heartbeats\*\* -> [1-9] in 60 s")
+        # the fast sweep, with the plugin's rom
+        self.assertIn("**section 9 rom** -> SX1261 V2D 2D02", text)
+        self.assertIn("**section 9 scope n** -> 250", text)
+        self.assertIn("**section 9 scope sps** -> 47.6", text)
+        # the baseline is on disk, and the picture was attempted
+        out_dir = os.path.join(self.repo, "out", "bench")
+        baseline = [n for n in os.listdir(out_dir) if n.startswith("baseline-150-960-")]
+        self.assertEqual(len(baseline), 1, os.listdir(out_dir))
+        self.assertTrue(baseline[0].endswith(".ndjson"))
+        with open(os.path.join(out_dir, baseline[0]), encoding="utf-8") as fh:
+            frames = [json.loads(one) for one in fh if one.strip()]
+        self.assertTrue(any(frame.get("t") == "scope" and frame.get("n") == 2048
+                            for frame in frames), frames[:2])
+        self.assertIn("the picture was not drawn", text)      # no matplotlib behind a fake runner
+        self.assertIn("waterfall_plot.py", " ".join(" ".join(c) for c in self.runner.calls))
+        # and the node is the node it was
+        self.assertIn("Repeater ID matches", text)
+        self.assertIsNone(load_run(self.home, SERIAL))
+
+    def test_a_rom_that_is_not_the_plugins_skips_the_fast_sweep_and_walks_on(self):
+        def other_rom(path):
+            firmware = firmware_for(path)
+            if isinstance(firmware, FakeScannerFirmware):
+                firmware.rom = "SX1261 V1A 1A01"
+            return firmware
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=other_rom)
+        code, out = self.walk(["walk", "9", "--collect", "30", "--baseline", "5"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)          # the rom line itself differs
+        _name, text = self.result_file()
+        self.assertIn("SX1261 V1A 1A01", text)
+        self.assertIn("the first line of *The fast sweep* stops the rest of it", text)
+        self.assertEqual(len([s for s in text.splitlines() if "| skipped |" in s]), 2,
+                         "the two scope lines are the only skipped ones")
+        # the walk went on to the end: the repeater is back
+        self.assertEqual(board.flashes[-1], self.repeater_zip)
+        self.assertIn("restored: repeater back on the board", text)
+
+    def test_the_baseline_needs_the_dummy_load(self):
+        self.config(rf="antenna")
+        # a repeater on a board whose RF port is not the dummy load is never replaced (p3.3-02),
+        # so the scanner cannot go on at all - which is the refusal, before any port
+        board, code, out = self.walk_nine()
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("would leave a board this tool may not restore", out)
+        self.assertEqual(board.flashes, [])
+
+        # with a scanner already on the board and the antenna connected, the walk runs and the
+        # baseline is the one step that is skipped for the RF port
+        self.setUp()
+        self.config(rf="antenna")
+        board, code, out = self.walk_nine(firmware=FakeScannerFirmware())
+        _name, text = self.result_file()
+        self.assertIn("it needs the 50 ohm dummy load", text)
+        self.assertFalse([n for n in os.listdir(os.path.join(self.repo, "out", "bench"))
+                          if n.startswith("baseline-")])
+
+    def test_a_scanner_that_answers_no_scan_line_differs(self):
+        def silent(path):
+            firmware = firmware_for(path)
+            if isinstance(firmware, FakeScannerFirmware):
+                firmware.answers_data = False
+            return firmware
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=silent)
+        code, out = self.walk(["walk", "9", "--collect", "20", "--baseline", "5"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("## What differs", text)
+        self.assertIn("`sweep` is acked and answers a `sweep` line of 281 points", text)
+        self.assertEqual(board.flashes[-1], self.repeater_zip)   # still put back
+
+    def test_a_line_that_is_not_json_or_carries_nan_is_a_differs(self):
+        def chatty(path):
+            firmware = firmware_for(path)
+            if isinstance(firmware, FakeScannerFirmware):
+                # lines nobody asked for, arriving with a heartbeat in the middle of the minute
+                firmware.chatter = ['{"t":"sweep","avg":[nan]}', "# chatter"]
+            return firmware
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=chatty)
+        code, out = self.walk(["walk", "9", "--collect", "20", "--baseline", "5"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("with `nan`", text)
+
+    def test_a_repeater_image_is_refused_for_section_nine(self):
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "9", "--scanner-image", self.repeater_zip],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("is a repeater image: section 9 is the scanner's round trip", out)
+        self.assertEqual(self.ports.opened, [])
+
+
+# ----------------------------------------------------------------------------- section 10
+
+class SectionTen(WalkCase):
+    def setUp(self):
+        super().setUp()
+        self.config(identity="disposable")
+
+    def walk_ten(self, firmware=None, others=None, **kw):
+        board = self.board(firmware or FakeRepeaterFirmware(REPEATER_ID))
+        ports = FakePorts(boards=[board], clock=self.clock, others=others)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for, **kw)
+        bench = self.bench(ports=ports, runner=runner)
+        bench.commit = COMMIT
+        bench.walk_password = PASSWORD      # a session generates one and keeps it nowhere
+        code = benchcli.main(["walk", "10"], bench=bench)
+        return board, code, self.out.getvalue()
+
+    def test_an_identity_that_is_kept_is_refused(self):
+        self.config(identity="keep")
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "10"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("erases the file system", out)
+        self.assertEqual(self.ports.opened, [])
+
+    def test_an_open_run_is_refused_because_the_erase_would_outlive_it(self):
+        save_run(self.home, RunRecord(serial=SERIAL, role="repeater", version="0.0.0-dev",
+                                      repeater_id=REPEATER_ID, started="now", how="console"))
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "10"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("`bench restore` it first", out)
+        self.assertEqual(self.ports.opened, [])
+
+    def test_the_first_boot_the_second_boot_and_the_provisioning(self):
+        board, code, out = self.walk_ten()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertEveryLineHasAStep("10", text)
+        self.assertEqual(board.firmware.erased, 1)
+        self.assertEqual(board.firmware.rebooted, 2)          # the two boots of the page
+        self.assertNotIn("| differs |", text)
+        self.assertIn("**section 10 First boot** -> 2 line(s)", text)
+        self.assertIn("**section 10 firstboot.state** -> done", text)
+        self.assertIn("**section 10 firstboot.state, second boot** -> never", text)
+        self.assertIn("**section 10 get dutycycle** -> 10.0%", text)
+        self.assertIn("**section 10 path.hash.mode** -> 1", text)
+        self.assertIn("**section 10 guest.password** -> empty", text)
+        self.assertIn("**section 10 provisioned** -> 7 line(s) and the password, at the console",
+                      text)
+        self.assertIn("**section 10 get name** -> bench-walk", text)
+        self.assertIn("no dongle on this machine", text)      # the link half, skipped
+        # the identity afterwards is the one the first boot printed
+        self.assertIn("the node is the same node", text)
+        self.assertNotEqual(board.firmware.repeater_id, REPEATER_ID)
+        self.assertIsNone(load_run(self.home, SERIAL))         # it never opened a run
+        self.assertEqual(board.flashes, [])                    # and never flashed
+
+    def test_the_password_reaches_nothing(self):
+        board, code, out = self.walk_ten()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNoPassword(text)
+        self.assertNoPassword(out)
+        self.assertIn("password ****", text)
+        self.assertIn(walk.consolemod.PASSWORD_ECHO_SHOWN, text)
+        # the board did take it: it is the firmware's password now, and nothing printed it
+        self.assertEqual(board.firmware.password, PASSWORD)
+
+    def test_over_the_link_when_the_dongle_is_there(self):
+        self.config(identity="disposable", dongle=DONGLE)
+        dongle = PortInfo("COM9", DONGLE, 0x0403, 0x6001, "FT232")
+        board, code, out = self.walk_ten(others=[dongle], linkcli_output=PROVISIONED)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertIn("the same lines through `linkcli.py provision`", text)
+        self.assertIn("**section 10 provisioned** -> 7 line(s) and the password, over the link",
+                      text)
+        self.assertIn("the dongle is on this machine", text)   # the console half, skipped
+        self.assertNoPassword(text)
+        self.assertNoPassword(out)
+        # the file it wrote is gone, and it was never in the repository
+        provision = [c for c in self.runner.calls if "provision" in c]
+        self.assertEqual(len(provision), 1)
+        self.assertFalse(os.path.exists(provision[0][-1]))
+        self.assertNotIn(self.repo, provision[0][-1])
+
+    def test_a_link_tool_that_printed_the_password_would_be_a_finding(self):
+        self.config(identity="disposable", dongle=DONGLE)
+        dongle = PortInfo("COM9", DONGLE, 0x0403, 0x6001, "FT232")
+        leaking = PROVISIONED.replace("password ****", "password %s" % PASSWORD)
+        _board, code, out = self.walk_ten(others=[dongle], linkcli_output=leaking)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("THE PASSWORD APPEARED IN THE TOOL'S OUTPUT", text)
+        self.assertNoPassword(text)                            # and still not in the file
+
+    def test_a_scanner_on_the_board_is_refused(self):
+        board, code, out = self.walk_ten(firmware=FakeScannerFirmware())
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("nothing a repeater says", out)
+
+
+# ----------------------------------------------------------------------------- ticking the page
+
+class Ticking(WalkCase):
+    def test_a_confirmed_line_is_ticked_with_the_date_and_the_commit(self):
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        page = self.page()
+        bounds = walk.bullet_bounds(page, walk.SECTIONS["1"].line("1.1").anchor)
+        bullet = page[bounds[0]:bounds[1]]
+        self.assertTrue(bullet.startswith("- [x] "), bullet[:40])
+        self.assertRegex(bullet, r"\(bench, \d{4}-\d\d-\d\d, 0123456\)$")
+        # the lines a person owes are untouched
+        for key in ("1.2", "1.3", "1.4", "1.5", "1.6", "1.8"):
+            other = walk.bullet_bounds(page, walk.SECTIONS["1"].line(key).anchor)
+            self.assertTrue(page[other[0]:].startswith("- [ ] "), key)
+        self.assertIn("ticked in docs/bench.md: 1.1", out)
+
+    def test_ticking_twice_changes_nothing_the_second_time(self):
+        _board, ports, runner = self.fakes()
+        self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        once = self.page()
+        self.out = io.StringIO()
+        _board, ports, runner = self.fakes()
+        self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(self.page(), once)
+
+    def test_without_the_flag_the_page_is_not_touched(self):
+        before = self.page()
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual(self.page(), before)
+        self.assertIn("to tick 1.1 in docs/bench.md: the same walk with --tick", out)
+
+    def test_a_follow_up_goes_to_the_phase_of_the_task_that_wrote_the_line(self):
+        result = walk.WalkResult(walk.SECTIONS["9"], None, COMMIT, "2026-10-18T00:00:00Z")
+        line = walk.SECTIONS["9"].line("9.7")                  # p3.1-01's
+        result.add(walk.Step(line, "the rom", walk.DIFFERS, saw="rom 'SX1261 V1A 1A01'",
+                             expected=walk.PLUGIN_ROM))
+        self.phase_followups("3.1")
+        written = walk.write_followups(result, self.repo)
+        self.assertEqual([os.path.relpath(p, self.repo).replace("\\", "/") for p in written],
+                         ["tasks/phase-3.1/FOLLOWUPS.md"])
+        with open(written[0], encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("## From a bench walk of section 9 (2026-10-18)", text)
+        self.assertIn("**[01] `docs/bench.md` 9.7 differs from the board**", text)
+        self.assertIn("SX1261 V1A 1A01", text)
+
+    def test_a_phase_with_no_followups_file_is_left_alone(self):
+        result = walk.WalkResult(walk.SECTIONS["9"], None, COMMIT, "2026-10-18T00:00:00Z")
+        result.add(walk.Step(walk.SECTIONS["9"].line("9.7"), "the rom", walk.DIFFERS))
+        self.assertEqual(walk.write_followups(result, self.repo), [])
+
+
+# ----------------------------------------------------------------------------- the small pieces
+
+class ThePieces(unittest.TestCase):
+    def test_the_band_is_read_from_platformio_ini_and_not_remembered(self):
+        expect = walk.band_expectations(REPO)
+        self.assertEqual(expect["radio"], "869.618,62.5,8,8")
+        self.assertEqual(expect["dutycycle"], "10.0%")
+        self.assertIsNone(walk.band_expectations(REPO, band="nosuchband"))
+
+    def test_the_fw_version_line(self):
+        parsed = walk.parse_fw_version_line(
+            "> twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)")
+        self.assertEqual(parsed, {"role": "repeater", "version": "0.0.0-dev",
+                                  "tag": "repeater-v1.17.1", "pin": "d9296435"})
+        self.assertIsNone(walk.parse_fw_version_line("> something else"))
+        self.assertIsNone(walk.parse_fw_version_line(""))
+
+    def test_an_ack_says_what_was_taken(self):
+        fields = walk.ack_fields("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms")
+        self.assertEqual(fields["n"], "250")
+        self.assertEqual(fields["seg"], "1")
+        self.assertEqual(fields["cov"], "1.393")
+        self.assertEqual(walk.ack_fields(None), {})
+
+    def test_nan_is_found_and_a_name_with_nan_in_it_is_not(self):
+        self.assertEqual(len(walk.nan_lines('{"avg":nan}\n{"avg":-1}\n')), 1)
+        self.assertEqual(walk.nan_lines('{"t":"stat","banana":1,"nan_count":0}'), [])
+        self.assertEqual(walk.nan_lines('{"avg":NaN}')[0], '{"avg":NaN}')
+
+    def test_a_password_line_is_written_down_as_stars_and_stays_that_way(self):
+        self.assertEqual(walk._starred("password hunter2"), "password ****")
+        self.assertEqual(walk._starred("set guest.password hello"), "set guest.password ****")
+        self.assertEqual(walk._starred("get name"), "get name")
+        self.assertEqual(walk._starred(""), "")
+        # console.redact leaves an already-starred line alone - that is how a transcript can say
+        # which line was sent - and still replaces anything with a value in it
+        self.assertEqual(walk.consolemod.redact("password ****"), "password ****")
+        self.assertEqual(walk.consolemod.redact("set guest.password ****"),
+                         "set guest.password ****")
+        for leak in ("password hunter2", "password now: hunter2", "  -> password now: hunter2",
+                     "set guest.password hello", "password ****extra"):
+            self.assertEqual(walk.consolemod.redact(leak), walk.consolemod.PASSWORD_ECHO_SHOWN,
+                             leak)
+
+    def test_a_frame_is_summarised_and_not_dumped(self):
+        text = walk.frame_summary({"t": "sweep", "n": 281, "avg": [-115.0] * 281,
+                                   "lv": "x" * 400})
+        self.assertIn('"avg": "[281 values]"', text)
+        self.assertIn("...", text)
+        self.assertLess(len(text), 200)
+        self.assertEqual(walk.frame_summary(None), "(nothing)")
+
+    def test_every_walk_is_a_method_and_every_line_key_is_unique(self):
+        for number, section in walk.SECTIONS.items():
+            self.assertTrue(hasattr(walk.Walker, "walk_%s" % number.replace(".", "_")), number)
+            keys = [line.key for line in section.lines]
+            self.assertEqual(len(keys), len(set(keys)), number)
+            for line in section.lines:
+                self.assertTrue(line.key.startswith(number + "."), line.key)
+                self.assertTrue(line.about, line.key)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
