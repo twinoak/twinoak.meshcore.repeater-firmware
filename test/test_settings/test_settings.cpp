@@ -13,7 +13,11 @@
 // fresh node prints task 05's five and `... next:5`, a node whose counters have grown wide
 // prints four and `... next:4`, `sensor list 5` prints the five that are left - and the two
 // cases that reach the end of the window (the tenth key's own `10 vars` header, and a release
-// version string) are measured here rather than found on a bench.
+// version string) are measured here rather than found on a bench. Those measurements rest on
+// how long `fw.version` is, which is how long the MeshCore tag is, so the version strings in
+// this file are built by the firmware's own formatVersion from the build's own defines and the
+// **bound** they rest on is the last test: a tag long enough to change what a device prints is
+// red here before it is a surprise on a bench (tasks/phase-3.2/reports/01.md).
 
 #include <gtest/gtest.h>
 
@@ -22,13 +26,29 @@
 #include <string>
 #include <vector>
 
+#include "common/version/Version.h"
 #include "roles/repeater/app/Settings.h"
 
 namespace {
 
+// The version string a device of this build prints, built by the firmware's own
+// formatVersion over the same defines src/common/version/Version.cpp uses
+// (platformio.ini's [env:native] passes them). Nothing here restates a tag or a pin: this
+// file's subject is the *arithmetic* of upstream's `sensor list` over our table, and that
+// arithmetic counts the bytes of this string - so a MeshCore tag two characters longer than
+// today's changes what a device prints, and the bound at the end of this file is where it is
+// noticed (tasks/phase-3.2/reports/01.md left this as the one thing a bump could still move
+// silently).
+std::string deviceVersion(const char* fw_version) {
+  char buf[96];  // src/common/version/Version.cpp's own buffer, so a truncation truncates here
+  twinoak::formatVersion(buf, sizeof(buf), TWINOAK_ROLE, fw_version, TWINOAK_MESHCORE_TAG,
+                         TWINOAK_MESHCORE_PIN);
+  return std::string(buf);
+}
+
 class FakeHost : public twinoak::SettingsHost {
  public:
-  std::string version = "twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)";
+  std::string version = deviceVersion("0.0.0-dev");
   uint16_t errors = 0;
   bool seen = false;
   uint32_t seen_ago = 0;
@@ -355,7 +375,7 @@ TEST(SensorList, TheReleaseVersionCaseIsKnownCountedAndCutRatherThanSpilled) {
   // 82 - and with a `restored` clock and both counters still narrow, upstream's own loop writes
   // 163 bytes into a 160-byte reply.
   FakeHost host;
-  host.version = "twinoak-repeater 0.1.0+abc1234 on MeshCore repeater-v1.17.1 (d9296435)";
+  host.version = deviceVersion("0.1.0+abc1234");
   host.seen = true;
   host.seen_ago = 7;
   host.clock_state = "restored";
@@ -374,6 +394,82 @@ TEST(SensorList, TheReleaseVersionCaseIsKnownCountedAndCutRatherThanSpilled) {
   // and `sensor list 5` still prints the five that are left.
   EXPECT_LT(out.size(), 160u + 64u) << "and it stays well inside the guard";
   EXPECT_NE(std::string::npos, out.substr(0, 159).find("clock.state=restored")) << out;
+}
+
+TEST(SensorList, ThePagingRestsOnTheVersionStringsLengthAndSaysSo) {
+  // The two pages above are measured, and what they are measured at is the length of
+  // `fw.version`'s line: everything else on the first page is narrow and fixed. The bound is
+  // **70 characters of version string**, and it is arithmetic and not taste - upstream adds a
+  // line while it has written fewer than 134 bytes, so the first page holds five keys while
+  //
+  //     8 (the "10 vars" header and its newline)
+  //   + 12 + len(version) + 1                     the fw.version line
+  //   + 14 + 14                                   walter.wake=0, link.errors=0
+  //   + 15                                        walter.seen=<two digits>
+  //   < 134
+  //
+  // which is len(version) <= 70. One character more and `clock.state` falls to the second page:
+  // a different first page, a different `... next:<i>`, and a different line in docs/bench.md
+  // section 5 - without one byte of this repository having changed.
+  //
+  // So the bound is asserted both ways, and then this build's own strings are held to it. The
+  // version string is "twinoak-<role> <version> on MeshCore <tag> (<pin8>)", so what can push it
+  // over is a longer MeshCore tag or a longer release version, and a bump that does is red here
+  // first - which is what tasks/phase-3.2/reports/01.md's last paragraph asked for.
+  const size_t kVersionBound = 70;
+  {
+    FakeHost host;
+    host.version = std::string(kVersionBound, 'v');
+    host.seen = true;
+    host.seen_ago = 42;
+    host.clock_state = "restored";
+    twinoak::Settings s(host);
+    int printed = 0;
+    const std::string out = sensorList(s, 0, printed);
+    EXPECT_EQ(5, printed) << "at the bound the first page is still five keys: " << out;
+  }
+  {
+    FakeHost host;
+    host.version = std::string(kVersionBound + 1, 'v');
+    host.seen = true;
+    host.seen_ago = 42;
+    host.clock_state = "restored";
+    twinoak::Settings s(host);
+    int printed = 0;
+    const std::string out = sensorList(s, 0, printed);
+    EXPECT_EQ(4, printed) << "one character over the bound is a different first page: " << out;
+    EXPECT_NE(std::string::npos, out.find("... next:4")) << out;
+  }
+
+  // This build, as it is - the dev string the tests above use - and a release image's, which is
+  // "<the tag without its v>+<sha7>" (.github/workflows/release.yml).
+  const char* const kReMeasure =
+      "): re-measure test/test_settings' SensorList pages, docs/provisioning.md section 3's"
+      " session and docs/bench.md section 5 - what a device prints has changed, and the tests"
+      " above are the measurement";
+  EXPECT_GE(kVersionBound, deviceVersion("0.0.0-dev").size())
+      << "this build's own version string is over the bound (" << deviceVersion("0.0.0-dev")
+      << kReMeasure;
+  EXPECT_GE(kVersionBound, deviceVersion("0.1.0+abc1234").size())
+      << "a release image's version string is over the bound ("
+      << deviceVersion("0.1.0+abc1234") << kReMeasure;
+
+  // And how much room is left, which is the number worth knowing: **none**. The string is
+  // "twinoak-<role> <version> on MeshCore <tag> (<pin8>)" - 41 characters of frame for this role
+  // - so the bound is len(version) + len(tag) <= 29, and `0.1.0+abc1234` with
+  // `repeater-v1.17.1` is exactly 29. One character more anywhere - a `0.10.0` release, a tag
+  // `repeater-v1.17.10` - is the four-key page above. The two EXPECTs before this one are what
+  // go red when it happens; this one says why.
+  EXPECT_EQ(kVersionBound, deviceVersion("0.1.0+abc1234").size())
+      << "the paging has room it did not have: raise kVersionBound here, with the arithmetic";
+  EXPECT_LT(kVersionBound, deviceVersion("0.10.0+abc1234").size())
+      << "and one character more is over it";
+  // A *dry run* of the release is the one build of ours that does not fit: its version is
+  // `0.0.0-dryrun+<sha7>`, twenty characters, which makes the string 77 and the first page four
+  // keys. That image is not a release (spec/FIRMWARE-MANIFEST.md section 3) and is never on a
+  // unit in the field, so it is recorded here rather than asserted away.
+  EXPECT_LT(kVersionBound, deviceVersion("0.0.0-dryrun+abc1234").size())
+      << "a dry run's version string now fits too, which only makes the bound safer";
 }
 
 int main(int argc, char** argv) {

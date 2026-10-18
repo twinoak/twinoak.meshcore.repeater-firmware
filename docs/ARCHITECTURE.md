@@ -298,9 +298,13 @@ does before anybody has been to the site (`spec/SYSTEM.md` S-12, S-13; `docs/pro
   (`src/roles/repeater/firstboot/Profile.h`). It is text, not code, for three reasons - it touches
   no private member of upstream's, a pin bump that renames a key comes back as a reply that is not
   `OK` rather than as a corrupted preference, and it can be read and changed without reading C++.
-  As shipped it is one line, `set path.hash.mode 1`, because that is the one value a document of
-  this project gives (S-12 and meshmaster.dk's D-33: upstream floods this node's adverts at
-  `path_hash_mode + 1` bytes).
+  As shipped it is **two** lines, because two are what a document of this project gives a value
+  for: `set path.hash.mode 1` (S-12 and meshmaster.dk's D-33: upstream floods this node's adverts
+  at `path_hash_mode + 1` bytes), and `set dutycycle 10` — the duty cycle the home channel's band
+  allows, which is a regulation and not a judgement, so it lives in the band
+  (`platformio.ini`'s `[band_868].duty_cycle`, `src/common/bands/Bands.h`) and the line is
+  **generated from it** rather than written. §7 has the arithmetic and why upstream's own 50 %
+  was the wrong place to start.
 
 **Once is exact, and it is one boolean.** The test is `hasSavedPrefs()`, taken before
 `the_mesh.begin()` runs upstream's `loadPrefs`; the password and the profile both happen inside one
@@ -318,8 +322,8 @@ RAM, because the question it answers is "what did *this* boot do".
 
 One consequence of running the profile at all is upstream's and worth recording: `CommonCLI::savePrefs()`
 zeroes `advert_interval` when it is below sixty minutes, "now that device has been manually
-configured". Upstream's default is two minutes, so the first-boot profile's one line turns the
-*local* advert timer off for the life of the unit. The boot advert (§5) and the 47-hour flood
+configured". Upstream's default is two minutes, so the first line of the first-boot profile turns
+the *local* advert timer off for the life of the unit. The boot advert (§5) and the 47-hour flood
 advert are what announce it, which is what the Danish standard asks for anyway
 (meshguide.dk recommends `advert.interval 0`).
 
@@ -479,16 +483,52 @@ So our 6 sends a minute are inside upstream's accounting and not beside it. The 
 **this repeater's own setting**: `MyMesh` overrides `getAirtimeBudgetFactor()` to return
 `_prefs.airtime_factor` (`examples/simple_repeater/MyMesh.h:134-137`), its constructor sets that to
 `1.0` (`MyMesh.cpp:890`), and a console `set dutycycle <1..100>` or `set af <x>` changes it and
-saves it (`src/helpers/CommonCLI.cpp:450-461`, `:809-814`). At the default the duty cycle is 1/2
-and the budget fills to 1 800 000 ms of a 3 600 000 ms window. Six of the longest packets this
-client can build is some 13 s a minute - about 22 % - on a channel where one 186-byte packet is
-about 1.7 s (869.618 MHz, 62.5 kHz, SF8, CR8, 32 preamble symbols); the exchange a server actually
-asks for is some 2 %. **The one interaction worth knowing**: a unit someone has set to a duty
-cycle below about 22 % could have upstream's budget saturated by a Walter sending six maximum-size
-packets a minute - and then upstream delays the next transmission rather than refusing it, so
-nothing is lost and the ceiling is still what stops the Walter. That is why the ceiling is about
-the mesh's patience and upstream's budget is about the band: only upstream's can hold the
-regulatory limit, because only upstream's sees the hundreds of packets a busy repeater forwards.
+saves it (`src/helpers/CommonCLI.cpp:450-461`, `:809-814`). `1.0` is a duty cycle of 1/2 and a
+budget of 1 800 000 ms in a 3 600 000 ms window - **which is not what the band allows**, so a unit
+of ours does not start there: the first-boot profile's second line is `set dutycycle 10`, built
+from `[band_868].duty_cycle` (`src/common/bands/Bands.h`, `src/roles/repeater/firstboot/Profile.cpp`;
+869.618 MHz is in the 869.400-869.650 MHz sub-band of ERC Recommendation 70-03, Annex 1, row h1.7
+- 500 mW e.r.p. and 10 %, or LBT+AFA instead, which this firmware does not claim). 10 % is also
+the lowest this upstream can keep: `loadPrefs` clamps `airtime_factor` to 9.0 (`:111`), and 9.0 is
+exactly `100/10 - 1`.
+
+> The regulation itself is the one thing on this page that was not read out of a file on this
+> machine: CEPT's own PDF of ERC Recommendation 70-03 would not fetch from the session that wrote
+> this (a TLS certificate it could not verify), so the edition - **June 2024**, the newest CEPT's
+> document database lists - the row (**h1.7**) and the pair *500 mW e.r.p., 10 %* come from that
+> database's listing and not from the document. The sub-band and the 10 % are also what the
+> phase-3 review states and what the Danish standard uses. A reviewer with the PDF open should
+> confirm the edition and the row; the number itself is in one place
+> (`platformio.ini`'s `[band_868].duty_cycle`) and everything else is built from it.
+
+**The numbers at the band's ceiling.** The budget is then **360 s of each hour**, 6 s a minute.
+One 186-byte packet is about 1.7 s of airtime on this channel (869.618 MHz, 62.5 kHz, SF8, CR8, 32
+preamble symbols), so six of the longest packets this client can build is some 13 s a minute -
+**above** the refill, where against the 50 % default it was comfortably under it. What then
+happens is that **upstream delays**: `checkSend` holds the queue until the budget has recovered
+(`:279-286`, and the `MIN_TX_BUDGET_RESERVE_MS` push-out at `:99-104`), nothing is refused, nothing
+is lost, and the hour's transmission stays inside 360 s whoever asked for it. The exchange a
+server actually asks for is nowhere near that: two sends a minute of about 0.65 s each is some
+1.3 s a minute - about 2 % of the hour, which is **a fifth of the budget**, leaving the rest for
+the hundreds of packets a busy repeater forwards.
+
+**And the client's ceiling stays at 6 a minute.** It was asked whether it should follow the band's
+budget down (three a minute would be about 6 s), and it should not:
+
+- the two count different things. The ceiling counts **sends**; the budget counts **airtime**, of
+  every packet the radio transmits. Only the second can hold a regulation, and it does - at the
+  band's value from the first boot on. A lower ceiling would not make the band any safer;
+- 6 is three times the server's default rate of 2 a minute, and that margin is the point of it.
+  Three a minute is one and a half times it, which a *correct* paced agent can touch - a login,
+  its request, and a retry after a timeout inside the same minute - and `ERR_BUSY` would stop
+  meaning "the Walter is broken";
+- what a lower ceiling would buy is latency for a packet waiting to be forwarded, and that is
+  already bounded by the answer below: one client send can delay a forward by its own airtime and
+  no more.
+
+So the ceiling is about the mesh's patience and upstream's budget is about the band: only
+upstream's can hold the regulatory limit, because only upstream's sees the hundreds of packets a
+busy repeater forwards - and since this task it holds the limit the band actually has.
 
 **A client send can delay a forward by its own airtime and no more.** The queue is a flat table
 picked over by priority, lowest number first, and ties go to whichever was added first

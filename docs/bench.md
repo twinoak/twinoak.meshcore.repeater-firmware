@@ -319,7 +319,12 @@ of them is the exit criterion of the whole phase.
   `... next:5` is gone; on a release image (a longer `fw.version`) it is 163
   and the cut is three characters — expected, counted, and the reason
   `sensor get <key>` is the way to read one key
-  (`tasks/phase-3/reports/03.md`).
+  (`tasks/phase-3/reports/03.md`). **Five keys on the first page holds while the
+  version string is 70 characters or fewer**, which today it is exactly on a
+  release image; a longer MeshCore tag or a longer release version moves
+  `clock.state` to the second page and makes this line read `... next:4`.
+  `test/test_settings`' last case is that bound, so a bump that crosses it is
+  red in CI before anybody reads it here (`tasks/phase-3.3/reports/01.md`).
 - [ ] **p1-06** **The boot-voltage question, which is the reviewer's.** Upstream
   will not boot a node whose battery reads between 1000 and 3300 mV
   (`PWRMGT_VOLTAGE_BOOTLOCK`), and on this board the reading it checks is 0 at
@@ -571,18 +576,22 @@ which takes the node's **identity** with it: the key the mesh knows it by, and
 the one MeshMaster would have been told. A unit that has been adopted is a unit
 not to erase.
 
-- [ ] **p3-03** **A first boot is a first boot.** `erase` on the USB console
-  (`File system erase: OK`), then reset. The console prints `Repeater ID:` with
-  a **new** key (→ ______), then `First boot: a random admin password was set
-  (not shown; …)` and `First boot: the profile ran 1 of 1 lines (sensor get
-  firstboot.state says 'done'; …)`. Then:
-  `sensor get firstboot.state` → `> done`; `get path.hash.mode` → `> 1`;
-  `get radio` → `> 869.618,62.5,8,8`; `get name` → `> repeater`;
-  `get guest.password` → `> ` (empty).
-- [ ] **p3-03** **It runs once, and a reboot proves it.** `reboot`, and this
-  time there is **no** `First boot:` line at all; `sensor get firstboot.state`
-  → `> never`, and `get path.hash.mode` is still `> 1` — the profile's work was
-  saved, and the profile did not run again.
+- [ ] **p3-03, p3.3-01** **A first boot is a first boot.** `erase` on the USB
+  console (`File system erase: OK`), then reset. The console prints
+  `Repeater ID:` with a **new** key (→ ______), then `First boot: a random admin
+  password was set (not shown; …)` and `First boot: the profile ran 2 of 2 lines
+  (sensor get firstboot.state says 'done'; …)`. Then, and **`get dutycycle`
+  first** — it is the line this whole section exists to prove, because it is the
+  one thing a fresh unit was getting wrong (`docs/ARCHITECTURE.md` §7):
+  `get dutycycle` → `> 10.0%` (the band's, where upstream's own default is
+  `> 50.0%`); `sensor get firstboot.state` → `> done`;
+  `get path.hash.mode` → `> 1`; `get radio` → `> 869.618,62.5,8,8`;
+  `get name` → `> repeater`; `get guest.password` → `> ` (empty).
+- [ ] **p3-03, p3.3-01** **It runs once, and a reboot proves it.** `reboot`, and
+  this time there is **no** `First boot:` line at all; `sensor get
+  firstboot.state` → `> never`, `get path.hash.mode` is still `> 1` and
+  `get dutycycle` is still `> 10.0%` — the profile's work was saved, both lines
+  of it, and the profile did not run again.
 - [ ] **p3-03** **A power cut in the middle leaves no half-provisioned node.**
   `erase`, reset, and pull the power **during** the first second (before the
   `First boot:` lines appear). On the next boot one of exactly two things is
@@ -590,8 +599,9 @@ not to erase.
   (the write never happened, so the whole thing was done again), or they do not
   appear and `get path.hash.mode` says `1` (the write happened and the unit is
   finished). What must **never** be seen is no `First boot:` line together with
-  `get path.hash.mode` → `0`. Worth three or four attempts; the arrangement
-  that makes it so is one preferences write
+  `get path.hash.mode` → `0`, or with `get dutycycle` → `> 50.0%`: that would be
+  a unit that is finished as far as it knows and outside the band. Worth three
+  or four attempts; the arrangement that makes it so is one preferences write
   (`src/roles/repeater/app/FirstBoot.h`).
 - [ ] **p3-03** **Provision it at the USB port**, `docs/provisioning.md` §3 line
   for line: `set name`, `set lat`, `set lon`, `set owner.info`,

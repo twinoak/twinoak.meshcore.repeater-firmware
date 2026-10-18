@@ -29,11 +29,15 @@ order:
 
 ### The profile, as shipped
 
-One line, because one line is all a document of this project gives a value for:
+Two lines, because two is all this project has a document for — the
+specification for one, and the band's own regulation for the other:
 
 ```
 # flooded adverts carry two-byte path hashes (spec/SYSTEM.md S-12, meshmaster.dk D-33)
 set path.hash.mode 1
+# the duty cycle the home channel's band allows, which upstream starts at 50 %
+# (ERC Recommendation 70-03, Annex 1, 869.400-869.650 MHz; platformio.ini's [band_868])
+set dutycycle 10
 ```
 
 Upstream floods this node's own adverts at `path_hash_mode + 1` bytes
@@ -41,6 +45,20 @@ Upstream floods this node's own adverts at `path_hash_mode + 1` bytes
 makes two repeaters that share a first hash byte both match a packet's next hop.
 The mesh client's own floods already pass two in code; this is the half of S-12
 that upstream decides from a preference.
+
+The **duty cycle** is the band's and not a judgement: 869.618 MHz is in the
+869.400–869.650 MHz sub-band of ERC Recommendation 70-03, Annex 1, where the
+limit is 10 % of each hour at 500 mW e.r.p. Upstream starts a repeater at 50 %
+(`airtime_factor` 1.0), which is five times that, so the number is in the band
+beside the frequency and the power — `platformio.ini`'s `[band_868].duty_cycle`
+— and **the line above is built from it** rather than written. The reply is
+`OK - 10.0%`; `get dutycycle` reads it back. A **lower** value is still a
+site's to choose, and a higher one is nobody's — but mind what upstream does
+with it: 10 % is the lowest it can *keep*. `set dutycycle 5` is accepted and
+takes effect, and then the next boot reads the saved value back through a clamp
+of `airtime_factor` to 9.0 — exactly 100/10 − 1 — and the unit is at 10 % again.
+So below the band's own value the setting is good for this boot and not for the
+next one.
 
 The profile runs **once**, on the boot that finds neither `/prefs.json` nor the
 legacy `/com_prefs`, after the random admin password and before the radio is
@@ -119,15 +137,29 @@ legal `CLI` request (`docs/link.md` §2b). Define regions with `region def` or
 
 ### What this page deliberately does not set
 
-The Danish mesh has a best-practice profile beyond the two bytes of S-12 —
-meshguide.dk's `lib/checks.js` is it, and it is the document to fill the table
-from. Most of its recommendations are **per site**: `rxdelay`, `txdelay` and
-`direct.txdelay` follow how many neighbours the unit can hear, and the duty
-cycle, `loop.detect` and `flood.max.unscoped` are a judgement about the
+The Danish mesh has a best-practice profile beyond S-12's two bytes and the
+band's duty cycle — meshguide.dk's `lib/checks.js` is it, and it is the document
+to fill the table from. Most of its recommendations are **per site**:
+`rxdelay`, `txdelay` and `direct.txdelay` follow how many neighbours the unit
+can hear, and `loop.detect` and `flood.max.unscoped` are a judgement about the
 neighbourhood. A unit that has never been switched on cannot know any of them,
 so they are not in the profile and not in the table above. Read them off
 meshguide.dk when the unit has been on the air for a week, and
 `tasks/phase-3/reports/03.md` has every key with the value upstream starts it at.
+
+**The duty cycle is no longer one of them.** The 10 % of the 869.400–869.650 MHz
+sub-band is the band's ceiling, not a judgement, so it is in the band and the
+first boot asks for it (§1). What is left to a site is a *lower* value, which
+is a judgement about the neighbourhood and is sent like any other setting:
+`set dutycycle <1..100>`, `OK - <n>.<n>%` — and §1 says what upstream does with
+one below 10 % on the next boot.
+
+> **A unit provisioned before this firmware keeps upstream's 50 %.** The profile
+> runs only on the boot that finds no saved settings, and a unit that has been
+> provisioned has them — `sensor get firstboot.state` says `never` on every boot
+> since. Send `set dutycycle 10` once, at the USB port or over the link (§3, §4);
+> it saves immediately and needs no reboot. `get dutycycle` → `> 10.0%` is how
+> you know, and `> 50.0%` is a unit that has not been told.
 
 ## 3. At the USB port
 
@@ -137,7 +169,7 @@ and prefixes a reply with `  -> `. A line ends with carriage return.
 ```
 Repeater ID: 7f3aa1b2...                      <- printed at boot
 First boot: a random admin password was set (not shown; set yours with 'password <new>')
-First boot: the profile ran 1 of 1 lines (sensor get firstboot.state says 'done'; docs/provisioning.md is the rest)
+First boot: the profile ran 2 of 2 lines (sensor get firstboot.state says 'done'; docs/provisioning.md is the rest)
 
 ver
   -> v1.17.1 (Build: 14 Aug 2026)
@@ -149,6 +181,8 @@ sensor get firstboot.state
   -> > done
 get path.hash.mode
   -> > 1
+get dutycycle
+  -> > 10.0%                                 <- the band's; 50.0% is a unit flashed before this
 
 set name TwinOak-Odense
   -> OK
@@ -188,7 +222,19 @@ sensor list 5
      firstboot.state=done
 ```
 
-Three things worth knowing about that session:
+An **older unit** — one provisioned before the duty cycle was the band's — has
+one more line to be given, once, and it is the same line the profile runs:
+
+```
+get dutycycle
+  -> > 50.0%                                 <- upstream's default, five times the band's
+set dutycycle 10
+  -> OK - 10.0%
+get dutycycle
+  -> > 10.0%
+```
+
+Four things worth knowing about that session:
 
 - **`password <new>` echoes the password back.** Upstream does that on purpose
   ("just to let admin know for sure"), so the password is on the screen of
@@ -211,6 +257,9 @@ Three things worth knowing about that session:
   the admin password and the profile are written in one save, so a unit is
   either unprovisioned and retried on the next boot or finished
   (`src/roles/repeater/app/FirstBoot.h`).
+- **`get dutycycle` is the one line to read on a unit you did not flash.** The
+  profile cannot have run on a unit that already had settings (§2), and 50 % is
+  five times what the band allows. It is one line to fix and it saves at once.
 
 ## 4. Over the link
 

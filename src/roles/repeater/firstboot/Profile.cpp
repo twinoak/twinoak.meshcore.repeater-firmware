@@ -3,21 +3,51 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "common/bands/Bands.h"
+
+// The band's own duty cycle, from platformio.ini's [band_*] section by way of the environment
+// (and, for tools/linkloop/, read out of the same two sections by tools/linkloop/check.sh). It is
+// a number here and not a string, because the line below is built from it: a build that cannot
+// say what the band allows does not get to ship a profile that guesses.
+#ifndef TWINOAK_BAND_DUTY_CYCLE
+#error "TWINOAK_BAND_DUTY_CYCLE is the band's duty cycle, from platformio.ini's [band_*] section"
+#endif
+#ifndef TWINOAK_BAND
+#error "TWINOAK_BAND is set by platformio.ini from the environment's [img_*] section"
+#endif
+
+// `set dutycycle 10`, with the 10 coming from the band and never from this file.
+#define TWINOAK_PROFILE_TEXT_(x) #x
+#define TWINOAK_PROFILE_TEXT(x) TWINOAK_PROFILE_TEXT_(x)
+
 namespace twinoak {
 namespace firstboot {
 
+// The two halves of "built from the band" meet here: the number the line is made of is the
+// number this band's row in src/common/bands/Bands.h carries. A [band_*] section and a row that
+// disagreed would be a unit asking for a duty cycle no document of ours gives.
+static_assert(TWINOAK_BAND_DUTY_CYCLE == bands::dutyCycleOf(bands::kBands, bands::kBandCount,
+                                                            TWINOAK_BAND),
+              "platformio.ini's [band_*].duty_cycle and this band's row in "
+              "src/common/bands/Bands.h disagree: the first-boot profile's `set dutycycle` line "
+              "is built from the first and the band is defined by the second");
+
 // --- the table ---------------------------------------------------------------------------------
 //
-// One line, and the rule that keeps it one line: **a line is here only where a document of this
-// project gives the value.** The reviewer fills the rest from the network's own standard
-// (tasks/phase-3/reports/03.md lists every `set` key of the pinned CLI with upstream's default
-// beside it, and meshguide.dk's recommendation where there is one); a session with nobody to ask
-// does not invent a value for a radio nobody has measured or a site nobody has visited.
+// Two lines, and the rule that keeps it two: **a line is here only where a document of this
+// project gives the value** - spec/SYSTEM.md S-12 for the first, and the band itself for the
+// second, which is a regulation and not a judgement. The reviewer fills the rest from the
+// network's own standard (tasks/phase-3/reports/03.md lists every `set` key of the pinned CLI
+// with upstream's default beside it, and meshguide.dk's recommendation where there is one); a
+// session with nobody to ask does not invent a value for a radio nobody has measured or a site
+// nobody has visited.
 //
 // What is deliberately *not* here:
 //
 //   - the **channel** (`set radio`): the build's default, so that a unit is on the right
-//     frequency even if this profile never ran (platformio.ini's [band_868]);
+//     frequency even if this profile never ran (platformio.ini's [band_868]). Its duty cycle is
+//     the one thing of that block the build cannot set by itself - upstream keeps it in the
+//     preferences and not in a define - which is why it is a line of this table instead;
 //   - the **name**, the **position**, the **owner info**, the **regions**: per site, and a unit
 //     with somebody else's name on the air is worse than a unit called `repeater`;
 //   - **any password**: a password is never in an image (spec/SYSTEM.md S-13). The admin password
@@ -37,6 +67,25 @@ const ProfileLine kProfile[] = {
     // the half of S-12 that upstream decides from a preference.
     {"set path.hash.mode 1",
      "flooded adverts carry two-byte path hashes (S-12, meshmaster.dk D-33)"},
+    // The band's legal ceiling, and the one line of this table that is **generated**: the
+    // percentage is platformio.ini's [band_868].duty_cycle by way of TWINOAK_BAND_DUTY_CYCLE,
+    // held against src/common/bands/Bands.h's row by the static_assert above. 869.618 MHz is in
+    // the 869.400-869.650 MHz sub-band of ERC Recommendation 70-03, Annex 1, row h1.7 - 500 mW
+    // e.r.p. and a duty cycle of 10 % - and upstream starts a repeater at 50 %
+    // (MyMesh's constructor sets `airtime_factor` to 1.0, examples/simple_repeater/MyMesh.cpp:890
+    // at the pin d9296435, and `Dispatcher::begin` makes the budget 1/(1+1) of a one-hour window,
+    // src/Dispatcher.cpp:25-27). `set dutycycle <dc>` is upstream's own way to say it: it writes
+    // `airtime_factor = (100 / dc) - 1` and answers `OK - 10.0%`
+    // (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461), which the reply rule below
+    // accepts, and `get dutycycle` reads the same number back out of the factor (`:809-814`).
+    //
+    // 10 % is also the lowest duty cycle this upstream can keep: `loadPrefs` clamps
+    // `airtime_factor` to 9.0 (`:111`), which is exactly 100/10 - 1, so a site that wants less
+    // than the band allows cannot have it from this preference. A line here asking for less would
+    // be accepted, saved and then loaded back as 10 %.
+    {"set dutycycle " TWINOAK_PROFILE_TEXT(TWINOAK_BAND_DUTY_CYCLE),
+     "the duty cycle the home channel's band allows, which upstream starts at 50 % "
+     "(ERC Recommendation 70-03, Annex 1, 869.400-869.650 MHz; platformio.ini's [band_868])"},
 };
 
 const int kProfileCount = int(sizeof(kProfile) / sizeof(kProfile[0]));

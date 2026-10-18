@@ -6,8 +6,9 @@
 // the board would be, pumping stdin to stdout. `linkcli.py --pipe <this program>` then speaks the
 // real protocol to the real session with no serial port and no radio in the way.
 //
-// It is not part of the firmware and not part of tools/verify.ps1: it needs a host compiler, and
-// on Windows that is the container tasks/RUNBOOK.md section 2 names. Build and use:
+// It is not part of the firmware, but tools/linkloop/check.sh builds and drives it in the native
+// step of tools/verify.ps1: it needs a host compiler, and on Windows that is the container
+// tasks/RUNBOOK.md section 2 names - the same one the native tests use. Build and use:
 //
 //   g++ -std=c++17 -O2 -Wall -Wextra -I src -o out/linkloop/linkloop tools/linkloop/linkloop.cpp
 //       src/common/link/codec/*.cpp src/common/link/session/*.cpp src/roles/repeater/clock/ClockKeeper.cpp   (one line)
@@ -311,8 +312,24 @@ class LoopCli : public CliAccess {
     if (key == "name") {  // upstream's isValidName(), CommonCLI.cpp at the pin
       return value.find_first_of("[]\\:,?*") == std::string::npos ? "OK" : "Error, bad chars";
     }
+    if (key == "dutycycle") {
+      // The first-boot profile's second line, so this one is upstream's arithmetic and not an
+      // "OK": `set dutycycle <dc>` writes airtime_factor = (100 / dc) - 1 and answers with the
+      // percentage that factor reads back as, to one decimal - "OK - 10.0%" for the 10 the band
+      // allows (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461 at the pin d9296435).
+      // That reply is the shape the profile's reply rule has to accept, and the refusal below is
+      // the one it has to reject.
+      const float dc = static_cast<float>(atof(value.c_str()));
+      if (dc < 1 || dc > 100) return "ERROR: dutycycle must be 1-100";
+      const float actual = 100.0f / (((100.0f / dc) - 1.0f) + 1.0f);
+      const int whole = static_cast<int>(actual);
+      const int tenth = static_cast<int>((actual - whole) * 10.0f + 0.5f);
+      char out[32];
+      snprintf(out, sizeof(out), "OK - %d.%d%%", whole, tenth);
+      return out;
+    }
     if (key == "lat" || key == "lon" || key == "owner.info" || key == "guest.password" ||
-        key == "loop.detect" || key == "flood.max.unscoped" || key == "dutycycle" ||
+        key == "loop.detect" || key == "flood.max.unscoped" ||
         key == "advert.interval" || key == "flood.advert.interval" ||
         key == "agc.reset.interval" || key == "rxdelay" || key == "txdelay" ||
         key == "direct.txdelay" || key == "radio.rxgain") {

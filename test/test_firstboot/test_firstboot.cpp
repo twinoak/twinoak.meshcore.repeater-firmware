@@ -7,7 +7,9 @@
 // middle, with an empty table, with a line too long for the console's buffer and with a reply
 // that writes into the guard; that it **runs once** - with settings present nothing runs at all
 // and the state says `never`; and the table as shipped, which is held to the rails that make it
-// safe to run unattended on a board nobody is watching.
+// safe to run unattended on a board nobody is watching - and, for the duty-cycle line, to the
+// band's own row, because that line is built from platformio.ini's [band_*] block and not
+// written (src/common/bands/Bands.h).
 
 #include <gtest/gtest.h>
 
@@ -16,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "common/bands/Bands.h"
 #include "roles/repeater/firstboot/Profile.h"
 
 namespace {
@@ -277,12 +280,34 @@ TEST(TheState, IsTheThreeWordsTheSettingPromises) {
 
 // --------------------------------------------------------------------- the table as shipped
 
-TEST(TheTableAsShipped, IsTheOneLineThisTaskIsSureOf) {
-  ASSERT_EQ(1, kProfileCount) << "a line is added only where a document of this project gives "
+TEST(TheTableAsShipped, IsTheTwoLinesThisProjectHasADocumentFor) {
+  ASSERT_EQ(2, kProfileCount) << "a line is added only where a document of this project gives "
                                  "the value (tasks/phase-3/reports/03.md lists the rest)";
   EXPECT_STREQ("set path.hash.mode 1", kProfile[0].command)
       << "spec/SYSTEM.md S-12 and meshmaster.dk's D-33: two-byte path hashes in the "
          "adverts this node floods (MyMesh::sendSelfAdvertisement at the pin)";
+}
+
+TEST(TheTableAsShipped, TheDutyCycleLineIsTheBandsOwnNumber) {
+  // The second line is **generated** from the band: platformio.ini's [band_868].duty_cycle
+  // reaches src/roles/repeater/firstboot/Profile.cpp as TWINOAK_BAND_DUTY_CYCLE and the file's
+  // own static_assert holds that number against this band's row in src/common/bands/Bands.h.
+  // What is left for a test is the line itself - that the number in the text is the row's, so
+  // that a band whose regulation changes changes what a fresh unit asks for and nothing else
+  // has to be edited.
+  const int dc = twinoak::bands::dutyCycleOf(twinoak::bands::kBands, twinoak::bands::kBandCount,
+                                             TWINOAK_BAND);
+  ASSERT_LE(1, dc) << "band " << TWINOAK_BAND << " has no duty cycle in src/common/bands/Bands.h";
+  ASSERT_GE(100, dc) << "upstream's `set dutycycle` takes 1-100 and would refuse " << dc;
+  const std::string expected = "set dutycycle " + std::to_string(dc);
+  EXPECT_EQ(expected, std::string(kProfile[1].command))
+      << "the profile's duty-cycle line is not the band's own number: a fresh unit would start"
+         " outside what the band allows, or at a value this repository does not say";
+  // And the reply upstream gives that line is one the rule above accepts: `set dutycycle 10`
+  // answers "OK - 10.0%" (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461 at the pin
+  // d9296435), where every refusal of it is "ERROR: dutycycle must be 1-100".
+  EXPECT_TRUE(replyAccepted("OK - 10.0%"));
+  EXPECT_FALSE(replyAccepted("ERROR: dutycycle must be 1-100"));
 }
 
 TEST(TheTableAsShipped, EveryLineIsOneTheConsoleCouldHaveBeenTyped) {
