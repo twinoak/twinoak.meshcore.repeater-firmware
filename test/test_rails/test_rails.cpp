@@ -87,7 +87,9 @@
 #include <utility>
 #include <vector>
 
-// Rule 4 reads the firmware's own constant rather than a copy of it.
+// Rule 4 reads the firmware's own constants rather than a copy of them: the flood path-hash
+// size, and the first-boot profile's own table (its other half, below).
+#include "roles/repeater/firstboot/Profile.h"
 #include "roles/repeater/meshclient/MeshPort.h"
 
 #ifndef PROJECT_DIR
@@ -788,6 +790,17 @@ TEST(Rails, Rule4_TheFirstBootProfileAsksForTwoByteHashesInAdvertsToo) {
   EXPECT_NE(std::string::npos, profile.find("\"set path.hash.mode 1\""))
       << "the first-boot profile no longer raises path.hash.mode, so a fresh unit would flood"
          " its adverts with one-byte path hashes (S-12, meshmaster.dk D-33)";
+  // The table has **two** lines since phase 3.3's task 01 - the path-hash mode and the band's
+  // duty cycle - and this rule is about the first of them, so it says which one it is reading
+  // rather than "the profile's one line". A third line added without reading test/test_firstboot
+  // fails there and not here.
+  EXPECT_EQ(2, twinoak::firstboot::kProfileCount)
+      << "the first-boot profile is no longer the two lines this project has a document for"
+         " (S-12's path hashes and the band's duty cycle): test/test_firstboot holds the table"
+         " itself, and docs/provisioning.md section 1 prints it";
+  EXPECT_STREQ("set path.hash.mode 1", twinoak::firstboot::kProfile[0].command)
+      << "and it is still the first line, which is the order docs/provisioning.md and"
+         " docs/bench.md section 10 read it in";
   const std::string ini = fileText(root / "platformio.ini");
   EXPECT_NE(std::string::npos, ini.find("+<roles/repeater/firstboot/Profile.cpp>"))
       << "platformio.ini's [env:native] no longer compiles"

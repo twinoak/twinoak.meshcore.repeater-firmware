@@ -624,7 +624,7 @@ thing.
 | | what it counts | the limit | what happens over it |
 |---|---|---|---|
 | **the client's ceiling**, ours (`src/roles/repeater/meshclient/SendCeiling.h`) | the sends the Walter asks for, one per `SEND_*` — the same count as `counters`' `client_tx` | **6 in any 60 s**, and **2 s** between two | the send is **`ERR_BUSY`** and nothing leaves; `sensor get client.refused` counts it |
-| **the duty cycle**, upstream's (`mesh::Dispatcher`) | *every* packet the radio transmits, the hundreds it forwards included | an airtime budget of a one-hour window — **half** of it by default, and `cli "set dutycycle <1..100>"` changes it | the radio waits; nothing is refused and nothing is lost |
+| **the duty cycle**, upstream's (`mesh::Dispatcher`) | *every* packet the radio transmits, the hundreds it forwards included | an airtime budget of a one-hour window — **10 %** of it, 360 s, which is the band's own limit and what a unit's first boot sets (upstream's own default is half); `cli "set dutycycle <1..100>"` changes it | the radio waits; nothing is refused and nothing is lost |
 
 The first is a backstop on a mistake in the Walter. Its agent paces itself to a
 budget the MeshMaster server sets — `budget 2/min gap 20 s` by default — so a
@@ -648,12 +648,15 @@ could raise would be no backstop against the Walter.
 The second is the band's, and only upstream can hold it: it is the one
 accounting that sees forwarded traffic. Our sends go through the same outbound
 queue and are decremented from the same budget, so the two do not need to agree
-about anything (`docs/ARCHITECTURE.md` §7 reads the lines). Six of the longest
-packets this client can build is about 13 seconds of transmission a minute,
-which is some 22 % against the default 50 %; the exchange a server actually
-asks for is nearer 2 %. On a unit somebody has set to a **low** duty cycle, a
-run-away Walter could meet upstream's budget as well as the ceiling — at which
-point upstream delays the next transmission and nothing is lost.
+about anything (`docs/ARCHITECTURE.md` §7 reads the lines). A fresh unit is at
+the band's 10 % — 360 seconds of each hour, 6 a minute — because its first boot
+asks for it (`docs/provisioning.md` §1). Six of the longest packets this client
+can build is about 13 seconds of transmission a minute, which is *above* that
+refill: a run-away Walter meets upstream's budget as well as the ceiling, and
+then upstream delays the next transmission and nothing is lost. The exchange a
+server actually asks for is nearer 2 % of the hour, a fifth of the budget. The
+client's ceiling deliberately does **not** follow the duty cycle down; §7 says
+why.
 
 **Repeating comes first, and is not slowed by this.** A packet of ours is
 queued at the same priority as a forward of routed traffic and ties go to
@@ -709,9 +712,13 @@ That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
 `time set`, `cli`, `power`, `env`, `lpp`, the job, the five sends, `obs`,
 `sleep`, an attention, the first-boot profile, `provision` and `reboot` against
 it, and times one pass of the link.
-It is not part of `tools/verify.ps1`: it needs a host compiler, and what it
-proves about the session itself is already a native test
-(`test/test_link_session`).
+**`tools/verify.ps1` runs it**, in the native step and with that step's own
+compiler — this machine's `g++` where there is one, the container above where
+there is not — so an include of it that no longer resolves is a red
+verification. What it proves about the session itself is also a native test
+(`test/test_link_session`); what only it can show is the tool, the replies and
+the shipped first-boot profile running through something that answers like
+upstream.
 
 Seven things in that program are the firmware's own code and not a stub - the
 clock keeper, the attention machine, the settings table, the power and

@@ -6,13 +6,18 @@
 # the first-boot profile and `provision`, and reboot, with no board and no serial port, plus the
 # timed worst-case pass.
 #
-# It needs a host C++ compiler. On Windows that is the container tasks/RUNBOOK.md section 2 names,
-# from the repository root:
+# **tools/verify.ps1 runs this**, in its native step, with the compiler that step uses - this
+# machine's g++ where there is one and the container of tasks/RUNBOOK.md section 2 where there is
+# not - so an include of this program's that no longer resolves is a red verification and not a
+# surprise for whoever next needs it (phase 3's review; tasks/phase-3/reports/03.md found it
+# stale). It needs a host C++ compiler and python3 and nothing else. By hand, from the repository
+# root:
 #
 #   docker run --rm -v "<repo>:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 #
-# On a machine with g++ and python3 it is just `bash tools/linkloop/check.sh`. Everything it
-# writes goes to out/linkloop/, which is git-ignored (tasks/README.md: leave the evidence).
+# On a machine with g++ and python3 it is just `bash tools/linkloop/check.sh`, or
+# `tools/verify.ps1 -Only native`. Everything it writes goes to out/linkloop/, which is
+# git-ignored (tasks/README.md: leave the evidence).
 set -eu
 
 out=out/linkloop
@@ -28,10 +33,27 @@ if ! command -v g++ > /dev/null; then
   fi
 fi
 
+# Two of the firmware's own defines, read out of platformio.ini rather than written here (the
+# same habit as tools/verify.ps1, which reads the board environments from that file so that there
+# is no second list to forget): the repeater image's band, and that band's duty cycle.
+# src/roles/repeater/firstboot/Profile.cpp builds the profile's `set dutycycle` line from the
+# second and refuses to compile without either, because the line is the band's and not this
+# file's (src/common/bands/Bands.h carries the same number and the two are held against each
+# other where the table is).
+ini=platformio.ini
+insec='$0==s{f=1;next} /^\[/{f=0}'   # awk: the lines of the section named by s, and no more
+band=$(awk -v s="[img_repeater_rak4630_single]" "$insec f&&\$1==\"band\"{print \$3;exit}" "$ini")
+duty=$(awk -v s="[band_$band]" "$insec f&&\$1==\"duty_cycle\"{print \$3;exit}" "$ini")
+test -n "$band" || { echo "platformio.ini: no band for the repeater image" >&2; exit 2; }
+test -n "$duty" || { echo "platformio.ini: [band_$band] has no duty_cycle" >&2; exit 2; }
+echo "== band $band, duty cycle ${duty}% (platformio.ini)"
+
 echo "== build"
 # src/common/power/BoardPower.cpp is the one file of that directory left out: it is the board's half -
 # Wire, the Adafruit driver and the file system - and tools/linkloop/ has its own fakes for each.
-g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src -o "$out/linkloop" \
+g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src \
+  -D TWINOAK_BAND="\"$band\"" -D TWINOAK_BAND_DUTY_CYCLE="$duty" \
+  -o "$out/linkloop" \
   tools/linkloop/linkloop.cpp src/common/link/codec/*.cpp src/common/link/session/*.cpp \
   src/common/link/attention/*.cpp src/roles/repeater/clock/ClockKeeper.cpp src/roles/repeater/app/Settings.cpp \
   src/roles/repeater/firstboot/Profile.cpp \
@@ -223,9 +245,24 @@ python3 tools/linkcli.py --pipe "$out/linkloop --wake" listen 4
 echo
 echo "== the first-boot profile (phase 3's task 03). A boot that found its settings runs no line"
 echo "   and says 'never'; --first-boot is a board with none, and the shipped table then runs"
-echo "   through upstream's own command interface."
+echo "   through upstream's own command interface - which here answers 'set dutycycle $duty' the"
+echo "   way the pinned CommonCLI.cpp does, so the profile's reply rule is what judges it."
 $cli cli "sensor get firstboot.state"
-python3 tools/linkcli.py --pipe "$out/linkloop --first-boot" cli "sensor get firstboot.state"
+python3 tools/linkcli.py --pipe "$out/linkloop --first-boot" cli "sensor get firstboot.state"   > "$out/first-boot.log" 2>&1
+cat "$out/first-boot.log"
+grep -q "> done" "$out/first-boot.log" || {
+  echo "a line of the shipped profile was refused by the miniature of upstream's set" >&2
+  exit 1
+}
+echo "   every line of the table taken, the duty-cycle line included"
+echo
+echo "== and a duty cycle the band could not have is refused, as upstream refuses it"
+python3 tools/linkcli.py --pipe "$out/linkloop" cli "set dutycycle 0" > "$out/dutycycle-bad.log" 2>&1
+cat "$out/dutycycle-bad.log"
+grep -q "ERROR: dutycycle must be 1-100" "$out/dutycycle-bad.log" || {
+  echo "set dutycycle 0 was not refused" >&2
+  exit 1
+}
 
 echo
 echo "== provision: the same lines a person types at the USB port, sent one by one over the link"

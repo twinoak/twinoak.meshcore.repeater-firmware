@@ -12,7 +12,12 @@
                 but native - read from the file, so there is no second list to forget); the
                 images are copied to out/build/<env>/
     4. native   pio test -e native - with this machine's own g++ or clang++ when there is one,
-                otherwise in the container tasks/RUNBOOK.md section 2 names (Docker)
+                otherwise in the container tasks/RUNBOOK.md section 2 names (Docker) - and then
+                bash tools/linkloop/check.sh, in the same place and with the same compiler: the
+                box link's own session, clock keeper, settings table and first-boot profile built
+                as a host program and driven by tools/linkcli.py through a pipe. One step, two
+                rows of the summary, because they are two things that can fail; the link loop is
+                in this step because it needs exactly what this step already has
     5. release  python tools/release/selfcheck.py --require-descriptor - the release tooling's
                 own tests, then a dry run of the real release over out/build/<env>, what step 3
                 left: the images, each one's descriptor held against its manifest entry, a
@@ -33,6 +38,8 @@
 
     .\tools\verify.ps1               everything
     .\tools\verify.ps1 -Only build   one step (spec, link, build, native, release)
+
+  -Only native runs the native tests and the link loop both: they are one step.
 #>
 [CmdletBinding()]
 param(
@@ -220,6 +227,32 @@ if (Step-Wanted 'native') {
     else {
         "no g++, no clang++ and no docker: pio test -e native cannot run here" | Out-File -FilePath $log -Encoding utf8
         Add-Result 'native' $false $log 'no compiler and no docker'
+    }
+
+    # tools/linkloop/check.sh, in the same step: the same host compiler, the same container image,
+    # its own log and its own row. Before this it was in no gate at all, and p3-01's move of src/
+    # left its includes stale with nothing to notice (tasks/phase-3/reports/03.md; the phase-3
+    # review made closing that this task's). It needs g++ and python3 - what the native tests
+    # need - and no PlatformIO, so the container run installs nothing here: check.sh's own first
+    # lines apt-get g++ when there is none, and python:3.11-slim is python3.
+    $linkLog = Join-Path $logDir 'linkloop.log'
+    Write-Line "`n== native: bash tools/linkloop/check.sh"
+    $bash = Get-Command bash -ErrorAction SilentlyContinue
+    if ($cxx -and $bash) {
+        $code = Invoke-Logged $linkLog $bash.Source @('tools/linkloop/check.sh')
+        Add-Result 'linkloop' ($code -eq 0) $linkLog "with this machine's $cxx"
+    }
+    elseif (Get-Command docker -ErrorAction SilentlyContinue) {
+        $mount = ($root -replace '\\', '/') + ':/w'
+        $code = Invoke-Logged $linkLog 'docker' @('run', '--rm', '-v', $mount, '-w', '/w',
+            '-e', 'DEBIAN_FRONTEND=noninteractive',
+            'python:3.11-slim', 'bash', 'tools/linkloop/check.sh')
+        Add-Result 'linkloop' ($code -eq 0) $linkLog 'in a container (no g++ on this machine)'
+    }
+    else {
+        "no g++, no clang++ and no docker: tools/linkloop/check.sh cannot run here" |
+            Out-File -FilePath $linkLog -Encoding utf8
+        Add-Result 'linkloop' $false $linkLog 'no compiler and no docker'
     }
 }
 

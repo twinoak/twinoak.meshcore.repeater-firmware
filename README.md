@@ -24,7 +24,7 @@ The plan, the decisions and the two protocols are in [`spec/`](spec/README.md)
 [`tasks/`](tasks/README.md); how it gets released is
 [`docs/release.md`](docs/release.md); how it keeps up with MeshCore — the weekly
 pull request that moves the pin, the one command for a bump that needs a
-session, and the seven places a bump re-reads — is
+session, and the eight places a bump re-reads — is
 [`docs/upstream.md`](docs/upstream.md).
 
 ## State
@@ -67,11 +67,12 @@ board. What the firmware does **today**, on a board nobody has flashed yet:
   repeater when a site has a noise problem, from the same board target, the
   same power code and the same release
   ([`docs/noisescope.md`](docs/noisescope.md)).
-- **It comes up as a member of the Danish mesh with nobody near it**: the right
-  channel from the build, a random admin password nobody knows, and a
-  first-boot profile of console lines that runs exactly once — and one written
-  procedure for making it *this* unit, at the USB port or over the link
-  ([`docs/provisioning.md`](docs/provisioning.md)).
+- **It comes up as a member of the Danish mesh with nobody near it, and inside
+  its band**: the right channel from the build, the duty cycle the band allows
+  (10 %, where upstream starts a repeater at 50 %), a random admin password
+  nobody knows, and a first-boot profile of console lines that runs exactly
+  once — and one written procedure for making it *this* unit, at the USB port
+  or over the link ([`docs/provisioning.md`](docs/provisioning.md)).
 
 Not done, and deliberately: the bridge role and the dual adapter
 (`docs/ARCHITECTURE.md` §8 has the seams). Nothing above has been on a bench:

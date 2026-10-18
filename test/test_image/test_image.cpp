@@ -16,11 +16,13 @@
 //      test. The manifest entry's half of the same rule is in tools/release/test_release.py,
 //      which reads the same sections.
 //
-//   3. **the band check** (src/common/bands/Bands.h): the table, the lookup and the refusal of a
-//      frequency outside the band an image says it is in - with a made-up band, because 433 has
-//      no block yet and the mechanism is what is being tested. On a board build the same table is
-//      a static_assert (src/common/bands/BandCheck.cpp), which cannot be tested from here: a
-//      build that fails to compile has no test to run.
+//   3. **the band check** (src/common/bands/Bands.h): the table, the lookups, the refusal of a
+//      frequency outside the band an image says it is in, and the duty cycle every band must say
+//      it allows - with a made-up band, because 433 has no block yet and the mechanism is what is
+//      being tested. On a board build the same table is three static_asserts
+//      (src/common/bands/BandCheck.cpp), which cannot be tested from here: a build that fails to
+//      compile has no test to run. What *is* tested from here is that platformio.ini's [band_*]
+//      block and the row agree, for every band of the file.
 //
 // PROJECT_DIR and MANIFEST_FIXTURES_DIR are platformio.ini's ([env:native]).
 
@@ -544,7 +546,7 @@ TEST(Bands, AnUnknownBandIsNeverHeldToBeRight) {
 // expression, which is what makes src/common/bands/BandCheck.cpp's static_assert possible.
 TEST(Bands, AMadeUpBandBehavesLikeARealOne) {
   using namespace twinoak::bands;  // NOLINT
-  static constexpr Band kMadeUp[] = {{"868", 863.0, 870.0}, {"915", 902.0, 928.0}};
+  static constexpr Band kMadeUp[] = {{"868", 863.0, 870.0, 10}, {"915", 902.0, 928.0, 100}};
   static constexpr size_t kCount = sizeof(kMadeUp) / sizeof(kMadeUp[0]);
 
   static_assert(known(kMadeUp, kCount, "915"), "a row added to the table is found at compile time");
@@ -560,6 +562,29 @@ TEST(Bands, AMadeUpBandBehavesLikeARealOne) {
   EXPECT_FALSE(holds(kMadeUp, kCount, "868", 915.0));
 }
 
+TEST(Bands, EveryBandSaysWhatDutyCycleItAllowsAndAnUnknownOneSaysNothing) {
+  using namespace twinoak::bands;  // NOLINT
+  // The band's legal ceiling is in its row beside its frequencies, and the first-boot profile's
+  // `set dutycycle` line is built from it (src/roles/repeater/firstboot/Profile.cpp): 869.618 MHz
+  // is in the 869.400-869.650 MHz sub-band of ERC Recommendation 70-03, Annex 1, row h1.7 -
+  // 500 mW e.r.p. and 10 %.
+  EXPECT_EQ(10, dutyCycleOf(kBands, kBandCount, "868"));
+  EXPECT_EQ(0, dutyCycleOf(kBands, kBandCount, "433"))
+      << "a band the table does not know has no duty cycle, and 0 is one no radio may be set to";
+  EXPECT_TRUE(everyDutyCycleIsSettable(kBands, kBandCount))
+      << "a row carries no duty cycle, or one outside the 1-100 upstream's `set dutycycle` takes:"
+         " a board build of it does not compile (src/common/bands/BandCheck.cpp)";
+  // And at compile time, which is what makes that check a static_assert.
+  static constexpr Band kMadeUp[] = {{"915", 902.0, 928.0, 25}};
+  static constexpr Band kNoCeiling[] = {{"915", 902.0, 928.0, 0}};
+  static constexpr Band kTooMuch[] = {{"915", 902.0, 928.0, 101}};
+  static_assert(dutyCycleOf(kMadeUp, 1, "915") == 25, "a band's duty cycle is a constant");
+  static_assert(everyDutyCycleIsSettable(kMadeUp, 1), "and 25 % is one a radio may be set to");
+  static_assert(!everyDutyCycleIsSettable(kNoCeiling, 1),
+                "a row whose regulation nobody looked up is not a band this firmware ships");
+  static_assert(!everyDutyCycleIsSettable(kTooMuch, 1), "and neither is one over 100 %");
+}
+
 TEST(Bands, ABandsOwnEndsAreReadableAndABandWithNoRowHasNone) {
   using namespace twinoak::bands;  // NOLINT
   // The scanner's default sweep is the band's range and is written nowhere else
@@ -570,7 +595,7 @@ TEST(Bands, ABandsOwnEndsAreReadableAndABandWithNoRowHasNone) {
       << "a band the table does not know has no range, and 0 MHz is no frequency at all";
   EXPECT_DOUBLE_EQ(0.0, highOf(kBands, kBandCount, "433"));
   // At compile time too, which is what lets a build take its sweep from it.
-  static constexpr Band kMadeUp[] = {{"915", 902.0, 928.0}};
+  static constexpr Band kMadeUp[] = {{"915", 902.0, 928.0, 100}};
   static_assert(lowOf(kMadeUp, 1, "915") == 902.0, "a band's low end is a constant expression");
   static_assert(highOf(kMadeUp, 1, "915") == 928.0, "and so is its high end");
 }
@@ -589,6 +614,22 @@ TEST(Bands, EveryBandOfPlatformioIniHasARowAndItsDefaultFrequencyFitsIt) {
     EXPECT_TRUE(holds(kBands, kBandCount, band.c_str(), std::stod(freq)))
         << "[band_" << band << "].freq is " << freq << ", which is outside band " << band
         << " - a board build of it does not compile (src/common/bands/BandCheck.cpp)";
+    // And the duty cycle, which the [band_*] block and the row both carry: the block is what the
+    // first-boot profile's line is built from (src/roles/repeater/firstboot/Profile.cpp, whose
+    // own static_assert holds the two against each other for the band it is built in) and the row
+    // is what this firmware says the band *is*. This is the same comparison for every band of the
+    // file at once, including one no environment is built for yet.
+    const std::string dc = value("band_" + band, "duty_cycle");
+    ASSERT_FALSE(dc.empty())
+        << "platformio.ini's [band_" << band << "] has no duty_cycle: the duty cycle its"
+           " regulation allows belongs there with the frequency and the power (ERC Recommendation"
+           " 70-03, Annex 1 for the European bands), and a fresh unit asks for it on its first"
+           " boot";
+    EXPECT_EQ(dutyCycleOf(kBands, kBandCount, band.c_str()), std::stoi(dc))
+        << "[band_" << band << "].duty_cycle is " << dc << " and src/common/bands/Bands.h's row"
+           " says " << dutyCycleOf(kBands, kBandCount, band.c_str())
+        << " - the profile's `set dutycycle` line is built from the first and the band is defined"
+           " by the second";
   }
 }
 

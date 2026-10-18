@@ -159,10 +159,12 @@ jobs:
             printf '.\\tasks\\run-all.ps1 -Phase sync\n'
             echo '```'
             echo
-            echo "Whichever it is, a bump re-reads seven places that depend on upstream in a way a"
+            echo "Whichever it is, a bump re-reads eight places that depend on upstream in a way a"
             echo "compiler may not catch - the copied flag blocks, \`[libs]\`, \`boards/rak4631.json\`,"
             echo "\`tools/pio/*\`, every comment in \`src/\` citing the old pin, \`build_as_lib.py\`'s"
-            echo "defines and the application region in the linker script - and the rails have to"
+            echo "defines, the application region in the linker script and what our sources take"
+            echo "from upstream's headers (\`docs/upstream.md\`'s table is the eight, in that order)"
+            echo "- and the rails have to"
             echo "survive it: nothing the mesh says logged as text, not one upstream file edited,"
             echo "the native tests and the spec fixtures green. \`tasks/sync/TEMPLATE.md\` is the list."
             echo

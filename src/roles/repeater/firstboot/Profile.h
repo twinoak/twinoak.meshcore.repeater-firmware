@@ -20,7 +20,10 @@
 //
 // **The radio's channel is not in the table.** It is the build's default (platformio.ini's
 // [band_*] block, phase 3's task 01), because a unit must be on the right frequency even if this
-// profile never ran at all.
+// profile never ran at all. The band's **duty cycle** is the one part of that block that cannot
+// be a build default - upstream keeps it in the preferences, as `airtime_factor` - so it is a
+// line of the table instead, and that line is *built* from the band rather than written
+// (TWINOAK_BAND_DUTY_CYCLE, held against src/common/bands/Bands.h's row where the table is).
 
 #pragma once
 
@@ -39,9 +42,9 @@ struct ProfileLine {
 };
 
 // The profile as shipped. Short on purpose: a line is here only where a document of this project
-// gives the value, and the one document that does is spec/SYSTEM.md S-12 (with meshmaster.dk's
-// D-33 behind it). Everything else a unit needs is per-site and belongs to provisioning
-// (docs/provisioning.md), or is already upstream's default.
+// gives the value - spec/SYSTEM.md S-12 (with meshmaster.dk's D-33 behind it) for the path
+// hashes, and the band's own regulation for the duty cycle. Everything else a unit needs is
+// per-site and belongs to provisioning (docs/provisioning.md), or is already upstream's default.
 extern const ProfileLine kProfile[];
 extern const int kProfileCount;
 

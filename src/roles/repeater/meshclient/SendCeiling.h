@@ -15,15 +15,22 @@
 //     paced agent can ever meet it. On this channel (869.618 MHz, 62.5 kHz, SF8, CR8, 32 preamble
 //     symbols - RadioLibWrapper::preambleLengthForSF at the pin) the longest packet this client
 //     can build is about 1.7 s of airtime flooded and about 2.2 s direct along a long path, so six
-//     of them are at most some 13 seconds of transmission a minute - 22 %, inside the 50 % this
-//     repeater allows itself by default (MyMesh overrides getAirtimeBudgetFactor() to return
-//     `_prefs.airtime_factor`, which its constructor sets to 1.0 - examples/simple_repeater/
-//     MyMesh.h:134-137 and MyMesh.cpp:890 at the pin d9296435 - and 1/(1+1) of a 3 600 000 ms
-//     window is the budget, src/Dispatcher.cpp:25-27 and :38-52). A real exchange is far smaller:
-//     a login is about 0.6 s, a status request 0.7 s, and the server's own 2 a minute is some 2 %
-//     of the hour. **A console `set dutycycle` below about 22 % could be saturated by six
-//     maximum-size sends a minute**, and then upstream simply delays - nothing is refused and
-//     nothing is lost (docs/ARCHITECTURE.md section 7).
+//     of them are at most some 13 seconds of transmission a minute. A real exchange is far
+//     smaller: a login is about 0.6 s, a status request 0.7 s, and the server's own 2 a minute is
+//     some 2 % of the hour.
+//
+//     **This number does not follow the duty cycle, on purpose.** A unit of ours starts at the
+//     band's 10 % - the first-boot profile's second line, built from platformio.ini's
+//     [band_868].duty_cycle - which is a budget of 360 s an hour, 6 s a minute (MyMesh overrides
+//     getAirtimeBudgetFactor() to return `_prefs.airtime_factor`; `set dutycycle 10` makes that
+//     9.0 and 1/(1+9) of a 3 600 000 ms window is the budget - examples/simple_repeater/
+//     MyMesh.h:134-137, src/helpers/CommonCLI.cpp:450-461 and src/Dispatcher.cpp:25-27 and
+//     :38-52 at the pin d9296435). Six maximum-size sends a minute is *above* that refill, and
+//     what happens then is that **upstream delays**: nothing is refused and nothing is lost, and
+//     the hour stays inside 360 s whoever asked for it. Lowering this ceiling to match would cost
+//     the margin that makes it a backstop - three a minute is one and a half times the server's
+//     rate, which a correct agent can touch with a retry - and would buy nothing the band does
+//     not already have. docs/ARCHITECTURE.md section 7 works the arithmetic out.
 //   - **at least 2 seconds between two**: a tenth of the server's default gap, and of the same
 //     order as the airtime of one packet, so a send is never more than one packet ahead of the
 //     radio (docs/ARCHITECTURE.md section 7 has what that costs a packet waiting to be
@@ -41,7 +48,8 @@
 // measured airtime of every completed send at :88-98, locally originated packets included,
 // because there is one outbound queue and one `tx_budget_ms`). This counts *sends of ours* and is
 // about the mesh's patience rather than the band's: 6 a minute is a ceiling a correct Walter never
-// touches, and upstream's budget is one a busy repeater might.
+// touches, and upstream's budget is one a busy repeater might. The band's own ceiling is in the
+// band (src/common/bands/Bands.h) and reaches a unit through its first boot.
 //
 // Host-portable: no Arduino, no MeshCore, no allocation. test/test_meshclient drives it against a
 // fake clock; test/test_link_session drives it through a real Session.
