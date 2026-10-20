@@ -6,13 +6,13 @@ documents it names and in each firmware repository's `tasks/`.
 
 ## 1. What is being built, and where
 
-| Repository | What it is | State on 2026-10-11 |
+| Repository | What it is | State on 2026-10-20 |
 |---|---|---|
-| `twinoak.meshcore.standard-repeater-design-v2` | the hardware, and **this specification** (`software/spec/`) | boards ordered, interfaces frozen |
-| `twinoak.meshcore.repeater-firmware` | the firmware family for the LoRa box (RAK4630): the repeater, later a bridge, and NoiseScope | empty; piles written |
-| `twinoak.meshcore.walter-firmware` | the firmware for the LTE box (Walter, ESP32-S3 + LTE-M) | empty; piles written |
-| `twinoak/meshmaster.dk` | the backend: register, exit nodes, jobs, configuration | running; other agents at work — proposals only (§8) |
-| `twinoak/meshmaster-agent-firmware` | the exit node that is one board (Heltec) | running; the model for how these two are built |
+| `twinoak.meshcore.standard-repeater-design-v2` | the hardware, and **this specification** (`software/spec/`) | interfaces frozen; first article on the bench, the Walter powered in the real setup |
+| `twinoak.meshcore.repeater-firmware` | the firmware family for the LoRa box (RAK4630): the repeater, later a bridge, and NoiseScope | phases 0–3.3 merged, host-tested, never on a board; pile 3.4 written |
+| `twinoak.meshcore.walter-firmware` | the firmware for the LTE box (Walter, ESP32-S3 + LTE-M) | phases 0–3 merged, host-tested, never on a board; phase 4 waits at task 01; piles 5–6 written |
+| `twinoak/meshmaster.dk` | the backend: register, exit nodes, jobs, configuration, the firmware catalogue | running; piles 4.14 (the unit) and 4.15 merged; pile 4.16 written |
+| `twinoak/twinoak.meshmaster.exitnode-firmware` | the exit node that is one board (Heltec), and the `agent-core` library the Walter runs | running; `agent-core` v0.2.0 tagged, v0.3.0 closes with task 24 |
 
 This directory holds what both firmwares must agree on, and nothing else:
 
@@ -91,6 +91,39 @@ known-good image of the RAK's firmware in its own flash and puts it back when a 
 health check. *Why:* the project exists because remote repeaters were bricked by OTA. The RAK
 cannot brick itself if it never updates itself.
 
+**S-5a · A radio that has never had our base gets it from a person's command, and from nothing
+else.** *(Decided 2026-10-20, Thomas.)* Every RAK4630 arrives with RAK's RUI3, not the MBR,
+SoftDevice and bootloader the repeater is linked against. The Walter gives it that base — the
+manifest's `provision` file (`FIRMWARE-MANIFEST.md` §4a) — when, and only when, a person types
+`rak provision <radio> confirm` on its console, `<radio>` naming the radio:
+
+- its `DEVICEID` as `rak swd id` prints it — `%08X%08X` of `DEVICEID[1]` then `DEVICEID[0]`, the
+  same 16 hex digits its USB port reports as a serial number, read without regard to case — when the
+  access port is open;
+- `locked` when the port is closed **and** the radio runs no application (the link answers no
+  `HELLO`);
+- `locked:<key16>` when the port is closed and an application answers, `<key16>` being the first 16
+  hex digits of the public key `rak id` prints. A radio that has an identity is always named before it loses it.
+
+On a bench the person may give that consent ahead of time for one radio, in the Walter firmware's
+`bench.local.json` (`"radio": "disposable"`), and then only that repository's `tools/bench/` types
+the command. The sequence: CTRL-AP `ERASEALL` (it works on a locked part); the access port must then
+read open, after **one CTRL-AP soft reset** if it does not; the base's flash and UICR words;
+`UICR.APPROTECT = 0x5A` **only** on a part whose `INFO.VARIANT` build code is `F` (revision 3, where
+that value keeps the port open; on earlier parts it would close it) — a lookup table, and a variant
+outside it stops the command; every word read back; **no pin, power-on or brownout reset** between
+the erase and the last UICR write — the soft reset above is the only reset allowed there (a revision 3
+port stays open only until a pin, power or brownout reset); one pin reset at the end. Until it has its
+first application the radio's slot is *awaiting its first install*, and the supervisor leaves it
+alone. The application is the ordinary first install after it (a candidate, `rak update
+--first-install`).
+Nothing automatic leads there: not the supervisor, not an update, not the agent, not a job from the
+server. A failure anywhere leaves the radio erased or as it was, and the command starts from erased,
+so it is simply run again: no journal. *Why:* the alternative is a debug probe on every unit, and on
+every radio swapped in the field (README goal 4); the Walter already holds the debug port and an image
+store. *What S-5 still says:* nothing automatic erases a chip, ever. *Later, not in these piles:* the
+same command as a MeshMaster job, audited, behind a second factor, naming the radio as above.
+
 **S-6 · The Walter updates itself A/B with rollback**, and a new image is confirmed only after it
 has booted, spoken to the RAK and reached the server. A Walter that cannot do all three goes back.
 
@@ -156,14 +189,15 @@ What it adds to a stock repeater:
 |---|---|
 | board | the pins of `INTERCONNECT.md` and their rules: reset is open-drain and never driven high; tristate before kill; two resets at least a second apart |
 | link client | `LINK-PROTOCOL.md` from the other end: retries, the remembered response, events, telling a repeater from NoiseScope |
-| SWD | a bit-banged debug port (100 kHz to start, through 470 Ω and 2.2 nF), the nRF52's memory access port, its flash controller — and a simulator of all three for the tests |
+| SWD | a bit-banged debug port (125 kHz to start, the nRF52840's specified minimum, through 470 Ω and 2.2 nF), the nRF52's memory access port, its flash controller — and a simulator of all three for the tests |
 | flasher | an image, a region, page erases of exactly what the image covers, write, verify, the bootloader's settings page; refusal of everything outside the region |
-| images | a store for the RAK's golden image, a candidate and a scanner image; manifest, signature, descriptor |
+| provisioning | S-5a, and nothing but S-5a: the CTRL-AP's erase and soft reset, the UICR, the base — one door, opened by one console command |
+| images | a store for the RAK's golden image, a candidate, a scanner image and the board's base; manifest, signature, descriptor |
 | updates | the RAK's update with health check and rollback (S-5); the Walter's own (S-6) |
 | supervisor | the RAK's heartbeat; the ladder from "ask again" to "reflash the golden image", with daily limits |
 | uplink | the modem: attach, time, HTTPS with a verified chain, resumable downloads |
 | duty cycle | wake, do one thing well, sleep; the check-in interval follows the battery |
-| agent | the MeshMaster agent — **not in these piles** (§8) |
+| agent | the MeshMaster agent: the exit-node firmware's `agent-core` behind the wake cycle (phase 4, §8) |
 
 ## 6. Updating a unit
 
@@ -225,6 +259,13 @@ the canary), the exit-node firmware's pile 1.5 (*the agent core as a library*) a
 phase 4 (*the agent*) — in that order of dependency. Until phase 4 lands, the Walter's wake cycle
 still stops at its seam.
 
+**The unit before its repeater (2026-10-20).** A unit is registered in MeshMaster as an exit node
+with no repeater, on the bench, before its radio has an identity; the radio is provisioned and
+given its application by that unit (S-5a); the unit's heartbeat then reports the radio's key, and a
+person registers the repeater from that key — at which moment the two are linked, not at some later
+check-in. meshmaster.dk pile 4.16, task 132; the Walter's phase 4 (a heartbeat with no radio key
+while the radio has none).
+
 ## 9. Order of work
 
 | | Repeater firmware | Walter firmware |
@@ -235,7 +276,9 @@ still stops at its seam.
 | phase 3 | roles and boards; NoiseScope moves in; first-boot provisioning | the modem; HTTPS; settings and console; the duty cycle; the wake cycle |
 | phase 3.1, 3.2 | the fast sweep; a MeshCore bump can be green | — |
 | phase 4 | — | the agent: the library at a pin, the mesh over the link, the uplink over the modem, the firmware jobs on the update machines |
-| later | the bench pile; the bridge role; the dual adapter | the bench pile; NoiseScope as a job |
+| phase 3.4 / 5 | the base in the release (`provision`); the first board on the bench | the radio's base: the `provision` file in the store, the CTRL-AP and UICR behind one door, `rak provision` (S-5a) |
+| phase 6 | — | the bench pile: a bench a session may use; the first walk; the radio's base and first image on silicon; the unit on the server |
+| later | the bridge role; the dual adapter | NoiseScope as a job; `rak provision` as a MeshMaster job |
 
 The two repositories do not wait for each other: what they share is fixed here first. Phase 4 of
 the Walter waits for two piles elsewhere (§8): `meshmaster.dk` 4.14 and the exit-node firmware's
@@ -246,8 +289,10 @@ the Walter waits for two piles elsewhere (§8): `meshmaster.dk` 4.14 and the exi
 1. **The release key** — Thomas makes it (`manifestref.py keygen`) and stores the private half as
    the release workflows' secret. Until then no unit accepts an update, which is correct.
 2. **APPROTECT on the production modules** (`BENCH-BREADBOARD.md` caveat 6) — read `INFO.VARIANT`
-   on the first board. If the access port is closed, opening it is a bench procedure with a chip
-   erase and a full reflash, done once per module by a person; the flasher detects it and refuses.
+   on the first board. If the access port is closed, opening it is S-5a: a person's `rak provision`,
+   once per module. The flasher still detects a closed port and refuses. Whether the RAK's bootloader
+   keeps a revision 3 port open after the reset (it does only if it was built with Nordic's MDK
+   8.40.2 or later) is the first board's to say: `rak provision` reports the port after its reset.
 3. **The bootloader's settings page** after an SWD flash — the Adafruit bootloader checks a CRC it
    recorded at the last DFU; the flasher has to leave that page in a state the bootloader accepts.
    The flasher task reads the bootloader's source and decides; the bench confirms.

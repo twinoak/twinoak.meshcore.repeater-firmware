@@ -10,6 +10,7 @@ fixtures/manifest/.
     python3 manifestref.py sign <private-hex> <manifest.json>      write <manifest.json>.sig
     python3 manifestref.py verify <public-hex> <manifest.json>     check it against its .sig
     python3 manifestref.py descriptor <image.bin>          find and print the descriptor in an image
+    python3 manifestref.py base <base.hex> <start> <end>   check a `provision` file against an app_region
 
 The descriptor and manifest halves need only the standard library. Signing and verifying use the
 `cryptography` package (Ed25519 as in RFC 8032, no pre-hash, no context).
@@ -82,7 +83,7 @@ def find_descriptor(image: bytes):
 
 SCHEMA = 1
 PRODUCTS = ("twinoak-repeater-firmware", "twinoak-walter-firmware")
-USES = ("swd", "usb-dfu", "usb-uf2", "ota", "factory", "debug")
+USES = ("swd", "usb-dfu", "usb-uf2", "ota", "factory", "debug", "provision")
 
 
 def canonical(manifest: dict) -> bytes:
@@ -125,6 +126,140 @@ def validate(manifest: dict):
                 need("start" in region and "end" in region, "an swd image needs app_region")
                 start, end, load = int(region["start"], 16), int(region["end"], 16), int(f["load_address"], 16)
                 need(start <= load and load + f["size"] <= end, "the image does not fit its app_region")
+            need(f.get("format") != "hex" or f["use"] == "provision", "format hex is for a provision file only")
+            if f["use"] == "provision":
+                need(f.get("format") == "hex", "a provision file is Intel HEX (format hex)")
+                need("load_address" not in f, "a provision file has no load_address: its records say where")
+                need(image["mcu"] == "nrf52840", "a provision file is for an nRF52840 board")
+                region = image.get("app_region", {})
+                need("start" in region and "end" in region, "a provision file needs its image's app_region")
+        need(sum(1 for f in image["files"] if f.get("use") == "provision") <= 1,
+             "more than one provision file in image " + image["id"])
+
+
+# ----------------------------------------------------------------------------- the base (`provision`)
+#
+# What goes under a TwinOak application on an nRF52840 board: the MBR and SoftDevice, the bootloader
+# and the UICR words the MBR reads (FIRMWARE-MANIFEST.md §4a). Written only by the Walter's
+# `rak provision` command (SYSTEM.md S-5a), never by an update. These rules are the whole contract.
+
+FLASH_END = 0x00100000
+UICR_START, UICR_END = 0x10001000, 0x10001308   # REGOUT0 at 0x10001304 is UICR's last register
+UICR_NRFFW0, UICR_NRFFW1 = 0x10001014, 0x10001018
+UICR_APPROTECT = 0x10001208
+SD_INFO = 0x00003000              # MBR size 0x1000 + SD_INFO_STRUCT_OFFSET 0x2000 (Nordic nrf_sdm.h)
+SD_MAGIC_VALUE = 0x51B1E5DB       # at SD_INFO + 0x04
+SD_S140_ID, SD_S140_VERSION = 140, 6001001   # SD_ID at + 0x10, SD_VERSION at + 0x14: S140 6.1.1
+
+
+def parse_ihex(data: bytes) -> dict:
+    """Intel HEX to {address: byte}. Records 00, 01, 02, 04; 03 and 05 (start addresses) are read
+    and ignored. A checksum error, a record after the end, no end record, or one address given two
+    different bytes is refused. Raises ValueError."""
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        raise ValueError("not ASCII")
+    mem, base, ended = {}, 0, False
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        if ended:
+            raise ValueError("line %d: a record after the end record" % n)
+        if not line.startswith(":"):
+            raise ValueError("line %d: not an Intel HEX record" % n)
+        try:
+            raw = bytes.fromhex(line[1:])
+        except ValueError:
+            raise ValueError("line %d: not hex digits" % n)
+        if len(raw) < 5 or len(raw) != raw[0] + 5:
+            raise ValueError("line %d: record length" % n)
+        if sum(raw) & 0xFF:
+            raise ValueError("line %d: checksum" % n)
+        addr, kind, body = (raw[1] << 8) | raw[2], raw[3], raw[4:-1]
+        if kind == 0:
+            for i, b in enumerate(body):
+                a = base + addr + i
+                if mem.get(a, b) != b:
+                    raise ValueError("line %d: 0x%08X given two different bytes" % (n, a))
+                mem[a] = b
+        elif kind == 1:
+            ended = True
+        elif kind == 2 and len(body) == 2:
+            base = ((body[0] << 8) | body[1]) << 4
+        elif kind == 4 and len(body) == 2:
+            base = ((body[0] << 8) | body[1]) << 16
+        elif kind in (3, 5):
+            pass
+        else:
+            raise ValueError("line %d: record type %d" % (n, kind))
+    if not ended:
+        raise ValueError("no end record (a truncated file?)")
+    if not mem:
+        raise ValueError("no data")
+    return mem
+
+
+def _word(mem: dict, addr: int):
+    if all(addr + i in mem for i in range(4)):
+        return mem[addr] | mem[addr + 1] << 8 | mem[addr + 2] << 16 | mem[addr + 3] << 24
+    return None
+
+
+def validate_provision(data: bytes, app_start: int, app_end: int) -> dict:
+    """The base rules of FIRMWARE-MANIFEST.md §4a, in their order. Returns what the base is;
+    raises ValueError with the rule that failed."""
+    def need(cond, what):
+        if not cond:
+            raise ValueError(what)
+
+    mem = parse_ihex(data)
+    for a in mem:
+        need(a < FLASH_END or UICR_START <= a < UICR_END, "0x%08X is neither flash nor UICR" % a)
+    need(all(not (UICR_APPROTECT <= a < UICR_APPROTECT + 4) for a in mem),
+         "the file writes UICR.APPROTECT: the Walter decides that word by the chip's revision")
+    need(0 in mem, "nothing at 0x00000000: no MBR (a bootloader-only file?)")
+    need(_word(mem, SD_INFO + 0x04) == SD_MAGIC_VALUE, "no SoftDevice information structure at 0x00003000")
+    sd_end = _word(mem, SD_INFO + 0x08)
+    need(sd_end == app_start, "the SoftDevice ends at %s, the application starts at 0x%08X"
+         % ("0x%08X" % sd_end if sd_end is not None else "?", app_start))
+    sd_id, sd_version = _word(mem, SD_INFO + 0x10), _word(mem, SD_INFO + 0x14)
+    need((sd_id, sd_version) == (SD_S140_ID, SD_S140_VERSION),
+         "the SoftDevice is not S140 6.1.1 (id %s, version %s)" % (sd_id, sd_version))
+    boot = _word(mem, UICR_NRFFW0)
+    need(boot is not None, "no UICR.NRFFW[0]: the MBR would never start a bootloader")
+    need(boot % 0x1000 == 0 and app_end <= boot < FLASH_END and boot in mem,
+         "UICR.NRFFW[0] = 0x%08X: not a page at or above the application region's end that the file fills" % boot)
+    for a in mem:
+        if a < FLASH_END:
+            need(a < app_start or a >= boot,
+                 "0x%08X lies between the SoftDevice and the bootloader: the application and the file system are not the base's" % a)
+    flash_bytes = sum(1 for a in mem if a < FLASH_END)
+    uicr_words = sorted({a & ~3 for a in mem if a >= UICR_START})
+    return {"bootloader": "0x%08X" % boot, "softdevice": "S140 6.1.1", "flash_bytes": flash_bytes,
+            "uicr_words": ["0x%08X" % w for w in uicr_words],
+            "mbr_params": "0x%08X" % _word(mem, UICR_NRFFW1) if _word(mem, UICR_NRFFW1) is not None else None}
+
+
+def ihex(chunks) -> bytes:
+    """[(address, bytes)] to Intel HEX: 16 data bytes a record, 04 records at every 64 KB, an end
+    record. How a fixture is written; any valid Intel HEX is accepted."""
+    lines, upper = [], None
+
+    def record(addr, kind, body):
+        raw = bytes([len(body), (addr >> 8) & 0xFF, addr & 0xFF, kind]) + body
+        return ":" + (raw + bytes([(-sum(raw)) & 0xFF])).hex().upper()
+
+    for start, blob in chunks:
+        for off in range(0, len(blob), 16):
+            a = start + off
+            if a >> 16 != upper:
+                upper = a >> 16
+                lines.append(record(0, 4, bytes([upper >> 8, upper & 0xFF])))
+            lines.append(record(a & 0xFFFF, 0, blob[off:off + 16]))
+    lines.append(record(0, 1, b""))
+    return ("\n".join(lines) + "\n").encode("ascii")
 
 
 def file_entry(use: str, name: str, data: bytes, load_address=None) -> dict:
@@ -272,6 +407,71 @@ def build_fixtures(out_dir: str):
     other = hashlib.sha256(b"some other key").digest()
     write("manifest-repeater-unknown-key.json.sig", sign(other, canonical(repeater)).encode("ascii"))
 
+    # the base under the repeater (FIRMWARE-MANIFEST.md §4a): a stand-in, small, every rule met
+    def words(*vals):
+        return b"".join(struct.pack("<I", v) for v in vals)
+
+    def base_chunks(sd_end=0x26000, nrffw0=0xF4000):
+        filler = fake_image(b"", 256, 0, 7)
+        return [
+            (0x00000000, filler),                                             # the MBR
+            (0x00001000, filler),                                             # the SoftDevice ...
+            (0x00003000, words(0, SD_MAGIC_VALUE, sd_end, 0x00B6, SD_S140_ID, SD_S140_VERSION)),
+            (0x000F4000, filler),                                             # the bootloader
+            (0x10001014, words(nrffw0, 0x000FE000)),                          # NRFFW[0], NRFFW[1]
+        ]
+
+    base = ihex(base_chunks())
+    write("base-rak4630.hex", base)
+    refused = [
+        ("base-bootloader-only.hex", ihex([c for c in base_chunks() if c[0] >= 0xF4000]),
+         "nothing at 0x00000000: no MBR (a bootloader-only file?)"),
+        ("base-sets-approtect.hex", ihex(base_chunks() + [(UICR_APPROTECT, words(0x5A))]),
+         "the file writes UICR.APPROTECT: the Walter decides that word by the chip's revision"),
+        ("base-writes-the-application.hex", ihex(base_chunks() + [(0x00026000, words(0))]),
+         "0x00026000 lies between the SoftDevice and the bootloader: the application and the file system are not the base's"),
+        ("base-other-softdevice.hex", ihex(base_chunks(sd_end=0x27000)),
+         "the SoftDevice ends at 0x00027000, the application starts at 0x00026000"),
+        ("base-no-bootloader-address.hex", ihex([c for c in base_chunks() if c[0] != 0x10001014]),
+         "no UICR.NRFFW[0]: the MBR would never start a bootloader"),
+    ]
+    # rule 1, record by record: a stand-in's lines, each broken one way
+    good_lines = base.decode("ascii").splitlines()
+    bad_sum = list(good_lines)
+    bad_sum[2] = bad_sum[2][:-2] + "%02X" % ((int(bad_sum[2][-2:], 16) + 1) & 0xFF)
+    twice = list(good_lines)
+    twice[-1:-1] = ihex([(0x00000000, b"\x00")]).decode("ascii").splitlines()[:2]  # back to 0, one byte
+    refused += [
+        ("base-bad-checksum.hex", ("\n".join(bad_sum) + "\n").encode("ascii"), "line 3: checksum"),
+        ("base-no-end-record.hex", ("\n".join(good_lines[:-1]) + "\n").encode("ascii"),
+         "no end record (a truncated file?)"),
+        ("base-after-the-end.hex", ("\n".join(good_lines + [good_lines[1]]) + "\n").encode("ascii"),
+         "line %d: a record after the end record" % (len(good_lines) + 1)),
+        ("base-one-address-two-bytes.hex", ("\n".join(twice) + "\n").encode("ascii"),
+         "line %d: 0x00000000 given two different bytes" % (len(good_lines) + 1)),
+        ("base-outside-uicr.hex", ihex(base_chunks() + [(0x10001400, words(0))]),
+         "0x10001400 is neither flash nor UICR"),
+        ("base-other-softdevice-version.hex",
+         ihex([c if c[0] != 0x3000 else (0x3000, words(0, SD_MAGIC_VALUE, 0x26000, 0x0123, SD_S140_ID, 7002000))
+               for c in base_chunks()]),
+         "the SoftDevice is not S140 6.1.1 (id 140, version 7002000)"),
+        ("base-unaligned-bootloader.hex",
+         ihex([c for c in base_chunks(nrffw0=0xF4100) if c[0] != 0xF4000] + [(0x000F4100, fake_image(b"", 256, 0, 8))]),
+         "UICR.NRFFW[0] = 0x000F4100: not a page at or above the application region's end that the file fills"),
+        ("base-bootloader-in-the-application.hex",
+         ihex([c for c in base_chunks(nrffw0=0xD0000) if c[0] != 0xF4000] + [(0x000D0000, fake_image(b"", 256, 0, 9))]),
+         "UICR.NRFFW[0] = 0x000D0000: not a page at or above the application region's end that the file fills"),
+        ("base-writes-the-file-system.hex", ihex(base_chunks() + [(0x000F0000, words(0))]),
+         "0x000F0000 lies between the SoftDevice and the bootloader: the application and the file system are not the base's"),
+    ]
+    for name, data, _ in refused:
+        write(name, data)
+    with_base = json.loads(canonical(repeater))
+    with_base["images"][0]["files"].append(file_entry("provision", "twinoak-base-rak4630-s140-6.1.1.hex", base))
+    validate(with_base)
+    write("manifest-repeater-base.json", canonical(with_base))
+    write("manifest-repeater-base.json.sig", sign(TEST_PRIVATE, canonical(with_base)).encode("ascii"))
+
     write("image-repeater.bin", rep_bin)
     write("image-walter-ota.bin", wal_ota)
     two = bytearray(rep_bin)
@@ -301,6 +501,7 @@ def build_fixtures(out_dir: str):
              "why": "signed by a key the verifier does not hold"},
             {"manifest": "manifest-walter.json", "sig": "manifest-repeater.json.sig", "valid": False,
              "why": "another manifest's signature"},
+            {"manifest": "manifest-repeater-base.json", "sig": "manifest-repeater-base.json.sig", "valid": True},
         ],
         "descriptors": [
             {"image": "image-repeater.bin", "valid": True, "offset": 0x400, "hex": rep_desc.hex(),
@@ -315,7 +516,16 @@ def build_fixtures(out_dir: str):
              "bytes_of": "image-repeater.bin"},
             {"manifest": "manifest-walter.json", "name": walter["images"][0]["files"][0]["name"],
              "bytes_of": "image-walter-ota.bin"},
+            {"manifest": "manifest-repeater-base.json", "name": with_base["images"][0]["files"][3]["name"],
+             "bytes_of": "base-rak4630.hex"},
         ],
+        "provision": {
+            "about": "FIRMWARE-MANIFEST.md 4a, checked against the image's app_region of manifest-repeater-base.json; every base gives the same result against the rak4630-single board region, 0x00026000-0x000ED000.",
+            "app_region": with_base["images"][0]["app_region"],
+            "bases": [{"file": "base-rak4630.hex", "valid": True,
+                       "summary": validate_provision(base, 0x26000, 0xD4000)}]
+                     + [{"file": name, "valid": False, "why": why} for name, _, why in refused],
+        },
     }
     write("index.json", (json.dumps(index, indent=1) + "\n").encode("ascii"))
 
@@ -337,7 +547,7 @@ def check(out_dir: str) -> int:
         got = verify([public], read(s["manifest"]), read(s["sig"]).decode("ascii"))
         assert got == s["valid"], s
         n += 1
-    for name in ("manifest-repeater.json", "manifest-walter.json"):
+    for name in ("manifest-repeater.json", "manifest-walter.json", "manifest-repeater-base.json"):
         manifest = json.loads(read(name))
         validate(manifest)
         assert canonical(manifest) == read(name), name + " is not in canonical form"
@@ -358,6 +568,19 @@ def check(out_dir: str) -> int:
         entry = [e for image in manifest["images"] for e in image["files"] if e["name"] == f["name"]][0]
         data = read(f["bytes_of"])
         assert entry["size"] == len(data) and entry["sha256"] == hashlib.sha256(data).hexdigest(), f
+        n += 1
+    region = index["provision"]["app_region"]
+    start, end = int(region["start"], 16), int(region["end"], 16)
+    for b in index["provision"]["bases"]:
+        try:
+            got, why = validate_provision(read(b["file"]), start, end), None
+        except ValueError as e:
+            got, why = None, str(e)
+        assert (got is not None) == b["valid"], (b, why)
+        if b["valid"]:
+            assert got == b["summary"], (b, got)
+        else:
+            assert why == b["why"], (b, why)
         n += 1
     return n
 
@@ -395,6 +618,11 @@ def main(argv):
             ok = verify([bytes.fromhex(argv[2])], message, fh.read())
         print("valid" if ok else "NOT VALID")
         return 0 if ok else 1
+    if len(argv) == 5 and argv[1] == "base":
+        with open(argv[2], "rb") as fh:
+            summary = validate_provision(fh.read(), int(argv[3], 16), int(argv[4], 16))
+        print(json.dumps(summary, indent=1))
+        return 0
     if len(argv) == 3 and argv[1] == "descriptor":
         with open(argv[2], "rb") as fh:
             offset, fields = find_descriptor(fh.read())

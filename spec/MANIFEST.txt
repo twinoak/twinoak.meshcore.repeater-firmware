@@ -1,18 +1,35 @@
 # The system specification, copied - never edited here.
-# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit unknown (not a git checkout)
+# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 7faea5fa5e4874c4b612096ceeda7da3ac52daf3
 # written by spec/tools/specsync.py; README.md in this directory says how
 #
 # sha256                                                           bytes  name
-b2dc2deb3c9406a2486985f87e69cae08c3a22b0d3bd2df8ab0104a17e5b01e9     9065  FIRMWARE-MANIFEST.md
+f16aafa20c4ffc07da943a895c9f34befd17e9b3f87e06c7357bef07fa4b5e94    13082  FIRMWARE-MANIFEST.md
 816719365e2335cb950278cde03032cdb701c0cf580fdc65269e2243df42d467    27417  LINK-PROTOCOL.md
-1d035e2ab98a7b01aeedee7ea1a21732f53ce2db7bf0df6c26cb272f588d7b36    17739  SYSTEM.md
+6a93378991dc43343e9212e5eb41fe7aff0e7e4369de3261849010a30f93410a    22055  SYSTEM.md
 ad03e70fe6e6081641eab336397f16e37d6b41b2ff4dd6c2db29cd911d058776    35303  fixtures/link/link-v1.json
 46292a69beece337ec8fa3ca4716a9999cbba624474feeb3eff4e27bf2e1f2e6      322  fixtures/manifest/TEST-KEY.txt
+d8c255fbfded576993b49bcf90a4d2f514358917904caf14b24561a699c539d7     1524  fixtures/manifest/base-after-the-end.hex
+9951533c6f26b02da0bde43fe4ecb50ab2e184ffd3a3e056616115b67217751e     1480  fixtures/manifest/base-bad-checksum.hex
+f109fa130b2fb65d5aa4e3a2a6ff35fd7071383d96747de8dc7d1f099c3def45     1480  fixtures/manifest/base-bootloader-in-the-application.hex
+54d1ff1decfb0668bff273cdc0ba68727c10960241e01239f9c3166e6cbf2eda      512  fixtures/manifest/base-bootloader-only.hex
+26ef571229b71323e797a7730413187d9c1f0069458372c6ca85ae9c9a8a0d44     1436  fixtures/manifest/base-no-bootloader-address.hex
+59a896e3be9fbb7c3137109fc2854656f090bcb212076678e245b37639f4a617     1468  fixtures/manifest/base-no-end-record.hex
+b06db68a249804060896c404694f22611832ff205a5b00de11726c7b8fcd81c3     1510  fixtures/manifest/base-one-address-two-bytes.hex
+a866d50f625807574b378870b974d2b59e86a04abc05cc4503d0afe1440bd183     1480  fixtures/manifest/base-other-softdevice-version.hex
+b3b7159215895937b76753ce4c7fa2d66fc172b305c90304940b1648436449d7     1480  fixtures/manifest/base-other-softdevice.hex
+9e683fcccfe16b3ab6e9afd1c2dfb5eac9a84306d926087ccc418e6005dd0f6d     1500  fixtures/manifest/base-outside-uicr.hex
+bff3e105ae37b595bd7bc2561fb2299cd32eb378bd3555852d65ec5517ffb977     1480  fixtures/manifest/base-rak4630.hex
+bb3a44ba63bce8e2d5cf51fad971738f370b725a25e6d71c9dfc1b726319f0c5     1500  fixtures/manifest/base-sets-approtect.hex
+f3505bca9ea6db994bb330c683445a1631d7985704ad75518cdf3bae4e57fcf9     1480  fixtures/manifest/base-unaligned-bootloader.hex
+c228e8a5bc38d620f8e8027e07315535da406087262979e3d74134c751003d03     1516  fixtures/manifest/base-writes-the-application.hex
+25f7b1c6a083ef9a5e2e35a67801daa37159ba9ce4e1c1fc42211e7662f896f8     1516  fixtures/manifest/base-writes-the-file-system.hex
 b4914b736b21cd93eb41459ffa0a67ea3f25712d42c46ddbec2316531bc5dccc     4096  fixtures/manifest/image-broken-descriptor.bin
 662a969ee40557c75cdb9dec10d91477a848282914cdae9a740f08d1a4372b0a     4096  fixtures/manifest/image-repeater.bin
 9cb7fdc8854e9621aac97a8687e2eb261f6d4354bce3f05fb2cae4409e751c32     4096  fixtures/manifest/image-two-descriptors.bin
 1cef268679395fac137e80df9b60a070b4bed6a11ebfa92593a43a9cf6203dee     4096  fixtures/manifest/image-walter-ota.bin
-1a60cfe84fd89a439bcef7db411e1942ceaaa64ac26335cebec22dd72a241f79     2840  fixtures/manifest/index.json
+b5f8c150015905204eb6b8e2f7f1978fc90f4459267cc4635773974bc51d0f9d     5836  fixtures/manifest/index.json
+9ac2f189e3414f3fdcf3fd348bbca32950227cd6a4d6893e68af804174288d83     1804  fixtures/manifest/manifest-repeater-base.json
+4f17520bc5dbaeb14b830fe0c66cbb146a257f382ad8a749c47c954824dbdf87      114  fixtures/manifest/manifest-repeater-base.json.sig
 366137448739acf96479eb42a659afbc467a678512a80e6b6bc2609a24f4cecf     1558  fixtures/manifest/manifest-repeater-tampered.json
 074964d4d21348f5486089c6e569c6837ddea3aeba05c12440fee76677bef39a      114  fixtures/manifest/manifest-repeater-unknown-key.json.sig
 206dc2e5f767c61a0667cc5d8098f6bbc25c3ca9f3bf61f3b47bdd63f00203d8     1558  fixtures/manifest/manifest-repeater.json
@@ -22,6 +39,7 @@ b4914b736b21cd93eb41459ffa0a67ea3f25712d42c46ddbec2316531bc5dccc     4096  fixtu
 44bebb37cb39c6522ebe13c8c145b2a1881f7e47024ca35a79c464741777ec7a     5245  proposals/01-the-unit-in-meshmaster.md
 16dac826780fce1345832f7d346e5b5c13413e053b3044f32f3e9ba731aef0a4     5201  proposals/02-firmware-catalogue-and-updates.md
 e775af04946609e6263661c204d9dd3c84cc784077e1c1fbd91bd9223f5d8f68     4842  proposals/03-agent-core-as-a-library.md
+7049056c063ebe7ad0eecf9724f1c191a3b7eab818d2ff99cd0c7f830e1cffd4     2800  proposals/04-the-walter-provisions-a-new-radio.md
 0a5af80c6542fb5e8b24862a45d9be54de41e5f4f764eb876ae35ce374c79200    32344  tools/linkref.py
-674ab4207cc5ac4356b49cdbb23c34a38d7a2ae294d2e5daeabaff3b4b3bdf40    18814  tools/manifestref.py
+f2c1ec5ed41bf1d86ab62125fea07d03c3c57454dec1e886bc2d1c6fd287a031    31599  tools/manifestref.py
 650b352a0fa6fae3b66bd5c168a3ad8c622d66fe04b053511a4590802ef5fb6f     4895  tools/specsync.py
