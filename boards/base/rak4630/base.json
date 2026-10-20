@@ -1,0 +1,25 @@
+{
+  "family": "rak4630",
+  "file": "wiscore_rak4631_board_bootloader-0.4.4_s140_6.1.1.hex",
+  "sha256": "e19bad05e2be9fbdd4f4ec564eb1ff605d495ffe42eb90410e5162792e1ca5bd",
+  "size": 509804,
+  "bootloader": {
+    "name": "Adafruit nRF52 Bootloader, RAKwireless' build for the WisCore RAK4631",
+    "version": "0.4.4",
+    "built": "Jun 17 2026"
+  },
+  "softdevice": "S140 6.1.1",
+  "source": {
+    "repository": "https://github.com/RAKWireless/WisBlock",
+    "commit": "d3da249c0e4df56fb972021cf6e99239f27857bf",
+    "path": "bootloader/RAK4630/Latest/wiscore_rak4631_board_bootloader-0.4.4_s140_6.1.1.hex",
+    "git_blob": "0d8085df5db7dcbddd6d96bd10be062fd351e256"
+  },
+  "summary": {
+    "bootloader": "0x000F4000",
+    "softdevice": "S140 6.1.1",
+    "flash_bytes": 185328,
+    "uicr_words": ["0x10001014", "0x10001018"],
+    "mbr_params": "0x000FE000"
+  }
+}

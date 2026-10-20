@@ -36,6 +36,11 @@
    "sig": "manifest-repeater.json.sig",
    "valid": false,
    "why": "another manifest's signature"
+  },
+  {
+   "manifest": "manifest-repeater-base.json",
+   "sig": "manifest-repeater-base.json.sig",
+   "valid": true
   }
  ],
  "descriptors": [
@@ -92,6 +97,104 @@
    "manifest": "manifest-walter.json",
    "name": "twinoak-walter-v0.3.0.bin",
    "bytes_of": "image-walter-ota.bin"
+  },
+  {
+   "manifest": "manifest-repeater-base.json",
+   "name": "twinoak-base-rak4630-s140-6.1.1.hex",
+   "bytes_of": "base-rak4630.hex"
   }
- ]
+ ],
+ "provision": {
+  "about": "FIRMWARE-MANIFEST.md 4a, checked against the image's app_region of manifest-repeater-base.json; every base gives the same result against the rak4630-single board region, 0x00026000-0x000ED000.",
+  "app_region": {
+   "start": "0x00026000",
+   "end": "0x000D4000"
+  },
+  "bases": [
+   {
+    "file": "base-rak4630.hex",
+    "valid": true,
+    "summary": {
+     "bootloader": "0x000F4000",
+     "softdevice": "S140 6.1.1",
+     "flash_bytes": 504,
+     "uicr_words": [
+      "0x10001014",
+      "0x10001018"
+     ],
+     "mbr_params": "0x000FE000"
+    }
+   },
+   {
+    "file": "base-bootloader-only.hex",
+    "valid": false,
+    "why": "nothing at 0x00000000: no MBR (a bootloader-only file?)"
+   },
+   {
+    "file": "base-sets-approtect.hex",
+    "valid": false,
+    "why": "the file writes UICR.APPROTECT: the Walter decides that word by the chip's revision"
+   },
+   {
+    "file": "base-writes-the-application.hex",
+    "valid": false,
+    "why": "0x00026000 lies between the SoftDevice and the bootloader: the application and the file system are not the base's"
+   },
+   {
+    "file": "base-other-softdevice.hex",
+    "valid": false,
+    "why": "the SoftDevice ends at 0x00027000, the application starts at 0x00026000"
+   },
+   {
+    "file": "base-no-bootloader-address.hex",
+    "valid": false,
+    "why": "no UICR.NRFFW[0]: the MBR would never start a bootloader"
+   },
+   {
+    "file": "base-bad-checksum.hex",
+    "valid": false,
+    "why": "line 3: checksum"
+   },
+   {
+    "file": "base-no-end-record.hex",
+    "valid": false,
+    "why": "no end record (a truncated file?)"
+   },
+   {
+    "file": "base-after-the-end.hex",
+    "valid": false,
+    "why": "line 38: a record after the end record"
+   },
+   {
+    "file": "base-one-address-two-bytes.hex",
+    "valid": false,
+    "why": "line 38: 0x00000000 given two different bytes"
+   },
+   {
+    "file": "base-outside-uicr.hex",
+    "valid": false,
+    "why": "0x10001400 is neither flash nor UICR"
+   },
+   {
+    "file": "base-other-softdevice-version.hex",
+    "valid": false,
+    "why": "the SoftDevice is not S140 6.1.1 (id 140, version 7002000)"
+   },
+   {
+    "file": "base-unaligned-bootloader.hex",
+    "valid": false,
+    "why": "UICR.NRFFW[0] = 0x000F4100: not a page at or above the application region's end that the file fills"
+   },
+   {
+    "file": "base-bootloader-in-the-application.hex",
+    "valid": false,
+    "why": "UICR.NRFFW[0] = 0x000D0000: not a page at or above the application region's end that the file fills"
+   },
+   {
+    "file": "base-writes-the-file-system.hex",
+    "valid": false,
+    "why": "0x000F0000 lies between the SoftDevice and the bootloader: the application and the file system are not the base's"
+   }
+  ]
+ }
 }

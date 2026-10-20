@@ -104,6 +104,26 @@ verified here*, as before the tool existed.
   and the bootloader are untouched afterwards. No session can do it: nothing
   was flashed and no radio was heard.
 
+- [ ] **p3.4-01** **The base boots, and the port after the reset.** The
+  release's `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex` (`use: provision`;
+  RAK's bootloader 0.4.4 with SoftDevice S140 6.1.1, vendored at
+  `boards/base/rak4630/`) has never met a radio: no session can write it (the
+  Walter's `rak provision <radio> confirm`, S-5a, or the hardware repository's
+  `walter-swd-bench`, or a probe). What a person checks, in this order, on the
+  first radio that gets it: **(1)** after the one reset at the end the radio
+  enumerates on USB as the RAK4631 bootloader (VID `239A`, the `RAK4631` drive
+  on a double-tap) and its `INFO_UF2.TXT` reads `UF2 Bootloader 0.4.4`,
+  `SoftDevice: S140 6.1.1`, `Date: Jun 17 2026` — the file that was vendored is
+  the one that boots → ______; **(2)** `INFO.VARIANT` of the part (`rak swd id`
+  / `info` on the Walter, or the bootloader's drive, `docs/bench.md` §1) →
+  ______; **(3)** the port after the reset, as `rak provision` reports it:
+  *open* or *closed*. On a build code `F` part (`AAF0`) *closed* means this
+  bootloader was built from a Nordic MDK before 8.40.2 and S-5's SWD update
+  path is gone after every reset — `boards/base/rak4630/README.md`,
+  *APPROTECT*, says what is known and the hardware repository's
+  `software/FIRST-UNIT.md` step 8 says to stop and decide → ______; **(4)**
+  the first application after it is an ordinary first install (`rak update
+  --first-install`) and this pile's 02 walks §1 from there.
 - [ ] **p0-03** **The first Monday, and the first real bump.** The upstream
   watch was rehearsed, not fired: what no session can check is that
   `cron: "29 6 * * 1"` is a minute GitHub actually runs

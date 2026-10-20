@@ -192,3 +192,9 @@ Three more, which are a shape rather than a grep:
 MIT — [`LICENSE`](LICENSE). MeshCore is MIT too and is a dependency, not a
 fork: nothing of its tree is vendored here except what a consumer of the
 package cannot reach, and each such file says so.
+
+One file in a release is nobody's here: the base under the application on a
+RAK4630 (`boards/base/rak4630/`) — Adafruit's bootloader as RAKwireless builds
+it (MIT) over Nordic's SoftDevice (Nordic's own licence, binary redistribution
+with a Nordic chip). [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES) carries their
+notices and goes into every release beside the manifest.

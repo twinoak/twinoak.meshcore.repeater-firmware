@@ -13,3 +13,7 @@ spec/** -text
 *.uf2 binary
 *.zip binary
 *.hex -text
+
+# The base under the application (boards/base/<family>/, task p3.4-01): vendored byte for byte,
+# and its SHA-256 is the pin. Binary, so neither a line ending nor a diff is ever touched.
+boards/base/**/*.hex binary

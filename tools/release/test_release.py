@@ -18,10 +18,18 @@ path is exercised without GitHub. What is held here:
     (test/test_image holds the firmware's half of the same rule);
   * what may be signed: the specification's public test key never signs a release version, a tag
     with no key in the environment is refused and says how the key is made, and no message
-    carries a key.
+    carries a key;
+  * the base under the application (boards/base/, tools/base/check.py; spec/SYSTEM.md S-5a,
+    spec/FIRMWARE-MANIFEST.md section 4a): every RAK4630 image of a release lists the one
+    vendored file as `use: provision` and the manifest validates; a changed byte in that file is
+    refused with its hash; a bootloader-only file in its place is refused in section 4a's words;
+    a manifest built without the base is refused before it is signed; and the pin, the file and
+    its README agree with each other on this commit.
 """
 
+import contextlib
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -33,12 +41,15 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "spec", "tools"))
+sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 
 import build_release  # noqa: E402
+import check as base_check  # noqa: E402  (tools/base/check.py)
 import manifestref  # noqa: E402
 import sign_manifest  # noqa: E402
 
 FIXTURES = os.path.join(REPO, "spec", "fixtures", "manifest")
+BASES = os.path.join(REPO, "boards", "base")
 COMMIT = "abc1234" + "0" * 33
 
 # The MeshCore pin the synthetic build directories below were built against. Plainly not a
@@ -279,7 +290,9 @@ class TheLinkedImage(ReleaseTestCase):
 class TheManifest(ReleaseTestCase):
     def setUp(self):
         ReleaseTestCase.setUp(self)
-        with open(os.path.join(FIXTURES, "manifest-repeater.json"), "r", encoding="utf-8") as fh:
+        # The repeater's manifest with its provision file (spec/FIRMWARE-MANIFEST.md section 6):
+        # what a release of a RAK4630 board carries since task p3.4-01.
+        with open(os.path.join(FIXTURES, "manifest-repeater-base.json"), "r", encoding="utf-8") as fh:
             self.fixture = json.load(fh)
 
     def test_the_specifications_own_fixtures_still_check(self):
@@ -301,10 +314,13 @@ class TheManifest(ReleaseTestCase):
             self.assertEqual(list(got), list(same_use), got["use"])
 
     def test_the_file_names_are_the_specifications(self):
-        """The fixture's release is 0.3.0 of this role, board and band: the names must be its."""
+        """The fixture's release is 0.3.0 of this role, board and band: the names must be its.
+        The base's name is the one exception: the fixture's stand-in is twinoak-base-rak4630-
+        s140-6.1.1.hex, and ours carries the bootloader's version as well (task p3.4-01), so it
+        is held to its own rule in TheBase."""
         manifest = self.release()
-        self.assertEqual([f["name"] for f in manifest["images"][0]["files"]],
-                         [f["name"] for f in self.fixture["images"][0]["files"]])
+        self.assertEqual([f["name"] for f in manifest["images"][0]["files"] if f["use"] != "provision"],
+                         [f["name"] for f in self.fixture["images"][0]["files"] if f["use"] != "provision"])
 
     def test_the_image_id_is_role_board_band(self):
         self.assertEqual(self.release()["images"][0]["id"], "repeater.rak4630-single.868")
@@ -322,9 +338,12 @@ class TheManifest(ReleaseTestCase):
             image = manifest["images"][0]
             self.assertEqual(image["id"], "%s.%s.%s" % (role, board, band))
             self.assertEqual([image["role"], image["board"], image["band"]], [role, board, band])
-            self.assertEqual([f["name"] for f in image["files"]],
-                             ["twinoak-%s-%s-%s-v0.3.0.%s" % (role, board, band, ext)
-                              for ext in ("bin", "zip", "uf2")])
+            names = ["twinoak-%s-%s-%s-v0.3.0.%s" % (role, board, band, ext)
+                     for ext in ("bin", "zip", "uf2")]
+            if base_check.family_of(board):
+                # ... and the base under it, the same file whatever the role (TheBase).
+                names.append(base_check.release_name(base_check.load_pin(base_check.family_of(board))))
+            self.assertEqual([f["name"] for f in image["files"]], names)
 
     def test_the_image_requires_the_link_major_it_speaks(self):
         """A Walter of another box-link major is not given this image at all
@@ -543,6 +562,229 @@ class TheSignature(ReleaseTestCase):
         self.write(self.pub_file, "not a key\n")
         with self.assertRaises(sign_manifest.SigningError):
             sign_manifest.read_public_key(self.pub_file)
+
+
+# ------------------------------------------------------------------ the base under the application
+
+class TheBase(ReleaseTestCase):
+    """boards/base/<family>/ in every release of that family, held to its pin (tools/base/check.py)
+    and to spec/FIRMWARE-MANIFEST.md section 4a. The real vendored file is used throughout: the
+    pin and the file are the thing under test, and a stand-in would prove nothing about them."""
+
+    FAMILY = "rak4630"
+
+    def setUp(self):
+        ReleaseTestCase.setUp(self)
+        self.pin = base_check.load_pin(self.FAMILY)
+        self.assertIsNotNone(self.pin, "boards/base/%s/base.json is missing" % self.FAMILY)
+        self.data = base_check.read_base(self.pin)
+        with open(os.path.join(FIXTURES, "index.json"), "r", encoding="utf-8") as fh:
+            self.index = json.load(fh)
+
+    def base_dir(self, data=None, sha256=None, summary=None):
+        """A boards/base look-alike under the temporary directory: the real pin and README, and
+        the file (or another), with the pin's hash (or another) - so a test can change one byte,
+        or one number, and see what refuses it."""
+        root = os.path.join(self.tmp, "base")
+        family = os.path.join(root, self.FAMILY)
+        os.makedirs(family)
+        pin = {k: v for k, v in self.pin.items() if not k.startswith("_")}
+        data = self.data if data is None else data
+        pin["sha256"] = sha256 or hashlib.sha256(data).hexdigest()
+        pin["size"] = len(data)
+        if summary is not None:
+            pin["summary"] = summary
+        self.write(os.path.join(family, base_check.PIN_FILE), json.dumps(pin, indent=2) + "\n")
+        self.write(os.path.join(family, pin["file"]), data)
+        shutil.copyfile(os.path.join(self.pin["_dir"], base_check.README_FILE),
+                        os.path.join(family, base_check.README_FILE))
+        return root
+
+    def fixture_base(self, name):
+        with open(os.path.join(FIXTURES, name), "rb") as fh:
+            return fh.read()
+
+    def why(self, name):
+        """The words the specification's index gives for refusing one of its base fixtures."""
+        return [b for b in self.index["provision"]["bases"] if b["file"] == name][0]["why"]
+
+    def provision_files(self, image):
+        return [f for f in image["files"] if f["use"] == "provision"]
+
+    # --- the real file, the pin and the README, on this commit
+
+    def test_the_vendored_file_is_the_pinned_one_and_passes_against_the_linker_script(self):
+        """The acceptance criterion: the hash is the README's, section 4a accepts it against the
+        region the release reads from the linker script, and the summary is the README's."""
+        region = build_release.read_app_region(os.path.join(self.build_dir(), "ldscript.ld"))
+        summary = base_check.check_base(self.pin, self.data, region.start, region.end)
+        self.assertEqual(summary, self.pin["summary"])
+        self.assertEqual(summary["softdevice"], "S140 6.1.1")
+        self.assertTrue(base_check.check_readme(self.pin).endswith(base_check.README_FILE))
+        self.assertEqual(hashlib.sha256(self.data).hexdigest(), self.pin["sha256"])
+
+    def test_the_release_name_carries_the_bootloader_version_and_the_softdevice(self):
+        self.assertEqual(base_check.release_name(self.pin),
+                         "twinoak-base-rak4630-%s-s140-6.1.1.hex" % self.pin["bootloader"]["version"])
+
+    def test_a_readme_that_says_other_numbers_is_refused(self):
+        root = self.base_dir()
+        readme = os.path.join(root, self.FAMILY, base_check.README_FILE)
+        with open(readme, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.write(readme, text.replace(self.pin["sha256"], "0" * 64))
+        with self.assertRaises(base_check.BaseError) as caught:
+            base_check.check_readme(base_check.load_pin(self.FAMILY, root))
+        self.assertIn("SHA-256", str(caught.exception))
+
+    # --- in a release
+
+    def test_every_rak4630_image_carries_the_base_and_the_manifest_validates(self):
+        """The dry run's manifest: one provision file per rak4630-* image, the same file under
+        each (one hash), named as the task says, beside the manifest, and manifestref.validate
+        passes on the whole."""
+        dirs = [self.build_dir(name="repeater", role="repeater"),
+                self.build_dir(name="scanner", role="scanner")]
+        manifest = self.release(build_dirs=dirs)
+        manifestref.validate(manifest)
+        name = base_check.release_name(self.pin)
+        for image in manifest["images"]:
+            files = self.provision_files(image)
+            self.assertEqual(len(files), 1, image["id"])
+            self.assertEqual(files[0]["name"], name)
+            self.assertEqual(files[0]["format"], "hex")
+            self.assertEqual(files[0]["sha256"], self.pin["sha256"])
+            self.assertEqual(files[0]["size"], self.pin["size"])
+            self.assertNotIn("load_address", files[0])
+        with open(os.path.join(self.out, name), "rb") as fh:
+            self.assertEqual(fh.read(), self.data)
+        with open(os.path.join(self.out, "SHA256SUMS"), "r", encoding="ascii") as fh:
+            self.assertIn("%s  %s\n" % (self.pin["sha256"], name), fh.read())
+
+    def test_the_provision_entry_has_the_shape_of_the_specifications_fixture(self):
+        with open(os.path.join(FIXTURES, "manifest-repeater-base.json"), "r", encoding="utf-8") as fh:
+            fixture = json.load(fh)
+        want = [f for f in fixture["images"][0]["files"] if f["use"] == "provision"][0]
+        got = self.provision_files(self.release()["images"][0])[0]
+        self.assertEqual(list(got), list(want))
+
+    def test_a_board_of_no_family_gets_no_base(self):
+        manifest = self.release(build_dirs=[self.build_dir(board="walter")])
+        self.assertEqual(self.provision_files(manifest["images"][0]), [])
+
+    def test_the_notices_are_in_the_release(self):
+        self.release()
+        with open(os.path.join(REPO, build_release.NOTICES), "rb") as want:
+            with open(os.path.join(self.out, build_release.NOTICES), "rb") as got:
+                self.assertEqual(got.read(), want.read())
+        with open(os.path.join(self.out, "SHA256SUMS"), "r", encoding="ascii") as fh:
+            self.assertIn("  %s\n" % build_release.NOTICES, fh.read())
+
+    # --- what refuses a release
+
+    def test_a_changed_byte_is_refused_with_the_hash(self):
+        changed = bytearray(self.data)
+        changed[len(changed) // 2] ^= 0x01
+        root = self.base_dir(data=bytes(changed), sha256=self.pin["sha256"])
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(base_dir=root)
+        message = str(caught.exception)
+        self.assertIn("not the pinned base", message)
+        self.assertIn(self.pin["sha256"], message)
+        self.assertIn(hashlib.sha256(bytes(changed)).hexdigest(), message)
+        self.assertFalse(os.path.exists(os.path.join(self.out, "manifest.json")))
+
+    def test_a_bootloader_only_file_in_its_place_is_refused_in_the_specifications_words(self):
+        """The first board's reports warned against a bootloader-only file; section 4a refuses it
+        with these words, and so does the release (the pin's hash is made to match, so that it is
+        the rule and not the hash that refuses)."""
+        only = self.fixture_base("base-bootloader-only.hex")
+        root = self.base_dir(data=only)
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(base_dir=root)
+        self.assertIn(self.why("base-bootloader-only.hex"), str(caught.exception))
+        self.assertIn("section 4a", str(caught.exception))
+
+    def test_a_file_that_writes_approtect_is_refused_in_the_specifications_words(self):
+        root = self.base_dir(data=self.fixture_base("base-sets-approtect.hex"))
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(base_dir=root)
+        self.assertIn(self.why("base-sets-approtect.hex"), str(caught.exception))
+
+    def test_a_pin_whose_summary_differs_from_the_file_is_refused(self):
+        summary = dict(self.pin["summary"], bootloader="0x000F0000")
+        root = self.base_dir(summary=summary)
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(base_dir=root)
+        self.assertIn("not what base.json says", str(caught.exception))
+
+    def test_a_family_board_with_no_pinned_base_is_refused(self):
+        empty = os.path.join(self.tmp, "nobase")
+        os.makedirs(empty)
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(base_dir=empty)
+        self.assertIn("no base is pinned", str(caught.exception))
+        self.assertIn("S-5a", str(caught.exception))
+
+    def test_a_manifest_without_the_base_is_refused_before_signing(self):
+        """A manifest that lost its provision entry after the build - edited, or built by
+        something else - is not signed: no key is touched and no .sig is written."""
+        self.release(build_dirs=[self.build_dir(version="0.0.0-dryrun+abc1234")])
+        path = os.path.join(self.out, "manifest.json")
+        with open(path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        for image in manifest["images"]:
+            image["files"] = [f for f in image["files"] if f["use"] != "provision"]
+        with open(path, "wb") as fh:
+            fh.write(manifestref.canonical(manifest))
+        with self.assertRaises(sign_manifest.SigningError) as caught:
+            sign_manifest.sign_manifest(path, use_test_key=True)
+        self.assertIn("no valid base", str(caught.exception))
+        self.assertIn("0 provision file(s)", str(caught.exception))
+        self.assertFalse(os.path.exists(path + ".sig"))
+
+    def test_a_base_beside_the_manifest_that_is_not_the_pinned_one_is_refused_before_signing(self):
+        self.release(build_dirs=[self.build_dir(version="0.0.0-dryrun+abc1234")])
+        path = os.path.join(self.out, "manifest.json")
+        with open(os.path.join(self.out, base_check.release_name(self.pin)), "ab") as fh:
+            fh.write(b"\n")
+        with self.assertRaises(sign_manifest.SigningError) as caught:
+            sign_manifest.sign_manifest(path, use_test_key=True)
+        self.assertIn("not the pinned base", str(caught.exception))
+        self.assertFalse(os.path.exists(path + ".sig"))
+
+    def test_a_manifest_with_the_base_signs(self):
+        self.release(build_dirs=[self.build_dir(version="0.0.0-dryrun+abc1234")])
+        path = os.path.join(self.out, "manifest.json")
+        said = []
+        sign_manifest.sign_manifest(path, use_test_key=True, log=said.append)
+        self.assertTrue(os.path.exists(path + ".sig"))
+        self.assertTrue([line for line in said if "the base is the pinned one" in line], said)
+
+    @staticmethod
+    def command_line(args):
+        """tools/base/check.py's main, with what it printed instead of the console."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = base_check.main(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_command_line_check_passes_on_this_commit(self):
+        ldscript = os.path.join(self.build_dir(), "ldscript.ld")
+        code, out, err = self.command_line(["--ldscript", ldscript])
+        self.assertEqual((code, err), (0, ""))
+        self.assertIn("passes section 4a", out)
+        self.assertIn("says the same", out)
+        self.assertEqual(self.command_line(["--region", "0x26000", "0xED000"])[0], 0)
+
+    def test_the_command_line_check_fails_on_a_changed_file(self):
+        changed = bytearray(self.data)
+        changed[-10] ^= 0x01
+        root = self.base_dir(data=bytes(changed), sha256=self.pin["sha256"])
+        code, out, err = self.command_line(["--region", "0x26000", "0xED000", "--base-dir", root])
+        self.assertEqual(code, 1)
+        self.assertIn("not the pinned base", err)
+        self.assertIn(self.pin["sha256"], err)
 
 
 if __name__ == "__main__":
