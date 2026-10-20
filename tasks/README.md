@@ -75,6 +75,8 @@ pick them up. Merging never releases; a release is a person pushing a tag.
 | [3](phase-3/README.md) | the family: roles and boards, NoiseScope, first-boot provisioning | 3 |
 | [3.1](phase-3.1/README.md) | the fast sweep: the in-radio sweep of MeshCore #3578 as the scanner's `scope`, 150–960 MHz, a live waterfall | 1 |
 | [3.2](phase-3.2/README.md) | a MeshCore bump can be green: the version tests assert the defines, not a release | 1 |
+| [3.3](phase-3.3/README.md) | the band's ceiling, and a bench a session may use: `tools/bench/`, `bench walk` | 3 |
+| [3.4](phase-3.4/README.md) | the base in the release (`use: provision`, `spec/SYSTEM.md` S-5a), and the first board walked | 2 |
 
 Not in these piles, on purpose: anything that needs the rig (a bench pile
 follows the first boards), the bridge role and the dual adapter (the structure
