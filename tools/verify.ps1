@@ -21,12 +21,14 @@
     5. release  python tools/release/selfcheck.py --require-descriptor - the release tooling's
                 own tests and tools/bench's (the guards of the one tool a session may touch a
                 board with, and every walk of docs/bench.md, against a fake serial layer), then
-                a dry run of the real release
+                the base under the application held to its pin (tools/base/check.py: the
+                vendored boards/base/ file's hash, spec/FIRMWARE-MANIFEST.md section 4a against
+                every build's linker script, its README), then a dry run of the real release
                 over out/build/<env>, what step 3
-                left: the images, each one's descriptor held against its manifest entry, a
-                validated manifest, its signature by the specification's public test key, and
-                that signature verified. So the release path is exercised on every commit without
-                GitHub and without the release key. It needs the `cryptography` of
+                left: the images, each one's descriptor held against its manifest entry, the
+                base under every RAK4630 image, a validated manifest, its signature by the
+                specification's public test key, and that signature verified. So the release
+                path is exercised on every commit without GitHub and without the release key. It needs the `cryptography` of
                 tools/release/requirements.txt: this machine's Python when it has it, otherwise
                 the same container as step 4, where pip installs it into the container and not
                 into this machine.

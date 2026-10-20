@@ -3,17 +3,22 @@
 
     python tools/release/selfcheck.py --commit <40 hex> --build-dir .pio/build/<env> [--build-dir ...]
 
-Two things, in this order, so that the release path is exercised on every commit without GitHub
+Three things, in this order, so that the release path is exercised on every commit without GitHub
 and without the release key:
 
   1. tools/release/test_release.py - every test of the tooling - and tools/bench's own,
      test_bench.py and test_walk.py: the guards of the bench tool a session may touch a board
      with, and every walk of docs/bench.md run end to end, both against its fake serial layer
      (no board here and none needed).
-  2. a dry run over the build this machine has just made: build_release.py writes out/release/,
-     sign_manifest.py signs the manifest with the specification's public test key (which it would
-     refuse to do for a release version), and spec/tools/manifestref.py verifies the signature.
-     The same three steps the workflow runs, in the same order, on the same code.
+  2. the base under the application, tools/base/check.py: the vendored file of boards/base/ is
+     the one its pin names (SHA-256), passes spec/FIRMWARE-MANIFEST.md section 4a against the
+     application region of every build directory's linker script, and its README says the same
+     numbers. A changed byte fails here, on this machine, before any release.
+  3. a dry run over the build this machine has just made: build_release.py writes out/release/
+     (the base under every RAK4630 image), sign_manifest.py signs the manifest with the
+     specification's public test key (which it would refuse to do for a release version, and
+     refuses for a manifest without its base), and spec/tools/manifestref.py verifies the
+     signature. The same three steps the workflow runs, in the same order, on the same code.
 
 It is one command because it needs the `cryptography` of requirements.txt, and on a machine
 without it that means one container run rather than three (tools/verify.ps1 decides which).
@@ -29,8 +34,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "spec", "tools"))
+sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 
 import build_release  # noqa: E402
+import check as base_check  # noqa: E402  (tools/base/check.py: the base under the application)
 import manifestref  # noqa: E402
 import sign_manifest  # noqa: E402
 import test_release  # noqa: E402
@@ -76,10 +83,10 @@ def main(argv=None):
     parser.add_argument("--commit", required=True, help="the 40 hexadecimal characters of the commit")
     parser.add_argument("--out", default=os.path.join("out", "release"))
     parser.add_argument("--require-descriptor", action="store_true")
-    parser.add_argument("--only", choices=("tests", "dryrun"), default=None)
+    parser.add_argument("--only", choices=("tests", "base", "dryrun"), default=None)
     args = parser.parse_args(argv)
 
-    if args.only != "dryrun":
+    if args.only in (None, "tests"):
         print("== the release tooling's tests")
         ok, count = run_tests()
         if not ok:
@@ -87,7 +94,19 @@ def main(argv=None):
             return 1
         print("%d test(s) passed" % count)
 
-    if args.only != "tests":
+    if args.only in (None, "base"):
+        print("\n== the base under the application, against every build's linker script")
+        base_args = []
+        for build_dir in args.build_dir:
+            base_args += ["--build-dir", build_dir]
+        if not base_args:
+            sys.stderr.write("error: no build directory to read the application region from\n")
+            return 1
+        if base_check.main(base_args) != 0:
+            sys.stderr.write("error: the base is not the pinned one (tools/base/check.py)\n")
+            return 1
+
+    if args.only in (None, "dryrun"):
         print("\n== a dry run of the release over this machine's build")
         try:
             dry_run(args.build_dir, args.commit, args.out, args.require_descriptor)

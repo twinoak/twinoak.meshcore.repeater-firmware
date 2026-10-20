@@ -15,6 +15,12 @@ PlatformIO build into the files a release carries:
                                              flasher (use: swd, with its load_address)
   twinoak-<role>-<board>-<band>-vX.Y.Z.zip   the nrfutil DFU package, for a laptop on the USB-C
   twinoak-<role>-<board>-<band>-vX.Y.Z.uf2   for the bootloader's drag-and-drop drive
+  twinoak-base-<family>-<ver>-s140-6.1.1.hex the base under the application - MBR, SoftDevice,
+                                             bootloader - for the Walter's one-time `rak provision`
+                                             (use: provision), the same file under every image of
+                                             the board family; vendored, never built here
+                                             (boards/base/<family>/, tools/base/check.py)
+  THIRD-PARTY-NOTICES                        the notices the base's licences ask for
   manifest.json                              the canonical manifest, validated before it is written
   SHA256SUMS                                 over every file above, the manifest included
 
@@ -48,10 +54,13 @@ import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "spec", "tools"))
+sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 
 import manifestref  # noqa: E402  (after sys.path; spec/ is a copy and is never edited)
+import check as base_check  # noqa: E402  (tools/base/check.py: the base under the application)
 
 PRODUCT = "twinoak-repeater-firmware"
+NOTICES = "THIRD-PARTY-NOTICES"
 
 
 class ReleaseError(Exception):
@@ -428,9 +437,48 @@ def build_image(build_dir, info, version, out_dir, require_descriptor, link, log
     return image
 
 
+def add_bases(images, out_dir, base_dir, log):
+    """The base under every image of a board family that needs one (spec/FIRMWARE-MANIFEST.md
+    section 2 and 4a; tools/base/check.py FAMILIES): one `provision` file entry per image, the same
+    vendored file - written once into out_dir under its release name - and the same hash under
+    each. The file is held to its pin and to section 4a against each image's own app_region before
+    it is listed, and a family image with no pinned base stops the release: a RAK4630 release
+    without its base cannot provision a radio (spec/SYSTEM.md S-5a).
+    """
+    written = {}
+    for image in images:
+        family = base_check.family_of(image["board"])
+        if family is None:
+            continue
+        pin = base_check.load_pin(family, base_dir)
+        if pin is None:
+            raise ReleaseError(
+                "%s is a %s board and no base is pinned under boards/base/%s/: a release of it "
+                "would leave a new radio with nothing to boot (spec/SYSTEM.md S-5a)"
+                % (image["id"], family, family))
+        try:
+            data = base_check.read_base(pin)
+            region = image["app_region"]
+            summary = base_check.check_base(pin, data, int(region["start"], 16), int(region["end"], 16))
+        except base_check.BaseError as exc:
+            raise ReleaseError("the base of %s: %s" % (image["id"], exc))
+        name = base_check.release_name(pin)
+        if family not in written:
+            write_file(out_dir, name, data)
+            written[family] = name
+        image["files"].append(manifestref.file_entry("provision", name, data))
+        log("%s: %s  bootloader at %s, %s, %d bytes (use: provision, the base; boards/base/%s/)"
+            % (image["id"], name, summary["bootloader"], summary["softdevice"], len(data), family))
+    return written
+
+
 def build_release(build_dirs, commit, out_dir, version=None, tag=None, built_at=None,
-                  require_descriptor=False, log=None):
-    """Writes the release into out_dir and returns the manifest it wrote."""
+                  require_descriptor=False, log=None, base_dir=None, notices=None):
+    """Writes the release into out_dir and returns the manifest it wrote.
+
+    base_dir and notices are for the tests: boards/base and THIRD-PARTY-NOTICES of this repository
+    otherwise.
+    """
     log = log or (lambda line: None)
     if not re.match(r"^[0-9a-f]{40}$", commit or ""):
         raise ReleaseError("the commit must be the 40 hexadecimal characters of a commit, not %r" % commit)
@@ -465,6 +513,7 @@ def build_release(build_dirs, commit, out_dir, version=None, tag=None, built_at=
 
     images = [build_image(build_dir, info, version, out_dir, require_descriptor, link, log)
               for build_dir, info in zip(build_dirs, infos)]
+    add_bases(images, out_dir, base_dir, log)
 
     manifest = {
         "schema": manifestref.SCHEMA,
@@ -481,8 +530,26 @@ def build_release(build_dirs, commit, out_dir, version=None, tag=None, built_at=
         manifestref.validate(manifest)
     except ValueError as exc:
         raise ReleaseError("the manifest this build makes is not valid: %s" % exc)
+    # The same refusal sign_manifest.py makes before signing, made here before the manifest is
+    # written: every family image carries the pinned base, beside the manifest, and it passes.
+    try:
+        base_check.check_manifest(manifest, out_dir, base_dir)
+    except base_check.BaseError as exc:
+        raise ReleaseError("the manifest this build makes has no valid base: %s" % exc)
     write_file(out_dir, "manifest.json", manifestref.canonical(manifest))
-    log("manifest.json: valid (manifestref.validate), %d image(s)" % len(images))
+    log("manifest.json: valid (manifestref.validate), %d image(s), the base under every %s image"
+        % (len(images), "/".join(base_check.FAMILIES)))
+
+    # The notices the base's licences ask for, beside the files they are about
+    # (boards/base/<family>/README.md, "Licences"). Not a manifest file - not an image - but
+    # SHA256SUMS covers it like everything else here.
+    notices = notices or os.path.join(REPO, NOTICES)
+    if not os.path.isfile(notices):
+        raise ReleaseError("%s is not there: the base's licences ask for their notices in every "
+                           "release" % notices)
+    with open(notices, "rb") as fh:
+        write_file(out_dir, NOTICES, fh.read())
+    log("%s: the base's licence notices" % NOTICES)
 
     names = sorted(name for name in os.listdir(out_dir)
                    if name != "SHA256SUMS" and os.path.isfile(os.path.join(out_dir, name)))

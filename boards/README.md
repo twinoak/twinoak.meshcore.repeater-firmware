@@ -34,3 +34,15 @@ What the definition names, and where it is found:
   produce the DFU package `firmware.zip` beside `firmware.hex` on every build.
 
 So the one thing vendored is the one thing that cannot be referenced.
+
+## `base/` — the other vendored thing, and not upstream's
+
+[`base/rak4630/`](base/rak4630/README.md) is the base under the application:
+the MBR, the SoftDevice S140 6.1.1 and the bootloader, as one Intel HEX that
+the Walter writes once to a factory radio (`spec/SYSTEM.md` S-5a). It is not
+MeshCore's and a pin bump does not touch it; it is RAKwireless' file, vendored
+byte for byte at a pinned commit, with its hash in `base.json` and
+`tools/base/check.py` holding the two to each other and to
+`spec/FIRMWARE-MANIFEST.md` §4a on every run of `tools/verify.ps1`. Every
+release carries it under every `rak4630-*` image (`docs/release.md`, *The
+base*).

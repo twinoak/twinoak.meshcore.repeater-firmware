@@ -19,6 +19,11 @@ spec/tools/manifestref.py does the arithmetic, and this script only decides what
   * **The public half must be the one this repository publishes.** On the real path the signature
     this key makes must name keys/release.pub's key id, so a release cannot go out signed by a key
     no Walter will trust.
+  * **A manifest without its base is not signed.** Every image of a board family that needs one
+    (tools/base/check.py FAMILIES: the RAK4630) lists exactly one `provision` file, it is the
+    pinned base, it lies beside the manifest and it passes spec/FIRMWARE-MANIFEST.md section 4a
+    against the image's region - checked here, before the signature, with the file's own bytes.
+    A signed release that could not provision a radio is a release S-5a cannot use.
 
 The verification that follows - sign, then prove the signature passes before anything is published
 - is spec/tools/manifestref.py's own command, over the public key alone:
@@ -34,8 +39,10 @@ import sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 sys.path.insert(0, os.path.join(REPO, "spec", "tools"))
+sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 
 import manifestref  # noqa: E402  (after sys.path; spec/ is a copy and is never edited)
+import check as base_check  # noqa: E402  (tools/base/check.py: the base under the application)
 
 KEY_VARIABLE = "RELEASE_SIGNING_KEY"
 PUBLIC_KEY_FILE = os.path.join("keys", "release.pub")
@@ -100,8 +107,11 @@ def _private_from_environment(environ):
     return bytes.fromhex(raw)
 
 
-def sign_manifest(manifest_path, use_test_key=False, environ=None, public_key_file=None, log=None):
-    """Writes <manifest_path>.sig and returns the public key a verifier is to use."""
+def sign_manifest(manifest_path, use_test_key=False, environ=None, public_key_file=None, log=None,
+                  base_dir=None):
+    """Writes <manifest_path>.sig and returns the public key a verifier is to use.
+
+    base_dir is for the tests: boards/base of this repository otherwise."""
     log = log or (lambda line: None)
     environ = os.environ if environ is None else environ
     public_key_file = public_key_file or os.path.join(REPO, PUBLIC_KEY_FILE)
@@ -112,9 +122,21 @@ def sign_manifest(manifest_path, use_test_key=False, environ=None, public_key_fi
     except IOError as exc:
         raise SigningError("the manifest is not readable: %s" % exc)
     try:
-        version = json.loads(message.decode("utf-8"))["version"]
-    except (ValueError, KeyError, UnicodeDecodeError):
+        manifest = json.loads(message.decode("utf-8"))
+        version = manifest["version"]
+    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
         raise SigningError("%s is not a manifest with a version in it" % manifest_path)
+
+    # Before any key is touched: the base under every image that needs one, as the bytes beside
+    # this manifest (spec/SYSTEM.md S-5a; spec/FIRMWARE-MANIFEST.md section 4a).
+    try:
+        bases = base_check.check_manifest(manifest, os.path.dirname(os.path.abspath(manifest_path)),
+                                          base_dir)
+    except base_check.BaseError as exc:
+        raise SigningError("not signed, because the manifest has no valid base: %s" % exc)
+    for image_id, summary in sorted(bases.items()):
+        log("%s: the base is the pinned one, bootloader at %s, %s"
+            % (image_id, summary["bootloader"], summary["softdevice"]))
 
     if use_test_key:
         if is_release_version(version):

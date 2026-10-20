@@ -15,6 +15,13 @@
 #   .bin   the raw application binary for the Walter's SWD flasher, with its load_address
 #   .zip   the nrfutil DFU package, for a laptop on the adapter's USB-C port
 #   .uf2   for the bootloader's drag-and-drop drive
+# once per board family, under every image of it (spec/FIRMWARE-MANIFEST.md section 4a):
+#   twinoak-base-<family>-<bootloader>-s140-6.1.1.hex
+#          the base under the application - MBR, SoftDevice, bootloader - that the Walter writes
+#          once to a factory radio on a person's `rak provision` (spec/SYSTEM.md S-5a). Vendored
+#          at boards/base/<family>/, held to its pin by tools/base/check.py; build_release.py
+#          refuses a family image without it and sign_manifest.py refuses to sign one. The
+#          notices its licences ask for are THIRD-PARTY-NOTICES, beside the manifest.
 # and once for the release:
 # Every image carries its own descriptor (spec/FIRMWARE-MANIFEST.md section 4), and
 # --require-descriptor refuses to publish an image that does not, or whose descriptor is not
@@ -305,8 +312,12 @@ jobs:
           print()
           print("| File | For |")
           print("|---|---|")
+          listed = set()   # the base is one file under several images: one row
           for image in m["images"]:
               for f in image["files"]:
+                  if f["name"] in listed:
+                      continue
+                  listed.add(f["name"])
                   for_what = {
                       "swd": "**the Walter**, over SWD: the raw application binary, written at "
                              "`%s` and nowhere else" % f.get("load_address", ""),
@@ -314,12 +325,21 @@ jobs:
                                  "`adafruit-nrfutil dfu serial -pkg <file> -p <PORT> -b 115200`",
                       "usb-uf2": "a laptop on the **USB-C** port, the bootloader's drag-and-drop "
                                  "drive (double-tap reset, then copy the file onto it)",
+                      "provision": "**the Walter, once per new radio** (`rak provision <radio> "
+                                   "confirm`, a person's command): the base under the "
+                                   "application - MBR, SoftDevice S140 6.1.1, bootloader - "
+                                   "which no update ever writes (`spec/SYSTEM.md` S-5a, "
+                                   "`spec/FIRMWARE-MANIFEST.md` section 4a; "
+                                   "`boards/base/<family>/README.md` in the repository is its source, "
+                                   "hash and licences)",
                   }.get(f["use"], "`use: %s` (spec/FIRMWARE-MANIFEST.md section 2)" % f["use"])
                   print("| `%s` | %s |" % (f["name"], for_what))
           print("| `manifest.json` | what each image is, for the Walter and for MeshMaster's "
                 "catalogue (`spec/FIRMWARE-MANIFEST.md`) |")
           print("| `manifest.json.sig` | one Ed25519 line over the manifest's bytes, key id "
                 "`%s` |" % sig[1])
+          print("| `THIRD-PARTY-NOTICES` | the notices the base's licences ask for: Adafruit's "
+                "bootloader and RAK's build of it (MIT), Nordic's SoftDevice (its own licence) |")
           print("| `SHA256SUMS` | every file above, the manifest included |")
           print()
           print("Because the manifest carries the SHA-256 of every file, that one signature "

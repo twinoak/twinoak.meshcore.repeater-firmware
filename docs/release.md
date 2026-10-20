@@ -61,12 +61,19 @@ Per image — one role on one board in one band — three files, named
 | `.zip` | `usb-dfu` | a laptop on the adapter's USB-C port: `adafruit-nrfutil dfu serial -pkg <file> -p <PORT> -b 115200` |
 | `.uf2` | `usb-uf2` | a laptop on the USB-C port: double-tap reset, then copy the file onto the drive that appears |
 
+once per board family, listed under every image of that family:
+
+| File | `use` | For |
+|---|---|---|
+| `twinoak-base-rak4630-<bootloader>-s140-6.1.1.hex` | `provision` | **the Walter, once per new radio.** The base under the application — MBR, SoftDevice S140 6.1.1, bootloader, the UICR words they need — written by a person's `rak provision` and never by an update (*The base*, below) |
+
 and once for the whole release:
 
 | File | |
 |---|---|
 | `manifest.json` | what each image is: role, board, band, MCU, the application region, and every file's size and SHA-256 (`spec/FIRMWARE-MANIFEST.md` §2) |
 | `manifest.json.sig` | one ASCII line, `ed25519 <key id> <base64>`, over the manifest's bytes (§3) |
+| `THIRD-PARTY-NOTICES` | the notices the base's licences ask for: Adafruit's bootloader (MIT), RAK's build of it (MIT), Nordic's SoftDevice (its own licence) |
 | `SHA256SUMS` | every file above, the manifest included |
 
 Because the manifest carries the hash of every file, **one signature covers the
@@ -120,6 +127,29 @@ It is checked three times, and the first two are here:
 Each image entry also carries `requires.link_major`: the box-link major the
 image speaks, so a Walter of another major is not offered it at all.
 
+### The base
+
+A RAK4630 arrives from the factory with RAK's RUI3, not the MBR, the
+SoftDevice and the bootloader this firmware is linked against. The Walter
+gives it that base **once**, when a person types `rak provision <radio>
+confirm` on its console (`spec/SYSTEM.md` S-5a), from the release's
+`provision` file; an update never touches it. So the release carries the base,
+and because nobody here built it, what the release carries is a vendored file
+at a pinned source with its hash written down:
+
+| | |
+|---|---|
+| The file | `boards/base/rak4630/wiscore_rak4631_board_bootloader-0.4.4_s140_6.1.1.hex`, byte for byte as downloaded from RAKwireless' WisBlock repository; [`boards/base/rak4630/README.md`](../boards/base/rak4630/README.md) is the source, the commit, the hash, the versions, the licences, and what is known about APPROTECT on a revision 3 part |
+| The pin | `boards/base/rak4630/base.json`: the SHA-256, the size, the bootloader's version, the SoftDevice and what `manifestref.py base` returns for it |
+| The check | `tools/base/check.py`: the file's hash is the pin's; `manifestref.validate_provision` accepts it against the application region read from the linker script (the seven rules of `spec/FIRMWARE-MANIFEST.md` §4a: an MBR, S140 6.1.1 ending exactly where the application starts, a bootloader page above the region that `UICR.NRFFW[0]` points at, nothing in between, nothing in `UICR.APPROTECT`); the summary and the README say the same numbers. `tools/release/selfcheck.py` runs it on every commit, so a changed file fails on this machine first |
+| In a release | `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex`, `use: provision`, `format: hex`, no `load_address` (its records say where every byte goes), under **every** `rak4630-*` image — the repeater's and the scanner's — with one hash. `build_release.py` lists it, and refuses a `rak4630-*` image whose base is missing or fails the check; `sign_manifest.py` refuses to sign a manifest that lacks it or whose copy beside the manifest is not the pinned one. Nothing is signed that could not provision a radio |
+| What the Walter does with it | §5's step 5p: it holds the file to §4a against the region *its* build knows for the board — a manifest cannot move the region — and stores it as the slot's base, never as a candidate. Writing it is the Walter's own procedure (`walter-firmware`, `docs/provisioning.md`): CTRL-AP erase, the base's flash and UICR words, `UICR.APPROTECT` from the chip's revision and never from the file, one reset at the end |
+
+A new board family (`rak4630-dual-a` is the same module and gets the same
+base; a different module gets its own `boards/base/<family>/`) is a directory
+with the file, `base.json` and a README, and a family name in
+`tools/base/check.py`.
+
 ## The key
 
 One Ed25519 key signs releases. Its private half is the repository secret
@@ -147,6 +177,9 @@ a refused tag has published nothing, so the fix is a new commit and a new tag
 | `this manifest says version X.Y.Z, which is a release` | something tried to sign a release with the test key | that is the guard working; a release is signed with `RELEASE_SIGNING_KEY` |
 | `is not one contiguous span` / `outside the application region` | the linked image is not a single span inside the application region | a change to the linker script or to a `KEEP` section put bytes somewhere an update may not write. Read the addresses in the message against the script line it quotes |
 | `was built as version … and this release says …` | the images were not built for this release | re-run the workflow; the version is a build flag and must be in the image |
+| `… is not the pinned base: its SHA-256 is …` | the vendored base under `boards/base/` is not the file its `base.json` names | a changed byte is a different base. Put the pinned file back, or — a new bootloader, decided by a person — rewrite the pin, the README and `THIRD-PARTY-NOTICES` together |
+| `… is refused against the application region … (section 4a)` | the base fails one of §4a's rules against the region the linker script gives (the message quotes the rule) | the file is not a base for this board, or the application region moved: read the rule against `boards/base/rak4630/README.md` |
+| `no base is pinned under boards/base/…` / `has 0 provision file(s)` | a `rak4630-*` image without its base, in the build or in a manifest about to be signed | a release of this board carries the base or it is not signed (S-5a); see *The base* |
 
 The same messages come out of `tools/verify.ps1` on this machine, with no tag
 and no key involved, which is where they are meant to be met first.

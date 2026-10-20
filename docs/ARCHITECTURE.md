@@ -696,18 +696,33 @@ the first and stops there, so it can be in a build that has no MeshCore at all.
 ## 9. Flash, and what an update may touch
 
 ```
-0x00000000  MBR and SoftDevice           never written by an update
+0x00000000  the MBR                      ┐
+0x00001000  the SoftDevice S140 6.1.1    │ the base: written once, by a person's `rak provision`
 0x00026000  the application              ◄── an image lives here and nowhere else
    …        (end of the application region: from the linker script; recorded in the manifest)
    …        the file system: identity, preferences, the ACL, regions, the clock file
-0x000F4000  the bootloader, its settings
-            UICR
+0x000F4000  the bootloader               │ the base
+0x000FE000  the MBR's parameter page     │ (UICR.NRFFW[1] points here)
+0x000FF000  the bootloader's settings      written by the bootloader itself, not in the base
+            UICR: NRFFW[0] = 0x000F4000, NRFFW[1] = 0x000FE000 - the base's; APPROTECT - the
+                  Walter's, from the chip's revision, never from a file
 ```
 
 The Walter flashes the application region over SWD: it erases exactly the pages the new image
 covers and writes them. It never erases the chip, the file system or UICR. A firmware change that
 moves the end of the application region is a change to the manifest's `app_region` and is checked
 by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §2).
+
+**The base** - the MBR, the SoftDevice and the bootloader, with the two UICR words the MBR reads -
+is not this firmware's and is not built here. A factory RAK4630 does not have it (it carries RAK's
+RUI3), and the Walter writes it once, from the release's `provision` file, when a person types
+`rak provision` (`spec/SYSTEM.md` S-5a; `spec/FIRMWARE-MANIFEST.md` §4a). The file is vendored byte
+for byte under `boards/base/rak4630/` with its source, its hash and its licences written down, and
+`tools/base/check.py` holds it to its pin and to §4a's rules - the SoftDevice ends exactly where the
+application region starts, the bootloader lies above where it ends, nothing in between is the
+base's - against the same linker script the release reads (`docs/release.md`, *The base*). Between
+the SoftDevice and the bootloader everything is either the application's or the file system's,
+and the base never touches it.
 
 ## 10. What is tested where
 
