@@ -32,15 +32,42 @@ static_assert(TWINOAK_BAND_DUTY_CYCLE == bands::dutyCycleOf(bands::kBands, bands
               "src/common/bands/Bands.h disagree: the first-boot profile's `set dutycycle` line "
               "is built from the first and the band is defined by the second");
 
+// --- the line the node's own key gives it -------------------------------------------------------
+
+int floodAdvertIntervalHours(const NodeFacts& facts) {
+  if (facts.pub_key == nullptr || facts.pub_key_len == 0) return 0;
+  // 60 + (the first byte mod 26): 60 to 85 inclusive, every hour of the range reached by some
+  // byte (26 consecutive bytes cover it, and 256 is nine and a half times round), and the same
+  // key always giving the same hour. The arithmetic is in one place because docs/provisioning.md
+  // states it and tools/bench/walk.py recomputes it from a `Repeater ID` read off the board.
+  return kFloodAdvertHoursMin + int(facts.pub_key[0] % kFloodAdvertHoursSpan);
+}
+
+bool buildFloodAdvertIntervalLine(const NodeFacts& facts, char* out, size_t cap) {
+  if (out == nullptr || cap == 0) return false;
+  const int hours = floodAdvertIntervalHours(facts);
+  if (hours <= 0) return false;  // no key: no line, and the rest of the table still runs
+  // snprintf answers what it *would* have written, so a buffer one byte short is caught here and
+  // not by a truncated `set` reaching upstream's interpreter.
+  const int n = snprintf(out, cap, "set flood.advert.interval %d", hours);
+  if (n < 0 || size_t(n) >= cap) {
+    out[0] = 0;
+    return false;
+  }
+  return true;
+}
+
 // --- the table ---------------------------------------------------------------------------------
 //
-// Two lines, and the rule that keeps it two: **a line is here only where a document of this
-// project gives the value** - spec/SYSTEM.md S-12 for the first, and the band itself for the
-// second, which is a regulation and not a judgement. The reviewer fills the rest from the
-// network's own standard (tasks/phase-3/reports/03.md lists every `set` key of the pinned CLI
-// with upstream's default beside it, and meshguide.dk's recommendation where there is one); a
-// session with nobody to ask does not invent a value for a radio nobody has measured or a site
-// nobody has visited.
+// Six lines, and the rule that keeps it six: **a line is here only where a document of this
+// project gives the value** - spec/SYSTEM.md S-12 for the first, the band itself for the second,
+// which is a regulation and not a judgement, and the **Danish standard** for the last four, as
+// Thomas settled it on 22 October 2026 (tasks/phase-3/FOLLOWUPS.md's *The rest of the Danish
+// standard*, and tasks/phase-3.5/05-the-danish-standard.md, which quotes the decision).
+// tasks/phase-3/reports/03.md is the table it came from: every `set` key of the pinned CLI with
+// upstream's default beside it and meshguide.dk's recommendation where there is one. A session
+// with nobody to ask still does not invent a value for a radio nobody has measured or a site
+// nobody has visited - which is why the three delays are not here.
 //
 // What is deliberately *not* here:
 //
@@ -52,10 +79,14 @@ static_assert(TWINOAK_BAND_DUTY_CYCLE == bands::dutyCycleOf(bands::kBands, bands
 //     with somebody else's name on the air is worse than a unit called `repeater`;
 //   - **any password**: a password is never in an image (spec/SYSTEM.md S-13). The admin password
 //     of this boot is the random one src/roles/repeater/app/AdminPassword.h draws, and the guest
-//     password is upstream's empty default until a person sets it;
-//   - the **delays** (`rxdelay`, `txdelay`, `direct.txdelay`) and `flood.max.unscoped`: the
-//     Danish standard tunes them to how many neighbours a site hears, which a unit that has
-//     never been switched on cannot know.
+//     password is upstream's empty default until a person sets it (the Danish standard's `hello`
+//     is still a person's to type - tasks/phase-3/FOLLOWUPS.md's *The guest password*);
+//   - the **delays** (`rxdelay`, `txdelay`, `direct.txdelay`): the Danish standard tunes these
+//     three to how many neighbours a site hears, which a unit that has never been switched on
+//     cannot know. `flood.max.unscoped` was on this list until 22 October 2026 and is a line of
+//     the table now: 15 hops is a ceiling and not a count of neighbours, and a site that wants
+//     another one sends `set flood.max.unscoped <n>` at provisioning like any other setting
+//     (docs/provisioning.md section 2).
 const ProfileLine kProfile[] = {
     // spec/SYSTEM.md S-12: "Path hashes this firmware chooses are two bytes or more
     // (meshmaster.dk D-33)". Upstream floods this node's own adverts at `path_hash_mode + 1`
@@ -66,7 +97,7 @@ const ProfileLine kProfile[] = {
     // mesh client's own floods already pass 2 in code (meshclient::kFloodPathHashSize); this is
     // the half of S-12 that upstream decides from a preference.
     {"set path.hash.mode 1",
-     "flooded adverts carry two-byte path hashes (S-12, meshmaster.dk D-33)"},
+     "flooded adverts carry two-byte path hashes (S-12, meshmaster.dk D-33)", nullptr},
     // The band's legal ceiling, and the one line of this table that is **generated**: the
     // percentage is platformio.ini's [band_868].duty_cycle by way of TWINOAK_BAND_DUTY_CYCLE,
     // held against src/common/bands/Bands.h's row by the static_assert above. 869.618 MHz is in
@@ -85,7 +116,62 @@ const ProfileLine kProfile[] = {
     // be accepted, saved and then loaded back as 10 %.
     {"set dutycycle " TWINOAK_PROFILE_TEXT(TWINOAK_BAND_DUTY_CYCLE),
      "the duty cycle the home channel's band allows, which upstream starts at 50 % "
-     "(ERC Recommendation 70-03, Annex 1, 869.400-869.650 MHz; platformio.ini's [band_868])"},
+     "(ERC Recommendation 70-03, Annex 1, 869.400-869.650 MHz; platformio.ini's [band_868])",
+     nullptr},
+    // --- the Danish standard, as Thomas settled it on 22 October 2026 -------------------------
+    //
+    // Four lines that phase 3's task 03 left to the reviewer and the reviewer left to Thomas,
+    // because each changes what a repeater *does* in the mesh rather than what it is
+    // (tasks/phase-3/FOLLOWUPS.md). None of them is per site in the way the three delays are.
+    //
+    // The receiver's automatic gain control and its noise floor, re-sampled every four seconds.
+    // Upstream's default is 0, which is off (Dispatcher::getAGCResetInterval() returns 0,
+    // src/Dispatcher.h:172 at the pin d9296435, and MyMesh overrides it with
+    // `agc_reset_interval * 4000` ms, examples/simple_repeater/MyMesh.h:157-159); with it on,
+    // `Dispatcher::loop` calls `_radio->resetAGC()` on that period whenever it is not mid-packet
+    // (src/Dispatcher.cpp:133-136), and the SX1262 wrapper throws away the noise floor it had
+    // sampled so that a stuck floor reconverges (RadioLibWrapper::resetAGC,
+    // src/helpers/radiolib/RadioLibWrappers.cpp:71-83, whose own comment is about exactly that
+    // stuck -120 dBm). A repeater that has heard a strong neighbour is the node that needs it.
+    //
+    // Upstream keeps the value as **seconds / 4** in a uint8_t (`agc_reset_interval`,
+    // src/helpers/CommonCLI.h:49), so `set agc.reset.interval 4` stores 1 and the reply is
+    // `OK - interval rounded to 4`, which the reply rule below accepts; `get` answers `> 4`.
+    {"set agc.reset.interval 4",
+     "the receiver's AGC and noise floor re-sampled every 4 s, which upstream leaves off "
+     "(the Danish standard; Thomas, 22 October 2026)", nullptr},
+    // Loop detection. Upstream's default is off; `moderate` lets a flood packet past this node
+    // at most twice when its path hashes are one byte and once when they are two or three
+    // (`max_loop_moderate`, examples/simple_repeater/MyMesh.cpp:397 and the branch at :440-460 of
+    // allowPacketForward at the pin). Ours flood at two bytes (the first line of this table), so
+    // `moderate` is "once" for this firmware's own packets.
+    {"set loop.detect moderate",
+     "a flood packet is repeated once at two-byte hashes, where upstream repeats it without "
+     "limit (the Danish standard; Thomas, 22 October 2026)", nullptr},
+    // The hop ceiling for an **un-scoped** flood - `ROUTE_TYPE_FLOOD`, a packet with no
+    // transport code - which upstream leaves at its own maximum of 64
+    // (`_prefs.flood_max_unscoped = 64`, MyMesh.cpp:906; the test is
+    // mesh::isFloodHopLimitExceeded, src/helpers/RoutingPolicy.h:19). 15 is the Danish standard's
+    // ceiling for a mesh whose scoped traffic is what matters. A site may raise or lower it at
+    // provisioning; this is the default it starts from, which it did not have before.
+    {"set flood.max.unscoped 15",
+     "an un-scoped flood is dropped past 15 hops, where upstream allows 64 "
+     "(the Danish standard; Thomas, 22 October 2026)", nullptr},
+    // And the one line **built from the node**: its flood advert's interval, 60-85 hours from the
+    // node's own key (floodAdvertIntervalHours, and docs/provisioning.md section 1 states the
+    // rule). Upstream's default is 47 hours for every unit in the world
+    // (`_prefs.flood_advert_interval = 47`, MyMesh.cpp:904), so a batch flashed in one evening
+    // floods the mesh in step for as long as it runs; two units of ours differ by up to a day.
+    //
+    // The range is inside upstream's own: `set flood.advert.interval <h>` refuses a value that is
+    // neither 0 nor 3-168 (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:486-495 at the pin),
+    // stores the hours in a uint8_t and re-arms the timer at once
+    // (MyMesh::updateFloodAdvertTimer, MyMesh.cpp:1052-1057), which is what the profile wants:
+    // this boot's own first flood advert is already on the derived period.
+    {"set flood.advert.interval <h>",
+     "the flood advert's period, 60-85 h from this node's own key, so that units flashed "
+     "together do not advertise in step (upstream: 47 h for every unit; the Danish standard; "
+     "Thomas, 22 October 2026)", buildFloodAdvertIntervalLine},
 };
 
 const int kProfileCount = int(sizeof(kProfile) / sizeof(kProfile[0]));
@@ -110,8 +196,9 @@ bool replyAccepted(const char* reply) {
 
 // --- the runner --------------------------------------------------------------------------------
 
-ProfileResult runProfile(const ProfileLine* lines, int count, link::CliAccess& cli, char* line,
-                         size_t line_cap, char* reply, size_t reply_cap) {
+ProfileResult runProfile(const ProfileLine* lines, int count, const NodeFacts& facts,
+                         link::CliAccess& cli, char* line, size_t line_cap, char* reply,
+                         size_t reply_cap) {
   ProfileResult out;
   if (lines == nullptr || line == nullptr || reply == nullptr || line_cap == 0 ||
       reply_cap == 0) {
@@ -124,16 +211,28 @@ ProfileResult runProfile(const ProfileLine* lines, int count, link::CliAccess& c
 
   for (int i = 0; i < count; i++) {
     const char* command = lines[i].command;
-    const size_t len = command == nullptr ? 0 : strlen(command);
-    // A line that is empty, or longer than the buffer the console would have given it, is
-    // refused without being run: a truncated `set` is a wrong value, not a missing one.
-    if (len == 0 || len + 1 > line_cap) {
-      out.refused++;
-      if (out.first_refused == nullptr) out.first_refused = command;
-      continue;
+    if (lines[i].build != nullptr) {
+      // A line this file builds from the node (the flood advert's interval). It is written into
+      // the same buffer a text line is copied into, so the length it is held to is the same one;
+      // what it could not write is a refusal, and `first_refused` is then the table's own text
+      // for the line - `set flood.advert.interval <h>` - which carries no value of this node.
+      if (!lines[i].build(facts, line, line_cap)) {
+        out.refused++;
+        if (out.first_refused == nullptr) out.first_refused = command;
+        continue;
+      }
+    } else {
+      const size_t len = command == nullptr ? 0 : strlen(command);
+      // A line that is empty, or longer than the buffer the console would have given it, is
+      // refused without being run: a truncated `set` is a wrong value, not a missing one.
+      if (len == 0 || len + 1 > line_cap) {
+        out.refused++;
+        if (out.first_refused == nullptr) out.first_refused = command;
+        continue;
+      }
+      memcpy(line, command, len);
+      line[len] = 0;
     }
-    memcpy(line, command, len);
-    line[len] = 0;
     memset(reply, 0, reply_cap);
     cli.runCommand(line, reply, window);
     // The bytes decide, not the length the interpreter reports, and never past the window.
@@ -149,8 +248,8 @@ ProfileResult runProfile(const ProfileLine* lines, int count, link::CliAccess& c
 }
 
 ProfileResult runFirstBootProfile(bool saved_prefs_found, const ProfileLine* lines, int count,
-                                  link::CliAccess& cli, char* line, size_t line_cap, char* reply,
-                                  size_t reply_cap) {
+                                  const NodeFacts& facts, link::CliAccess& cli, char* line,
+                                  size_t line_cap, char* reply, size_t reply_cap) {
   if (saved_prefs_found) {
     // Settings existed already: upstream loaded them and they are what the node is. Nothing of
     // the profile runs, not even a line that would be harmless - a unit a person configured is
@@ -159,7 +258,7 @@ ProfileResult runFirstBootProfile(bool saved_prefs_found, const ProfileLine* lin
     return ProfileResult();
   }
   const ProfileResult result =
-      runProfile(lines, count, cli, line, line_cap, reply, reply_cap);
+      runProfile(lines, count, facts, cli, line, line_cap, reply, reply_cap);
   noteState(result.refused == 0 ? State::kDone : State::kPartial, result.refused);
   return result;
 }

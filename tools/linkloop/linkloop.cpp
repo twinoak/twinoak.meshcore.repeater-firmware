@@ -328,10 +328,32 @@ class LoopCli : public CliAccess {
       snprintf(out, sizeof(out), "OK - %d.%d%%", whole, tenth);
       return out;
     }
+    // The Danish standard's four, which the first-boot profile runs through here (p3.5-05).
+    // Each answers what upstream answers, because the profile's reply rule is what is being
+    // watched: a plain `OK` would hide the one of them whose reply is not `OK`.
+    if (key == "agc.reset.interval") {
+      // Stored as seconds/4 in a uint8_t and echoed back times four, so the reply names the
+      // value that was really kept (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:474-477
+      // at the pin d9296435). `set agc.reset.interval 6` would answer `rounded to 4`.
+      char out[48];
+      snprintf(out, sizeof(out), "OK - interval rounded to %d", (atoi(value.c_str()) / 4) * 4);
+      return out;
+    }
+    if (key == "loop.detect") {
+      const bool ok = value == "off" || value == "minimal" || value == "moderate" ||
+                      value == "strict";
+      return ok ? "OK" : "Error, must be: off, minimal, moderate, or strict";
+    }
+    if (key == "flood.max.unscoped" || key == "flood.max.advert" || key == "flood.max") {
+      return atoi(value.c_str()) <= 64 ? "OK" : "Error, max 64";
+    }
+    if (key == "flood.advert.interval") {
+      const int hours = atoi(value.c_str());
+      const bool ok = hours == 0 || (hours >= 3 && hours <= 168);
+      return ok ? "OK" : "Error: interval range is 3-168 hours";
+    }
     if (key == "lat" || key == "lon" || key == "owner.info" || key == "guest.password" ||
-        key == "loop.detect" || key == "flood.max.unscoped" ||
-        key == "advert.interval" || key == "flood.advert.interval" ||
-        key == "agc.reset.interval" || key == "rxdelay" || key == "txdelay" ||
+        key == "advert.interval" || key == "rxdelay" || key == "txdelay" ||
         key == "direct.txdelay" || key == "radio.rxgain") {
       return "OK";
     }
@@ -613,9 +635,18 @@ int pump() {
   {
     char line[160] = {0};
     char reply[160 + 64] = {0};
+    // The node's key, which on a board is `the_mesh.self_id.pub_key` and here is a fixed 32
+    // bytes: one line of the table is built from it (the flood advert's interval), and a fixed
+    // key makes that line a fixed line - `set flood.advert.interval 73`, because the first byte
+    // is 13 and the rule is 60 + (13 mod 26). check.sh reads the same number back.
+    static const uint8_t pub_key[32] = {
+        13,   0x2f, 0x41, 0x53, 0x65, 0x77, 0x89, 0x9b, 0xad, 0xbf, 0xd1,
+        0xe3, 0xf5, 0x07, 0x19, 0x2b, 0x3d, 0x4f, 0x61, 0x73, 0x85, 0x97,
+        0xa9, 0xbb, 0xcd, 0xdf, 0xf1, 0x03, 0x15, 0x27, 0x39, 0x4b};
+    const twinoak::firstboot::NodeFacts facts = {pub_key, sizeof pub_key};
     twinoak::firstboot::runFirstBootProfile(
         /*saved_prefs_found=*/!g_first_boot, twinoak::firstboot::kProfile,
-        twinoak::firstboot::kProfileCount, g_cli, line, sizeof line, reply, sizeof reply);
+        twinoak::firstboot::kProfileCount, facts, g_cli, line, sizeof line, reply, sizeof reply);
   }
 
   // A ring is per-boot RAM too, so --adverts fills one at startup the way ten minutes on a roof

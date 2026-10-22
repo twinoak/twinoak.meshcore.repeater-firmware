@@ -6,10 +6,11 @@
 // two replies that are neither); the runner with every line accepted, with one refused in the
 // middle, with an empty table, with a line too long for the console's buffer and with a reply
 // that writes into the guard; that it **runs once** - with settings present nothing runs at all
-// and the state says `never`; and the table as shipped, which is held to the rails that make it
-// safe to run unattended on a board nobody is watching - and, for the duty-cycle line, to the
-// band's own row, because that line is built from platformio.ini's [band_*] block and not
-// written (src/common/bands/Bands.h).
+// and the state says `never`; the one line that is built from the node's own key (its bounds,
+// its mapping, that it is the same for the same key, and the text it produces); and the table as
+// shipped, which is held to the rails that make it safe to run unattended on a board nobody is
+// watching - and, for the duty-cycle line, to the band's own row, because that line is built
+// from platformio.ini's [band_*] block and not written (src/common/bands/Bands.h).
 
 #include <gtest/gtest.h>
 
@@ -23,8 +24,13 @@
 
 namespace {
 
+using twinoak::firstboot::buildFloodAdvertIntervalLine;
+using twinoak::firstboot::floodAdvertIntervalHours;
+using twinoak::firstboot::kFloodAdvertHoursMin;
+using twinoak::firstboot::kFloodAdvertHoursSpan;
 using twinoak::firstboot::kProfile;
 using twinoak::firstboot::kProfileCount;
+using twinoak::firstboot::NodeFacts;
 using twinoak::firstboot::ProfileLine;
 using twinoak::firstboot::ProfileResult;
 using twinoak::firstboot::replyAccepted;
@@ -67,6 +73,25 @@ class FakeCli : public twinoak::link::CliAccess {
     return n < reply_cap ? n : reply_cap;
   }
 };
+
+// A node's key, as the board hands it over (src/roles/repeater/app/FirstBoot.cpp passes
+// `the_mesh.self_id.pub_key`): 32 bytes whose **first** one is all the derived line reads.
+struct Key {
+  uint8_t bytes[32];
+  explicit Key(uint8_t first) {
+    for (size_t i = 0; i < sizeof(bytes); i++) bytes[i] = uint8_t(first + i * 7 + 1);
+    bytes[0] = first;
+  }
+  NodeFacts facts() const { return NodeFacts{bytes, sizeof(bytes)}; }
+};
+
+// No key at all, which is what a caller that cannot say who the node is passes.
+const NodeFacts kNoKey = {nullptr, 0};
+
+// The key every test that is not about the key itself hands over. 13 is the first byte, so the
+// derived line asks for 60 + 13 = 73 hours.
+const Key kKey(13);
+const int kKeyHours = 73;
 
 }  // namespace
 
@@ -129,13 +154,13 @@ TEST(TheReplyRule, TheTwoRepliesThatAreNeitherAreRefusedOnPurpose) {
 
 TEST(TheRunner, EveryLineAcceptedIsEveryLineRun) {
   const ProfileLine lines[] = {
-      {"set path.hash.mode 1", "why one"},
-      {"set loop.detect moderate", "why two"},
-      {"set flood.max.unscoped 15", "why three"},
+      {"set path.hash.mode 1", "why one", nullptr},
+      {"set loop.detect moderate", "why two", nullptr},
+      {"set flood.max.unscoped 15", "why three", nullptr},
   };
   FakeCli cli;
   Buffers b;
-  const ProfileResult r = runProfile(lines, 3, cli, b.line, sizeof(b.line), b.reply,
+  const ProfileResult r = runProfile(lines, 3, kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
                                      sizeof(b.reply));
   EXPECT_EQ(3, r.ran);
   EXPECT_EQ(0, r.refused);
@@ -148,14 +173,14 @@ TEST(TheRunner, EveryLineAcceptedIsEveryLineRun) {
 
 TEST(TheRunner, OneRefusedInTheMiddleAndTheRestStillRun) {
   const ProfileLine lines[] = {
-      {"set path.hash.mode 1", "taken"},
-      {"set nonsense 1", "a key a pin bump removed"},
-      {"set loop.detect moderate", "taken after the refusal"},
+      {"set path.hash.mode 1", "taken", nullptr},
+      {"set nonsense 1", "a key a pin bump removed", nullptr},
+      {"set loop.detect moderate", "taken after the refusal", nullptr},
   };
   FakeCli cli;
   cli.answers = {"OK", "unknown config: nonsense 1", "OK"};
   Buffers b;
-  const ProfileResult r = runProfile(lines, 3, cli, b.line, sizeof(b.line), b.reply,
+  const ProfileResult r = runProfile(lines, 3, kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
                                      sizeof(b.reply));
   EXPECT_EQ(2, r.ran) << "a refusal does not stop the run: the lines are independent settings";
   EXPECT_EQ(1, r.refused);
@@ -167,7 +192,7 @@ TEST(TheRunner, OneRefusedInTheMiddleAndTheRestStillRun) {
 TEST(TheRunner, AnEmptyTableRunsNothingAndRefusesNothing) {
   FakeCli cli;
   Buffers b;
-  const ProfileResult r = runProfile(kProfile, 0, cli, b.line, sizeof(b.line), b.reply,
+  const ProfileResult r = runProfile(kProfile, 0, kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
                                      sizeof(b.reply));
   EXPECT_EQ(0, r.ran);
   EXPECT_EQ(0, r.refused);
@@ -176,7 +201,7 @@ TEST(TheRunner, AnEmptyTableRunsNothingAndRefusesNothing) {
   // Which is `done`, and rightly: a table with nothing in it has nothing left undone.
   FakeCli cli2;
   Buffers b2;
-  runFirstBootProfile(false, kProfile, 0, cli2, b2.line, sizeof(b2.line), b2.reply,
+  runFirstBootProfile(false, kProfile, 0, kKey.facts(), cli2, b2.line, sizeof(b2.line), b2.reply,
                       sizeof(b2.reply));
   EXPECT_STREQ("done", stateText());
 }
@@ -188,13 +213,13 @@ TEST(TheRunner, ALineTooLongForTheConsolesBufferIsRefusedWithoutBeingRun) {
   ASSERT_EQ(160u, too_long.size());
   const std::string just_fits = too_long.substr(0, 159);
   const ProfileLine lines[] = {
-      {too_long.c_str(), "one byte too many"},
-      {just_fits.c_str(), "and the one that fits"},
-      {"", "nothing at all"},
+      {too_long.c_str(), "one byte too many", nullptr},
+      {just_fits.c_str(), "and the one that fits", nullptr},
+      {"", "nothing at all", nullptr},
   };
   FakeCli cli;
   Buffers b;
-  const ProfileResult r = runProfile(lines, 3, cli, b.line, sizeof(b.line), b.reply,
+  const ProfileResult r = runProfile(lines, 3, kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
                                      sizeof(b.reply));
   EXPECT_EQ(1, r.ran);
   EXPECT_EQ(2, r.refused);
@@ -207,12 +232,12 @@ TEST(TheRunner, AReplyThatWritesPastTheWindowGoesIntoTheGuardAndIsStillJudged) {
   // Upstream's own `sensor list` can write past the 160 bytes it is given (phase 1's report 05
   // has the arithmetic, and it is why the console keeps 64 bytes behind the window). A reply
   // that long is judged by the window's own bytes and nothing is written past the buffer.
-  const ProfileLine lines[] = {{"set path.hash.mode 1", "a reply that overruns"}};
+  const ProfileLine lines[] = {{"set path.hash.mode 1", "a reply that overruns", nullptr}};
   FakeCli cli;
   cli.default_answer = "OK - ";
   cli.pad_to = 200;  // 40 bytes into the 64-byte guard
   Buffers b;
-  const ProfileResult r = runProfile(lines, 1, cli, b.line, sizeof(b.line), b.reply,
+  const ProfileResult r = runProfile(lines, 1, kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
                                      sizeof(b.reply));
   EXPECT_EQ(1, r.ran) << "the reply still begins with OK";
   EXPECT_EQ(0, r.refused);
@@ -223,9 +248,13 @@ TEST(TheRunner, AReplyThatWritesPastTheWindowGoesIntoTheGuardAndIsStillJudged) {
 TEST(TheRunner, NoBufferAtAllRunsNothing) {
   FakeCli cli;
   Buffers b;
-  EXPECT_EQ(0, runProfile(kProfile, kProfileCount, cli, nullptr, 0, b.reply, sizeof(b.reply)).ran);
-  EXPECT_EQ(0, runProfile(kProfile, kProfileCount, cli, b.line, sizeof(b.line), nullptr, 0).ran);
-  EXPECT_EQ(0, runProfile(nullptr, 3, cli, b.line, sizeof(b.line), b.reply, sizeof(b.reply)).ran);
+  const NodeFacts facts = kKey.facts();
+  EXPECT_EQ(0, runProfile(kProfile, kProfileCount, facts, cli, nullptr, 0, b.reply,
+                          sizeof(b.reply)).ran);
+  EXPECT_EQ(0, runProfile(kProfile, kProfileCount, facts, cli, b.line, sizeof(b.line), nullptr,
+                          0).ran);
+  EXPECT_EQ(0, runProfile(nullptr, 3, facts, cli, b.line, sizeof(b.line), b.reply,
+                          sizeof(b.reply)).ran);
   EXPECT_TRUE(cli.seen.empty());
 }
 
@@ -235,7 +264,7 @@ TEST(RunsOnce, WithSettingsPresentNothingRunsAndTheStateIsNever) {
   FakeCli cli;
   Buffers b;
   const ProfileResult r = runFirstBootProfile(/*saved_prefs_found=*/true, kProfile, kProfileCount,
-                                              cli, b.line, sizeof(b.line), b.reply,
+                                              kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
                                               sizeof(b.reply));
   EXPECT_EQ(0, r.ran);
   EXPECT_EQ(0, r.refused);
@@ -247,8 +276,8 @@ TEST(RunsOnce, WithNoSettingsTheProfileRunsAndTheStateSaysWhatHappened) {
   FakeCli cli;
   Buffers b;
   const ProfileResult r = runFirstBootProfile(/*saved_prefs_found=*/false, kProfile,
-                                              kProfileCount, cli, b.line, sizeof(b.line),
-                                              b.reply, sizeof(b.reply));
+                                              kProfileCount, kKey.facts(), cli, b.line,
+                                              sizeof(b.line), b.reply, sizeof(b.reply));
   EXPECT_EQ(kProfileCount, r.ran);
   EXPECT_EQ(0, r.refused);
   EXPECT_EQ(size_t(kProfileCount), cli.seen.size());
@@ -258,8 +287,9 @@ TEST(RunsOnce, WithNoSettingsTheProfileRunsAndTheStateSaysWhatHappened) {
   FakeCli refusing;
   refusing.default_answer = "unknown config: path.hash.mode 1";
   Buffers b2;
-  const ProfileResult r2 = runFirstBootProfile(false, kProfile, kProfileCount, refusing, b2.line,
-                                               sizeof(b2.line), b2.reply, sizeof(b2.reply));
+  const ProfileResult r2 = runFirstBootProfile(false, kProfile, kProfileCount, kKey.facts(),
+                                               refusing, b2.line, sizeof(b2.line), b2.reply,
+                                               sizeof(b2.reply));
   EXPECT_EQ(0, r2.ran);
   EXPECT_EQ(kProfileCount, r2.refused);
   EXPECT_STREQ(("partial: " + std::to_string(kProfileCount) + " refused").c_str(), stateText());
@@ -278,14 +308,192 @@ TEST(TheState, IsTheThreeWordsTheSettingPromises) {
   EXPECT_GT(40u, strlen(stateText()));
 }
 
+// ------------------------------------------------- the line the node's own key gives it
+
+TEST(TheDerivedLine, EveryKeyGivesAnHourInsideTheRangeThomasChose) {
+  // 60-85 inclusive, for every one of the 256 values a key's first byte can hold - including the
+  // 0x00 and 0xFF that src/roles/repeater/main.cpp redraws an identity for, because it gives up
+  // after ten tries and a unit that got one anyway still has to ask for a legal interval.
+  for (int first = 0; first < 256; first++) {
+    const Key key{uint8_t(first)};
+    const int hours = floodAdvertIntervalHours(key.facts());
+    EXPECT_LE(kFloodAdvertHoursMin, hours) << "first byte " << first;
+    EXPECT_GE(kFloodAdvertHoursMin + kFloodAdvertHoursSpan - 1, hours) << "first byte " << first;
+    // And inside upstream's own range for the key, which is 0 or 3-168 hours
+    // (CommonCLI::handleSetCmd's `flood.advert.interval` branch at the pin d9296435): 85 is well
+    // inside it, and a value outside it would be refused on the board and nowhere else.
+    EXPECT_LE(3, hours);
+    EXPECT_GE(168, hours);
+  }
+}
+
+TEST(TheDerivedLine, TheMappingIsTheRuleTheDocumentStates) {
+  // h = 60 + (the key's first byte mod 26), and every hour of 60-85 is reached by some key, so
+  // that a batch of units spreads over the whole range rather than over part of it.
+  bool reached[kFloodAdvertHoursSpan] = {false};
+  for (int first = 0; first < 256; first++) {
+    const Key key{uint8_t(first)};
+    const int hours = floodAdvertIntervalHours(key.facts());
+    ASSERT_EQ(kFloodAdvertHoursMin + (first % kFloodAdvertHoursSpan), hours);
+    reached[hours - kFloodAdvertHoursMin] = true;
+  }
+  for (int i = 0; i < kFloodAdvertHoursSpan; i++) {
+    EXPECT_TRUE(reached[i]) << "no key gives " << (kFloodAdvertHoursMin + i) << " hours";
+  }
+}
+
+TEST(TheDerivedLine, TheSameKeyAlwaysGivesTheSameHour) {
+  // A unit that is rebooted, or erased and provisioned again with the same identity, asks for the
+  // same interval: nothing here is random and nothing here is a clock.
+  const Key key(0x7f);
+  const int once = floodAdvertIntervalHours(key.facts());
+  for (int i = 0; i < 5; i++) EXPECT_EQ(once, floodAdvertIntervalHours(key.facts()));
+  // Only the first byte decides, which is the byte a `Repeater ID:` line starts with and the one
+  // tools/bench/walk.py recomputes the expected hour from.
+  Key other(0x7f);
+  other.bytes[1] ^= 0xff;
+  other.bytes[31] ^= 0xff;
+  EXPECT_EQ(once, floodAdvertIntervalHours(other.facts()));
+  // A different first byte is a different hour whenever the two differ mod 26.
+  EXPECT_NE(once, floodAdvertIntervalHours(Key(uint8_t(0x7f + 1)).facts()));
+}
+
+TEST(TheDerivedLine, WithNoKeyThereIsNoHourAndNoLine) {
+  char out[64] = "untouched";
+  EXPECT_EQ(0, floodAdvertIntervalHours(kNoKey));
+  EXPECT_FALSE(buildFloodAdvertIntervalLine(kNoKey, out, sizeof(out)));
+  const NodeFacts empty = {reinterpret_cast<const uint8_t*>("x"), 0};
+  EXPECT_EQ(0, floodAdvertIntervalHours(empty));
+  EXPECT_FALSE(buildFloodAdvertIntervalLine(empty, out, sizeof(out)));
+}
+
+TEST(TheDerivedLine, TheTextIsTheConsoleLineUpstreamTakes) {
+  char out[64] = {0};
+  ASSERT_TRUE(buildFloodAdvertIntervalLine(Key(13).facts(), out, sizeof(out)));
+  EXPECT_STREQ("set flood.advert.interval 73", out) << "60 + (13 mod 26)";
+  ASSERT_TRUE(buildFloodAdvertIntervalLine(Key(0).facts(), out, sizeof(out)));
+  EXPECT_STREQ("set flood.advert.interval 60", out) << "the bottom of the range";
+  ASSERT_TRUE(buildFloodAdvertIntervalLine(Key(25).facts(), out, sizeof(out)));
+  EXPECT_STREQ("set flood.advert.interval 85", out) << "and the top of it";
+  // Upstream's own branch is `memcmp(config, "flood.advert.interval ", 22)` after the `set `, so
+  // the one space and the exact key spelling are what make the line a line at all.
+  EXPECT_EQ(0, strncmp(out, "set flood.advert.interval ", 26));
+}
+
+TEST(TheDerivedLine, ABufferTooSmallForItIsNoLineAtAll) {
+  // "set flood.advert.interval 73" is 28 characters, so 29 bytes is the smallest buffer that
+  // holds it. One less writes nothing and refuses, rather than sending a truncated `set`.
+  char out[29] = {0};
+  EXPECT_TRUE(buildFloodAdvertIntervalLine(Key(13).facts(), out, sizeof(out)));
+  EXPECT_EQ(28u, strlen(out));
+  char tight[28] = {0};
+  EXPECT_FALSE(buildFloodAdvertIntervalLine(Key(13).facts(), tight, sizeof(tight)));
+  EXPECT_STREQ("", tight);
+  EXPECT_FALSE(buildFloodAdvertIntervalLine(Key(13).facts(), nullptr, 8));
+}
+
+TEST(TheRunner, ABuiltLineReachesTheInterpreterAsTheLineAndNotAsTheTablesText) {
+  const ProfileLine lines[] = {
+      {"set path.hash.mode 1", "a line that is text", nullptr},
+      {"set flood.advert.interval <h>", "a line that is built", buildFloodAdvertIntervalLine},
+  };
+  FakeCli cli;
+  Buffers b;
+  const ProfileResult r = runProfile(lines, 2, kKey.facts(), cli, b.line, sizeof(b.line), b.reply,
+                                     sizeof(b.reply));
+  EXPECT_EQ(2, r.ran);
+  EXPECT_EQ(0, r.refused);
+  ASSERT_EQ(2u, cli.seen.size());
+  EXPECT_EQ("set path.hash.mode 1", cli.seen[0]);
+  EXPECT_EQ("set flood.advert.interval " + std::to_string(kKeyHours), cli.seen[1])
+      << "the table's `<h>` is what a person reads; what upstream is given is the hour";
+}
+
+TEST(TheRunner, ABuiltLineThatCannotBeBuiltIsRefusedWithoutBeingRunAndTheRestStillRuns) {
+  const ProfileLine lines[] = {
+      {"set flood.advert.interval <h>", "a line that is built", buildFloodAdvertIntervalLine},
+      {"set path.hash.mode 1", "and the line after it", nullptr},
+  };
+  FakeCli cli;
+  Buffers b;
+  const ProfileResult r = runProfile(lines, 2, kNoKey, cli, b.line, sizeof(b.line), b.reply,
+                                     sizeof(b.reply));
+  EXPECT_EQ(1, r.ran);
+  EXPECT_EQ(1, r.refused);
+  ASSERT_NE(nullptr, r.first_refused);
+  // The table's own text, which is what the console prints - and it carries no value of this
+  // node, which is the reason a built line has a text at all.
+  EXPECT_STREQ("set flood.advert.interval <h>", r.first_refused);
+  ASSERT_EQ(1u, cli.seen.size()) << "the line that could not be built was never handed over";
+  EXPECT_EQ("set path.hash.mode 1", cli.seen[0]);
+}
+
 // --------------------------------------------------------------------- the table as shipped
 
-TEST(TheTableAsShipped, IsTheTwoLinesThisProjectHasADocumentFor) {
-  ASSERT_EQ(2, kProfileCount) << "a line is added only where a document of this project gives "
-                                 "the value (tasks/phase-3/reports/03.md lists the rest)";
+TEST(TheTableAsShipped, IsTheSixLinesThisProjectHasADocumentFor) {
+  ASSERT_EQ(6, kProfileCount) << "a line is added only where a document of this project gives "
+                                 "the value (tasks/phase-3/reports/03.md lists the rest, and "
+                                 "the three delays are still nobody's to guess)";
   EXPECT_STREQ("set path.hash.mode 1", kProfile[0].command)
       << "spec/SYSTEM.md S-12 and meshmaster.dk's D-33: two-byte path hashes in the "
          "adverts this node floods (MyMesh::sendSelfAdvertisement at the pin)";
+  // The order is the order docs/provisioning.md section 1 prints and docs/bench.md section 10
+  // reads back: the specification's line, the band's, then the Danish standard's four.
+  EXPECT_STREQ("set agc.reset.interval 4", kProfile[2].command);
+  EXPECT_STREQ("set loop.detect moderate", kProfile[3].command);
+  EXPECT_STREQ("set flood.max.unscoped 15", kProfile[4].command);
+  EXPECT_STREQ("set flood.advert.interval <h>", kProfile[5].command);
+}
+
+TEST(TheTableAsShipped, TheDanishStandardsThreeStaticLinesAreTheValuesThomasChose) {
+  // Thomas's decision of 22 October 2026 (tasks/phase-3/FOLLOWUPS.md, *The rest of the Danish
+  // standard*), each against upstream's own default at the pin d9296435 - so that a bump that
+  // changed a default would not quietly turn one of these lines into a no-op nobody noticed.
+  //
+  //   agc.reset.interval   0 (off; src/Dispatcher.h:172, MyMesh.h:157-159)        -> 4 seconds
+  //   loop.detect          off (uint8_t loop_detect = 0, CommonCLI.h:70)          -> moderate
+  //   flood.max.unscoped   64 (MyMesh.cpp:906)                                    -> 15 hops
+  //
+  // The reply each of them gets is one the rule above accepts: `OK - interval rounded to 4` for
+  // the first (CommonCLI.cpp:474-477: the value is stored as seconds/4 and echoed back times 4)
+  // and a plain `OK` for the other two (`:688-708`, `:632-639`).
+  EXPECT_TRUE(replyAccepted("OK - interval rounded to 4"));
+  EXPECT_TRUE(replyAccepted("OK"));
+  EXPECT_FALSE(replyAccepted("Error, must be: off, minimal, moderate, or strict"));
+  EXPECT_FALSE(replyAccepted("Error, max 64"));
+  // And no line of the table asks for a value outside what the pinned CLI takes.
+  for (int i = 0; i < kProfileCount; i++) {
+    const std::string command = kProfile[i].command;
+    if (command.rfind("set flood.max.unscoped ", 0) == 0) {
+      EXPECT_GE(64, std::stoi(command.substr(23))) << "upstream answers `Error, max 64`";
+    }
+  }
+}
+
+TEST(TheTableAsShipped, TheAdvertIntervalLineIsBuiltFromTheKeyAndNothingElse) {
+  // The sixth line is the only built one, and the only one whose `command` is not what is sent.
+  for (int i = 0; i < kProfileCount; i++) {
+    if (i == 5) {
+      EXPECT_NE(nullptr, kProfile[i].build) << "line " << i << " is the derived one";
+    } else {
+      EXPECT_EQ(nullptr, kProfile[i].build)
+          << "line " << i << " is text, and a table of text is the whole design (Profile.h)";
+    }
+  }
+  // Run the shipped table against a key and read what the interpreter was given: the derived
+  // line is the hour that key gives, in upstream's own spelling.
+  FakeCli cli;
+  Buffers b;
+  const ProfileResult r = runProfile(kProfile, kProfileCount, kKey.facts(), cli, b.line,
+                                     sizeof(b.line), b.reply, sizeof(b.reply));
+  EXPECT_EQ(kProfileCount, r.ran);
+  ASSERT_EQ(size_t(kProfileCount), cli.seen.size());
+  EXPECT_EQ("set flood.advert.interval " + std::to_string(kKeyHours), cli.seen[5]);
+  // And no line of the table carries the hour as text, which is the thing that would rot.
+  for (int i = 0; i < kProfileCount; i++) {
+    EXPECT_EQ(std::string::npos, std::string(kProfile[i].command).find(std::to_string(kKeyHours)))
+        << "a derived value written into the table: " << kProfile[i].command;
+  }
 }
 
 TEST(TheTableAsShipped, TheDutyCycleLineIsTheBandsOwnNumber) {
@@ -324,6 +532,12 @@ TEST(TheTableAsShipped, EveryLineIsOneTheConsoleCouldHaveBeenTyped) {
     // refusal (the reply rule above), and nothing else belongs in a table that runs unattended.
     EXPECT_TRUE(command.rfind("set ", 0) == 0 || command.rfind("sensor set ", 0) == 0)
         << command;
+    // A built line's text is the only one that may carry a placeholder, and it may carry it only
+    // because what is sent is what `build` writes (which this file also builds, above).
+    if (kProfile[i].build == nullptr) {
+      EXPECT_EQ(std::string::npos, command.find('<')) << command;
+      EXPECT_EQ(std::string::npos, command.find('>')) << command;
+    }
   }
 }
 

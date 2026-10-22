@@ -800,14 +800,15 @@ TEST(Rails, Rule4_TheFirstBootProfileAsksForTwoByteHashesInAdvertsToo) {
   EXPECT_NE(std::string::npos, profile.find("\"set path.hash.mode 1\""))
       << "the first-boot profile no longer raises path.hash.mode, so a fresh unit would flood"
          " its adverts with one-byte path hashes (S-12, meshmaster.dk D-33)";
-  // The table has **two** lines since phase 3.3's task 01 - the path-hash mode and the band's
-  // duty cycle - and this rule is about the first of them, so it says which one it is reading
-  // rather than "the profile's one line". A third line added without reading test/test_firstboot
-  // fails there and not here.
-  EXPECT_EQ(2, twinoak::firstboot::kProfileCount)
-      << "the first-boot profile is no longer the two lines this project has a document for"
-         " (S-12's path hashes and the band's duty cycle): test/test_firstboot holds the table"
-         " itself, and docs/provisioning.md section 1 prints it";
+  // The table has **six** lines since phase 3.5's task 05 - the path-hash mode, the band's duty
+  // cycle, and the four of the Danish standard Thomas settled on 22 October 2026 - and this rule
+  // is about the first of them, so it says which one it is reading rather than "the profile's one
+  // line". A seventh line added without reading test/test_firstboot fails there and not here.
+  EXPECT_EQ(6, twinoak::firstboot::kProfileCount)
+      << "the first-boot profile is no longer the six lines this project has a document for"
+         " (S-12's path hashes, the band's duty cycle, and the Danish standard's four):"
+         " test/test_firstboot holds the table itself, and docs/provisioning.md section 1"
+         " prints it";
   EXPECT_STREQ("set path.hash.mode 1", twinoak::firstboot::kProfile[0].command)
       << "and it is still the first line, which is the order docs/provisioning.md and"
          " docs/bench.md section 10 read it in";

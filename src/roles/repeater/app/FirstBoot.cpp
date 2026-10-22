@@ -69,9 +69,16 @@ FirstBootOutcome firstBoot(TwinOakMesh& mesh, bool saved_prefs_found, char* line
   // `firstboot.state` says `never`. (The password may still have been redrawn above, which is
   // the belt-and-braces rail of S-13 and not a provisioning.)
   MeshCli cli(mesh);
+  // The node's own key, for the one line of the table that is built rather than written (the
+  // flood advert's interval, firstboot::floodAdvertIntervalHours). It exists by now and no order
+  // had to move for it: src/roles/repeater/main.cpp loads `_main` from the identity store, or
+  // makes a random identity and saves it, a dozen lines above this call - and prints all 32
+  // bytes of it as `Repeater ID:` on the line after. `self_id` is mesh::Mesh's own public member
+  // (src/Mesh.h:180 at the pin d9296435), so nothing of upstream's is reached around.
+  const firstboot::NodeFacts facts = {mesh.self_id.pub_key, sizeof(mesh.self_id.pub_key)};
   out.profile = firstboot::runFirstBootProfile(saved_prefs_found, firstboot::kProfile,
-                                               firstboot::kProfileCount, cli, line, line_cap,
-                                               reply, reply_cap);
+                                               firstboot::kProfileCount, facts, cli, line,
+                                               line_cap, reply, reply_cap);
 
   out.prefs_written = mesh.releasePrefsSaves();
   return out;

@@ -37,3 +37,31 @@ to settle at the new pin. The review of 01–06 goes below them when it is writt
   nothing of that task depends on it. What it would cost to fix is a build flag or a
   `--defsym`/`-ffile-prefix-map`-style stamp over RadioLib's two macros, which is a decision
   about a pinned library's source and therefore the reviewer's.
+
+## From 05 (23 October)
+
+- [ ] **[06] `agc.reset.interval`'s handler has moved, and gained a constraint.** At the pin
+  `d9296435` the `set`/`get` pair is in `CommonCLI::handleSetCmd`/`handleGetCmd`
+  (`src/helpers/CommonCLI.cpp:474-477`, `:820-821`); at `repeater-v1.18.0` it is
+  `CommonRadioPrefs::handleCommand` (`src/helpers/CommonRadioPrefs.cpp:163-173`), reached from
+  `CommonCLI::handleCommand` *before* `handleSetCmd` and matching the whole line
+  (`memcmp(command, "set agc.reset.interval ", 23)`). **The line this firmware sends and the
+  reply it gets are the same** - the preference is still seconds/4 in a `uint8_t` and the reply is
+  still `OK - interval rounded to 4` - so nothing of ours had to move; what 1.18 adds is
+  `secs = constrain(secs, 0, 255 * 4)`, which at the old pin wrapped instead (`atoi(x) / 4` into a
+  `uint8_t`, so `set agc.reset.interval 1024` stored 0). 4 is unaffected either way. What the bump
+  owes this: re-point the citation in `src/roles/repeater/firstboot/Profile.cpp` at the new file
+  and line, and the same citation in `docs/upstream.md` place 5, which already says both.
+- [ ] **[06] A transport code of 0 is un-scoped at 1.18, and `flood.max.unscoped 15` does not
+  hold it.** `01f9293b` (*treat transport code 0 the same as un-scoped*) adds
+  `if (packet->transport_codes[0] == 0) return &wildcard;` to `RegionMap::findMatch`
+  (`src/helpers/RegionMap.cpp:191`). At the pin such a packet matches no region, so
+  `recv_pkt_region == NULL` and `MyMesh::allowPacketForward` drops it
+  (`examples/simple_repeater/MyMesh.cpp:437-443`); at 1.18 it matches the wildcard and is
+  forwarded. Its route type is still `ROUTE_TYPE_TRANSPORT_FLOOD`, and
+  `mesh::isFloodHopLimitExceeded` applies `flood_max_unscoped` only to `ROUTE_TYPE_FLOOD`
+  (`src/helpers/RoutingPolicy.h:19`, byte for byte the same at both pins) - so the Danish
+  standard's 15-hop ceiling does **not** cover the packets 1.18 newly calls un-scoped: they are
+  held to `flood_max`, which is 64. Nothing of this task is wrong at either pin; what the bump
+  owes is the decision whether the profile should also lower `flood.max` (upstream's own 64), and
+  Thomas's, since it is the Danish standard and not a reading of upstream.

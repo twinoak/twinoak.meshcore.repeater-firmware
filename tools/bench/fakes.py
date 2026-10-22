@@ -76,11 +76,20 @@ class FakeRepeaterFirmware(object):
     SETTINGS = ("fw.version", "walter.wake", "link.errors", "walter.seen", "clock.state",
                 "power.low_mv", "power.crit_mv", "obs.wake", "client.refused", "firstboot.state")
 
+    # The six preferences the first-boot profile changes, as upstream's own `MyMesh` constructor
+    # leaves them (examples/simple_repeater/MyMesh.cpp:890-906 and the NodePrefs defaults of
+    # src/helpers/CommonCLI.h at the pin d9296435). An `erase` puts these back, so that the boot
+    # after it is really a first boot and the walk's `get`s mean something.
+    UPSTREAM_DEFAULTS = {"path.hash.mode": "0", "dutycycle": "50.0%",
+                         "agc.reset.interval": "0", "loop.detect": "off",
+                         "flood.max.unscoped": "64", "flood.advert.interval": "47"}
+
     def __init__(self, repeater_id, version="0.0.0-dev", name="repeater",
                  upstream="repeater-v1.17.1 (d9296435)", answers=None, first_boot=False,
                  settings=None, prints_banner=True, epoch=None, clock_state="unset",
                  clock_file=None, rtc_epoch=None, clock_sync_sender=0, low_mv=3500,
-                 crit_mv=3300, forgets_thresholds=False, forgets_clock=False):
+                 crit_mv=3300, forgets_thresholds=False, forgets_clock=False,
+                 refuses_profile=False):
         self.repeater_id = repeater_id
         # False: the boot lines went out before any host held the port, which is what a real
         # board does - the port is not back before 1.4 s (p3.4-02). The boot still happened.
@@ -96,11 +105,12 @@ class FakeRepeaterFirmware(object):
         self.erased = 0
         self.firstboot_state = "done" if first_boot else "never"
         self._first_boot_pending = bool(first_boot)
-        self.settings = {"lat": "0.0000", "lon": "0.0000", "owner.info": "",
-                         "path.hash.mode": "1", "dutycycle": "10.0%", "repeat": "on",
+        self.settings = {"lat": "0.0000", "lon": "0.0000", "owner.info": "", "repeat": "on",
                          "region.default": "dk", "pwrmgt.support": "supported",
                          "pwrmgt.bootmv": "0 mV",
                          "pwrmgt.bootreason": "Reset: SREQ; Shutdown: None"}
+        # A node that has been provisioned already: the profile's own six, as it left them.
+        self.apply_first_boot_profile()
         self.settings.update(settings or {})
         # The clock, as the keeper has it on a board with no RTC
         # (src/roles/repeater/clock/ClockKeeper.h; docs/bench.md section 3 is the walk):
@@ -121,15 +131,40 @@ class FakeRepeaterFirmware(object):
         # True: a board with no clock keeper at all - every reset comes up at upstream's 2024
         # default, which is the whole of what docs/bench.md section 3 exists to catch.
         self.forgets_clock = forgets_clock
+        # True: a board whose first boot left upstream's defaults in place - a pin that does not
+        # know a key, or a profile that never ran. docs/bench.md section 10 is what catches it.
+        self.refuses_profile = refuses_profile
+
+    # What the first-boot profile's six lines leave behind, read back the way a `get` reads them
+    # (src/roles/repeater/firstboot/Profile.cpp, docs/provisioning.md section 1). The advert
+    # interval is **derived**: 60 + (the key's first byte mod 26), mirrored here in Python the way
+    # restart() and boot() mirror the clock keeper - so a walk that computes the same number from
+    # the `Repeater ID` is checking the firmware's rule and not a constant this file handed it.
+    PROFILE_HOURS_MIN = 60
+    PROFILE_HOURS_SPAN = 26
+
+    def apply_first_boot_profile(self):
+        self.settings["path.hash.mode"] = "1"
+        self.settings["dutycycle"] = "10.0%"
+        self.settings["agc.reset.interval"] = "4"
+        self.settings["loop.detect"] = "moderate"
+        self.settings["flood.max.unscoped"] = "15"
+        self.settings["flood.advert.interval"] = "%d" % (
+            self.PROFILE_HOURS_MIN + (int(self.repeater_id[:2], 16) % self.PROFILE_HOURS_SPAN))
 
     def banner(self):
         out = "Repeater ID: %s\r\n" % self.repeater_id
         if self._first_boot_pending:
             self._first_boot_pending = False
             self.firstboot_state = "done"
+            # The profile runs whether or not a host is holding the port to read the two lines
+            # below (on a real board nothing is - p3.4-02), which is why this is here and not
+            # behind `prints_banner`.
+            if not self.refuses_profile:
+                self.apply_first_boot_profile()
             out += ("First boot: a random admin password was set (not shown; set yours with "
                     "'password <new>')\r\n")
-            out += ("First boot: the profile ran 2 of 2 lines (sensor get firstboot.state says "
+            out += ("First boot: the profile ran 6 of 6 lines (sensor get firstboot.state says "
                     "'done'; docs/provisioning.md is the rest)\r\n")
         else:
             self.firstboot_state = "never"
@@ -291,6 +326,9 @@ class FakeRepeaterFirmware(object):
             self.erased += 1
             self.repeater_id = "%02X" % (self.erased % 256) + self.repeater_id[2:]
             self._first_boot_pending = True
+            # The file system is gone, so the preferences are gone with it: the next boot finds
+            # upstream's own defaults and is a first boot (src/roles/repeater/app/FirstBoot.h).
+            self.settings.update(self.UPSTREAM_DEFAULTS)
             return "File system erase: OK"
         if line in ("reboot", "clkreboot"):
             self.rebooted += 1

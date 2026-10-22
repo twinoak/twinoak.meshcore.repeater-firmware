@@ -99,6 +99,14 @@ class WalkCase(BenchCase):
     def setUp(self):
         super().setUp()
         shutil.copy(os.path.join(REPO, "platformio.ini"), os.path.join(self.repo, "platformio.ini"))
+        # The first-boot profile's own two files, for the same reason platformio.ini is here: the
+        # walk of section 10 reads the table's static lines and the advert-interval rule out of
+        # them (walk.profile_expectations, walk.flood_advert_hours) rather than carrying either.
+        firstboot = os.path.join(self.repo, "src", "roles", "repeater", "firstboot")
+        os.makedirs(firstboot, exist_ok=True)
+        for name in ("Profile.h", "Profile.cpp"):
+            shutil.copy(os.path.join(REPO, "src", "roles", "repeater", "firstboot", name),
+                        os.path.join(firstboot, name))
         os.makedirs(os.path.join(self.repo, "docs"), exist_ok=True)
         with open(os.path.join(REPO, "docs", "bench.md"), encoding="utf-8") as fh:
             page = fh.read()
@@ -956,6 +964,71 @@ class SectionTen(WalkCase):
         self.assertNotEqual(board.firmware.repeater_id, REPEATER_ID)
         self.assertIsNone(load_run(self.home, SERIAL))         # it never opened a run
         self.assertEqual(board.flashes, [])                    # and never flashed
+
+    def test_the_danish_standard_is_read_back_on_both_boots(self):
+        """p3.5-05: the four lines the profile grew on 22 October 2026, on the first boot and
+        still there after the `reboot` - the advert interval computed from the `Repeater ID` the
+        walk itself read, and not from anything this test handed it."""
+        board, code, out = self.walk_ten()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNotIn("| differs |", text)
+        # `erase` gives the fake a key whose first byte is 01, so 60 + (1 mod 26) = 61.
+        self.assertEqual(board.firmware.repeater_id[:2], "01")
+        for when in ("", ", second boot"):
+            self.assertIn("**section 10 agc.reset.interval%s** -> 4" % when, text)
+            self.assertIn("**section 10 loop.detect%s** -> moderate" % when, text)
+            self.assertIn("**section 10 flood.max.unscoped%s** -> 15" % when, text)
+            self.assertIn("**section 10 flood.advert.interval%s** -> 61" % when, text)
+        self.assertIn("60 + (0x01 mod 26) from the key this boot made", text)
+
+    def test_a_board_that_kept_upstreams_defaults_is_a_differs_and_a_follow_up(self):
+        """A first boot whose profile did not take: `> 0`, `> off`, `> 64` and upstream's `> 47`
+        for every unit in the world. It is the finding this page line exists for, and it goes to
+        p3.5-05's own phase."""
+        self.phase_followups("3.5")
+        board = self.board(FakeRepeaterFirmware(REPEATER_ID, name=walk.advert_name(REPO),
+                                                refuses_profile=True))
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        code, out = self.walk(["walk", "10", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        differs = text.split("## What differs")[1]
+        self.assertIn("10.1a", differs)
+        self.assertIn("10.2a", differs)
+        with open(os.path.join(self.repo, "tasks", "phase-3.5", "FOLLOWUPS.md")) as fh:
+            followups = fh.read()
+        self.assertIn("**[05] `docs/bench.md` 10.1a differs from the board**", followups)
+        self.assertIn("saw `> 47`", followups)
+
+    def test_the_advert_interval_is_computed_and_not_taken_from_the_board(self):
+        """The one step a constant could not have written: a board that answers upstream's own 47
+        while every other line of the profile took is a *differs* on that line alone."""
+        firmware = FakeRepeaterFirmware(REPEATER_ID, name=walk.advert_name(REPO))
+        firmware.PROFILE_HOURS_MIN, firmware.PROFILE_HOURS_SPAN = 47, 1   # 47 for any key
+        _board, code, out = self.walk_ten(firmware)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("**section 10 agc.reset.interval** -> 4", text)     # the rest still took
+        differs = text.split("## What differs")[1]
+        self.assertIn("get flood.advert.interval", differs)
+        self.assertIn("saw `> 47`", differs)
+        self.assertIn("expected `61`", differs)
+
+    def test_a_profile_without_a_static_line_skips_that_step_rather_than_failing(self):
+        """The table is Thomas's to change: a line taken out of it is a *skipped* step saying so,
+        not a walk that calls the board wrong (p3.5-04's decision 2, applied to a line)."""
+        where = os.path.join(self.repo, "src", "roles", "repeater", "firstboot", "Profile.cpp")
+        with open(where, "r", encoding="utf-8") as fh:
+            table = fh.read()
+        with open(where, "w", encoding="utf-8", newline=chr(10)) as fh:
+            fh.write(table.replace('"set loop.detect moderate"', '"set repeat on"'))
+        _board, code, out = self.walk_ten()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertIn("has no static `set loop.detect` line", text)
+        self.assertIn("**section 10 agc.reset.interval** -> 4", text)
 
     def test_the_password_reaches_nothing(self):
         board, code, out = self.walk_ten()

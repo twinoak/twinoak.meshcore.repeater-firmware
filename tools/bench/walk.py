@@ -291,9 +291,15 @@ _section("10", "First boot and provisioning", [
              "`erase`, a reset, a new `Repeater ID`, both `First boot:` lines, "
              "`firstboot.state`, `get dutycycle`, `get path.hash.mode`, `get radio`, `get name` "
              "and `get guest.password`"),
+    PageLine("10.1a", ("p3.5-05",), "**And the Danish standard reached it.**",
+             "`agc.reset.interval`, `loop.detect`, `flood.max.unscoped` and "
+             "`flood.advert.interval` on the first boot, the last one against the hour this "
+             "node's own key gives it"),
     PageLine("10.2", ("p3-03", "p3.3-01"), "**It runs once, and a reboot proves it.**",
              "a second boot: no `First boot:` line, `firstboot.state` never, and the two "
              "settings still as the profile left them"),
+    PageLine("10.2a", ("p3.5-05",), "**And the Danish standard was saved with it.**",
+             "the same four after the `reboot`, the advert interval the same hour as before it"),
     PageLine("10.3", ("p3-03",), "**A power cut in the middle leaves no half-provisioned node.**",
              "the power pulled during the first second, three or four times",
              person="a hand on the power, timed to the first second of a boot"),
@@ -443,6 +449,50 @@ def advert_name(repo=REPO):
         return "repeater"
     found = re.findall(r"^\s*-D\s+ADVERT_NAME='\"(.*)\"'\s*$", text, re.M)
     return found[-1] if found else "repeater"
+
+
+# `{"set <key> <value>",` of the first-boot profile's own table. A line whose value is not a
+# plain word is not one this reads: the duty cycle's is a macro and the advert interval's is a
+# placeholder, and those two have their own rules below and in band_expectations.
+_PROFILE_SET = re.compile(r'\{"set ([a-z0-9.]+) ([A-Za-z0-9.]+)"')
+
+
+def profile_expectations(repo=REPO):
+    """What `get <key>` must answer for every **static** line of the first-boot profile, read out
+    of the table itself (src/roles/repeater/firstboot/Profile.cpp) so that this page cannot drift
+    from what a fresh unit is really told. `{}` when the file cannot be read, and then those
+    steps are skipped rather than guessed."""
+    try:
+        with open(os.path.join(repo, "src", "roles", "repeater", "firstboot", "Profile.cpp"),
+                  "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except (IOError, OSError):
+        return {}
+    return dict((key, value) for key, value in _PROFILE_SET.findall(text))
+
+
+_PROFILE_HOURS = re.compile(r"const int kFloodAdvertHours(Min|Span) = (\d+);")
+
+
+def flood_advert_hours(pub_key_hex, repo=REPO):
+    """The flood advert interval the profile derives from a node's key, in hours, or None when
+    either the key or the rule cannot be read.
+
+    The rule is `60 + (k mod 26)` with `k` the key's first byte (docs/provisioning.md section 1),
+    and its two numbers are read out of src/roles/repeater/firstboot/Profile.h rather than
+    written here - the same reason band_expectations reads platformio.ini."""
+    key = (pub_key_hex or "").strip()
+    if not re.match(r"^[0-9A-Fa-f]{2}", key):
+        return None
+    try:
+        with open(os.path.join(repo, "src", "roles", "repeater", "firstboot", "Profile.h"),
+                  "r", encoding="utf-8") as fh:
+            found = dict(_PROFILE_HOURS.findall(fh.read()))
+    except (IOError, OSError):
+        return None
+    if "Min" not in found or "Span" not in found or int(found["Span"]) <= 0:
+        return None
+    return int(found["Min"]) + (int(key[:2], 16) % int(found["Span"]))
 
 
 def same_number(saw, expected, tol=0.001):
@@ -1680,6 +1730,7 @@ class Walker(object):
                       sent=["get guest.password"], saw=guest or "(empty)", expected="(empty)",
                       blanks={"section 10 guest.password":
                               "empty" if self._value(guest) == "" else "not empty"})
+            self._danish_standard("10.1a", repeater, rid, "")
         finally:
             port.close()
 
@@ -1696,6 +1747,7 @@ class Walker(object):
             self.check_line("10.2", repeater, "get path.hash.mode", "1")
             if self.expect:
                 self.check_line("10.2", repeater, "get dutycycle", self.expect["dutycycle"])
+            self._danish_standard("10.2a", repeater, rid, ", second boot")
         finally:
             port.close()
 
@@ -1703,6 +1755,32 @@ class Walker(object):
         self._provision(app)
         self.person("10.5")
         self._identity_afterwards(app, rid)
+
+    def _danish_standard(self, key, repeater, rid, when):
+        """The Danish standard's four lines read back (p3.5-05, docs/bench.md section 10).
+
+        The three static values come out of the profile's own table and the fourth out of the
+        node's key, so neither this file nor the page carries a number the firmware could change
+        under it: a line taken off the table is a *skipped* step saying so, and a line whose value
+        changed is checked against the new value."""
+        wanted = profile_expectations(self.repo)
+        for name in ("agc.reset.interval", "loop.detect", "flood.max.unscoped"):
+            if name not in wanted:
+                self.skip(key, "src/roles/repeater/firstboot/Profile.cpp has no static `set %s` "
+                               "line, so there is nothing here to expect" % name,
+                          what="`get %s`" % name)
+                continue
+            self.check_line(key, repeater, "get %s" % name, wanted[name],
+                            blank="section 10 %s%s" % (name, when))
+        hours = flood_advert_hours(rid, self.repo)
+        if hours is None:
+            self.skip(key, "no `Repeater ID` was read, so the hour this node's own key gives it "
+                           "cannot be computed", what="`get flood.advert.interval`")
+            return
+        self.check_line(key, repeater, "get flood.advert.interval", str(hours),
+                        blank="section 10 flood.advert.interval%s" % when,
+                        note="60 + (0x%s mod 26) from the key this boot made; upstream's own "
+                             "default is 47 hours for every unit" % rid[:2].lower())
 
     def _reboot_and_read(self, app):
         """Upstream's own `reboot`, then the banner. It is the only reset this tool performs, and
