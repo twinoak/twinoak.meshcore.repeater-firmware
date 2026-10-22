@@ -356,7 +356,27 @@ broadband noise.
 `done` — when a finite activity completes:
 `{"t":"done","cmd":"sweep","seq":18,"ts":...,"ms":...}`.
 `ack` / `err` — command responses and asynchronous errors (`err` carries
-`msg`).
+`msg`). An `err` from a `scope` whose segment would not arm, or whose sweep
+failed, also carries **`call`** — which of the radio calls returned the code:
+`standby`, `setFrequency`, `calibrateImage`, `setSweep`, `sweep` or `reload`
+— and **`code`**, RadioLib's status (`-707` is `RADIOLIB_ERR_SPI_CMD_FAILED`,
+the chip's *failure to execute*). Both are additive: a reader that knows only
+`msg` reads the same line as before. The `msg` ends with the SX1262's own
+`GetDeviceErrors` word (`0x0010` is an image calibration that failed,
+`0x0040` a PLL that did not lock) and, when the chip was reset and the plugin
+uploaded again on the way, *after a reload*. Two things to know when reading
+`call`. RadioLib's SX126x driver takes the status byte the chip clocks out
+*during* a command and asks for no `GetStatus` after it, so a code a call
+returns is the chip's verdict on the command **before** it — `call` is where
+the code surfaced. And a calibration the chip refused without the driver
+seeing it is caught through `GetDeviceErrors` and reported as
+`calibrateImage` with the same `-707`, which is the code the driver would
+have returned had it asked (§8, *The scope across the band*).
+
+```json
+{"t":"err","msg":"scope setup failed (-707) in calibrateImage at 181.4429; device errors 0x0010; after a reload",
+ "call":"calibrateImage","code":-707}
+```
 
 ### Forwarding it, without understanding it
 
@@ -445,7 +465,12 @@ before it is flashed: its descriptor's role byte is 3.
   segment runs per pass of the main loop. `150 960 2048` is 26 of them; the
   `ack` says how many. The 32 MHz is `kScopeSegmentMhz` in
   `src/roles/scanner/Sweep.h`, and the bench lowers it if an image ever shows
-  (`docs/bench.md` §9).
+  (`docs/bench.md` §9). A segment is armed in one order — standby, its centre
+  frequency with the driver's own calibration skipped, the calibration for
+  its range, the chip asked whether it took — and a calibration the chip
+  refuses is asked for once more after the chip is reset and the plugin
+  uploaded again (`armScopeSegment`, host-tested; §8 says what the first
+  board taught about it).
 * **Power telemetry:** the B-board INA3221 in every heartbeat, so a scanning
   session doubles as a power-budget check. Missing peripherals (a bench setup)
   are detected and skipped.
@@ -482,16 +507,31 @@ before it is flashed: its descriptor's role byte is 3.
 *Phase 3.1's task [`01`](../tasks/phase-3.1/01-the-fast-sweep.md); the page for
 it is §1, §5 and §6 above, and this is what was decided and where it lives.*
 
-> **On a real board, so far: one or two segments.** The first RAK4630 this was
-> run on (`rom` `SX1261 V2D 2D02`, p3.4-02) streams `scope 863 870` — one
-> segment — at tens of sweeps a second, and two-segment spans up to 60 MHz the
-> same way. A span that takes **four or more** segments either stops at the
-> third with `scope setup failed (-707)` (`RADIOLIB_ERR_SPI_CMD_FAILED` out of
-> `armSegment`) or sends no frame at all, so the whole-range baseline
-> `scope 150 960 2048` has not been captured yet. The table of what was sent
-> and what came back is in
-> [`tasks/phase-3.1/FOLLOWUPS.md`](../tasks/phase-3.1/FOLLOWUPS.md), and it is
-> open.
+> **The scope across the band** (p3.5-02, 22 October 2026;
+> [`tasks/phase-3.5/reports/02.md`](../tasks/phase-3.5/reports/02.md) has the
+> probe table). The first RAK4630 (`rom` `SX1261 V2D 2D02`) streamed one- and
+> two-segment spans and refused the third segment of anything wider with
+> `-707` (p3.4-02). The call was the **image calibration**, and the chip's
+> own `GetDeviceErrors` said so (`IMG_CALIB_ERR`): after a plugin sweep that
+> ended below about 205 MHz, this SX1262 refuses an image calibration that
+> reaches more than about 20 MHz above where the sweep left it — and every
+> calibration after that one, until the chip is hardware-reset; a standby in
+> either mode, an FS or RX lock at the new frequency, a frequency move across
+> the whole range and the PLL's own `Calibrate` were each tried and cleared
+> nothing. RadioLib's `SX1262::setFrequency` makes exactly such a calibration
+> by itself before any move of 20 MHz or more (7.8.0, `SX1262.cpp:178`), which
+> every segment after the first is. Two things, both in `armScopeSegment`
+> (`src/roles/scanner/Sweep.cpp`, host-tested): the frequency is set with
+> that calibration skipped and the one calibration made is the segment's own;
+> and a calibration the chip still refuses — on this board once per pass over
+> 150–960 MHz, at the second segment — is answered by a reset, the plugin
+> uploaded again and the same arm once more. With that, every span tried
+> streams: the whole range at 2048 points at about two sweeps a second, the
+> six segments of 791–960 at about ten, 863–870 unchanged at about forty. The
+> "silent" spans of p3.4-02's table were the console's: the `err` had been
+> written before a second open of the port, and `bench console --scanner
+> "<line>" --collect N` now keeps one open across both. The thresholds above
+> are this one board's, measured, not the datasheet's.
 
 MeshCore issue [#3578](https://github.com/meshcore-dev/MeshCore/issues/3578),
 *Radio spectrum visualization* (sleeply4cat, 12 October 2026), is where the

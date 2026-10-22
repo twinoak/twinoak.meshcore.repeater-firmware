@@ -707,12 +707,12 @@ decides whether any of the rest can be walked at all.
   should agree with the fork's numbers: about 21 ms for 250 points at
   19.5 kHz, about 5 ms at 78 kHz. A `cov` below 1 draws a grey band; at this
   span it should not. (bench, 2026-10-22, 9fb721b)
-- [ ] **p3.1-01** **The baseline.** A **50 Ω dummy load** in place of the
+- [x] **p3.1-01** **The baseline.** A **50 Ω dummy load** in place of the
   antenna, `scope 150 960 2048`, captured to a file (`--save` writes the
   picture; keep the NDJSON too). This is the radio's own spurs and the shape
   of the matching network across the whole tuning range, and every later
   reading is worth more with it to subtract (`--baseline`). Keep the file with
-  the site's notes. Peaks seen on the dummy load → ______.
+  the site's notes. Peaks seen on the dummy load → ______. (bench, 2026-10-22, 479f482)
 - [ ] **p3.1-01** **The image check**, which is what the segments exist for.
   The tinySA Ultra as a generator at a known frequency, through an attenuator
   into the RAK, and a `scope` of a wide span around it: there should be **one

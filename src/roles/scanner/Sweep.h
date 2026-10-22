@@ -217,6 +217,29 @@ struct ScopeSegment {
   double cal_hi_mhz = 0.0;  // the last point's centre + rbw/2
 };
 
+// The four calls that arm a segment before its sweep, in the order src/roles/scanner/Radio.cpp
+// makes them: standby, the centre frequency, the image calibration for the segment's range, and
+// the plugin's parameters. The `err` line of a segment that would not arm names the one that
+// returned the code (docs/noisescope.md section 5), because the frequency alone cannot tell them
+// apart and a report from the field needs to (tasks/phase-3.1/FOLLOWUPS.md, the walk of
+// 22 October 2026). RadioLib's SX126x parses the status byte the chip clocks out *during* a
+// command and asks for no GetStatus after it (RadioLib 7.8.0, SX126x::modSetup sets
+// parseStatusCb and no checkStatusCb; Module::SPItransferStream), so the status a call returns
+// is the chip's verdict on the command *before* it - the call named is where the code surfaced.
+enum ScopeArmCall : uint8_t {
+  kScopeArmNone = 0,            // nothing failed, or nothing was called
+  kScopeArmStandby = 1,         // SX126x::standby()
+  kScopeArmSetFrequency = 2,    // SX1262::setFrequency(centre), which may calibrate by itself
+  kScopeArmCalibrateImage = 3,  // SX126x::calibrateImageRejection(cal_lo, cal_hi)
+  kScopeArmSetSweep = 4,        // SX126xSpectrumScanner::setSweep(...)
+  kScopeArmSweep = 5,           // SX126xSpectrumScanner::sweep(), the sweep itself
+  kScopeArmReload = 6,          // the chip reset and the plugin uploaded again (below)
+};
+
+// The word the `err` line carries for each: "standby", "setFrequency", "calibrateImage",
+// "setSweep", "sweep", "reload"; "" for none.
+const char* scopeArmCallName(ScopeArmCall call);
+
 // What `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]` asked for; 0 is "the default"
 // for the three numbers that have one. `sink_baud` is the port the command came in on: 0 for a
 // sink with no floor worth computing (USB CDC), and then the interval taken is the one asked
@@ -254,6 +277,72 @@ bool planScope(const ScopeRequest& request, ScopePlan& out);
 
 // Segment `index` of a plan (0 .. plan.segments - 1). False for an index the plan does not have.
 bool scopeSegment(const ScopePlan& plan, uint16_t index, ScopeSegment& out);
+
+// The radio, as arming a segment sees it: one member per call, each exactly one call of
+// RadioLib's or the plugin's and nothing else (src/roles/scanner/Radio.cpp is the chip half).
+// The order they are made in is armScopeSegment()'s, below, and host-tested - because the order
+// is the whole fix of p3.5-02 (tasks/phase-3.5/reports/02.md).
+struct ScopeArmRadio {
+  virtual ~ScopeArmRadio() {}
+  virtual int standby() = 0;
+  // SetRfFrequency and nothing else. RadioLib's SX1262::setFrequency() calibrates the image by
+  // itself before a move of 20 MHz or more (7.8.0, SX1262.cpp:178-189,
+  // RADIOLIB_SX126X_CAL_IMG_FREQ_TRIG_MHZ), +-4 MHz around the *new* centre and *before* the
+  // frequency has moved. Made right after a plugin sweep, that calibration is the one the first
+  // board refused with IMG_CALIB_ERR at every third segment, and the chip then refuses every
+  // calibration after it until a hardware reset. The chip half passes skipCalibration = true.
+  virtual int setFrequency(double mhz) = 0;
+  virtual int calibrateImage(double lo_mhz, double hi_mhz) = 0;
+  // The chip's GetDeviceErrors word, read in standby (where it answers).
+  virtual unsigned deviceErrors() = 0;
+  virtual int setSweep(double first_mhz, double step_mhz, uint16_t points, double rbw_khz) = 0;
+  // A hardware reset of the chip and the plugin uploaded again, as the scope's start does it:
+  // back in standby with its device errors cleared and nothing of the last sweep left. The one
+  // thing that was found to clear a refused calibration (tasks/phase-3.5/reports/02.md).
+  virtual int reload() = 0;
+};
+
+// GetDeviceErrors bit 4, IMG_CALIB_ERR: the image calibration failed (SX1261/2 datasheet
+// 13.5.5; RadioLib's RADIOLIB_SX126X_IMG_CALIB_ERR). The chip says this in its *status*, but
+// the driver reads the status byte clocked out during the command before it, and the next
+// command after our calibration begins with a NOP that masks it - so the arm asks the chip
+// outright, and a calibration that failed is an `err` and not a sweep through a bad image.
+constexpr unsigned kScopeImageCalibrationError = 0x0010;
+
+// The code the `err` line carries for that case: RadioLib's RADIOLIB_ERR_SPI_CMD_FAILED
+// (-707, TypeDef.h:440 at 7.8.0), the code the driver returns when it does see the chip's
+// failure to execute. A static_assert in src/roles/scanner/Radio.cpp holds the two equal.
+constexpr int kScopeArmCalibrationFailed = -707;
+
+struct ScopeArmResult {
+  ScopeArmCall failed = kScopeArmNone;  // kScopeArmNone when the segment is armed
+  int code = 0;
+  unsigned device_errors = 0;  // what the chip said after the last calibration (0 before it)
+  bool reloaded = false;       // the chip was reset and the plugin uploaded again on the way
+};
+
+// The segment's centre as the plugin's setSweep() computes it - first + step * points / 2, in
+// float, the fork's own formula - which is what the frequency is set to before the calibration,
+// so that setSweep()'s own setFrequency() of the same value is a move of zero and calibrates
+// nothing.
+float scopeSegmentCentreMhz(const ScopePlan& plan, const ScopeSegment& seg);
+
+// Arms `seg`: standby, the centre frequency, the image calibration for the segment's own range,
+// the chip's device errors read, the plugin's parameters - in that order and no other. True when
+// armed; false with `out` naming the call that returned the code.
+//
+// A calibration the chip refuses is retried **once, after a reload**. On the first RAK4630 the
+// SX1262 refuses an image calibration that reaches more than about 20 MHz above where a plugin
+// sweep left it, whenever that sweep ended below about 205 MHz - IMG_CALIB_ERR, and every
+// calibration after it refused too - and nothing short of a hardware reset was found to clear
+// it: not a standby in either mode, not an FS or an RX lock at the new frequency, not a
+// frequency move across the whole range, not the PLL's own Calibrate (the probe table in
+// tasks/phase-3.5/reports/02.md). After the reset and the upload the same arm is accepted, and
+// the next ones with it: one reload per pass over 150-960 MHz, at the second segment. The
+// refusal is the chip's, so the answer is the chip's own verdict and not a table of
+// frequencies: refused once, reload and ask again; refused twice, an `err` that says so.
+bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                     ScopeArmResult& out);
 
 // How many bytes the NDJSON line of a frame of `points` points is at most, newline included:
 // the base64 of one byte per point plus the longest the envelope can be. The emitted line is
