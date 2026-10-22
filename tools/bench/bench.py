@@ -288,7 +288,7 @@ class Bench(object):
             raise cfg.Refused("the board is in its bootloader on %s: there is no console to talk to "
                               "(`bench flash` an image, or a double-tap and a flash)" % boot.device)
         with self.lock("console"):
-            port = self.ports.open(app.device, 115200)
+            port = self.ports.open_ready(app.device, 115200, self.timeouts.open_s)
             try:
                 if args.scanner:
                     console = ScannerConsole(port, log=(lambda s: None), disposable=self.config.disposable,

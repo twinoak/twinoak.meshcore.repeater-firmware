@@ -45,8 +45,11 @@ class FakeRepeaterFirmware(object):
 
     def __init__(self, repeater_id, version="0.0.0-dev", name="repeater",
                  upstream="repeater-v1.17.1 (d9296435)", answers=None, first_boot=False,
-                 settings=None):
+                 settings=None, prints_banner=True):
         self.repeater_id = repeater_id
+        # False: the boot lines went out before any host held the port, which is what a real
+        # board does - the port is not back before 1.4 s (p3.4-02). The boot still happened.
+        self.prints_banner = prints_banner
         self.version = version
         self.name = name
         self.upstream = upstream
@@ -74,7 +77,7 @@ class FakeRepeaterFirmware(object):
                     "'done'; docs/provisioning.md is the rest)\r\n")
         else:
             self.firstboot_state = "never"
-        return out
+        return out if self.prints_banner else ""
 
     def fw_version(self):
         return "twinoak-repeater %s on MeshCore %s" % (self.version, self.upstream)
@@ -189,7 +192,7 @@ class FakeScannerFirmware(object):
 
     def __init__(self, version="0.0.0-dev", rom="SX1261 V2D 2D02", radio_ok=True,
                  devid="deadbeef01020304", extra_lines=None, sweep_points=281, scope_frames=3,
-                 scope_sps=476, answers_data=True, chatter=None):
+                 scope_sps=476, answers_data=True, chatter=None, prints_banner=True):
         self.version = version
         self.rom = rom
         self.radio_ok = radio_ok
@@ -202,6 +205,9 @@ class FakeScannerFirmware(object):
         self.scope_frames = scope_frames
         self.scope_sps = scope_sps
         self.answers_data = answers_data            # False: acks and no scan lines at all
+        # False: the `boot` line went out before any host held the port, which is what a real
+        # board does (p3.4-02) - `info` is then the only place its fields are.
+        self.prints_banner = prints_banner
         self.seq = 0
         self._next_stat = None
 
@@ -210,6 +216,8 @@ class FakeScannerFirmware(object):
                 "hw": "rak4630", "radio": "sx1262"}
 
     def banner(self):
+        if not self.prints_banner:
+            return ""
         boot = dict(self.identity())
         boot.update({"t": "boot", "reset": "soft", "radio_ok": self.radio_ok, "rtc": 0, "ina": 0, "ts": 0})
         return json.dumps(boot) + "\n"
@@ -330,9 +338,18 @@ class FakeBoard(object):
     flash() swaps it for what a DFU package said it was (the test decides)."""
 
     def __init__(self, serial="E6614C311B5C2E35", firmware=None, app_device="COM7", boot_device="COM8",
-                 enumerate_polls=2, bootloader_serial=None):
+                 enumerate_polls=2, bootloader_serial=None, port_dies_on_reset=True,
+                 boot_pid=RAK_BOOT_PID):
         self.serial = serial
+        # A real board takes its USB device down with the reset, so the host's open handle dies
+        # rather than falling quiet (p3.4-02; console.send_reset). False is a host that saw the
+        # port only go silent.
+        self.port_dies_on_reset = port_dies_on_reset
         self.bootloader_serial = bootloader_serial or serial
+        # 0x0029 is the bootloader after a double-tap; 0x002A is the serial-only DFU the
+        # 1200-baud touch asks for, which is what the first board on this bench came up as
+        # (boards/rak4631.json, p3.4-02).
+        self.boot_pid = boot_pid
         self.firmware = firmware or FakeRepeaterFirmware("AB" * 32)
         self.app_device = app_device
         self.boot_device = boot_device
@@ -355,7 +372,7 @@ class FakeBoard(object):
         if self.mode == "application":
             return [PortInfo(self.app_device, self.serial, RAK_VID, RAK_APP_PID, "WisCore RAK4631 Board")]
         if self.mode == "bootloader":
-            return [PortInfo(self.boot_device, self.bootloader_serial, RAK_VID, RAK_BOOT_PID, "RAK4631 bootloader")]
+            return [PortInfo(self.boot_device, self.bootloader_serial, RAK_VID, self.boot_pid, "RAK4631 bootloader")]
         return []
 
     def _transition(self, to):
@@ -385,6 +402,10 @@ class FakeBoard(object):
         self._transition("application")
 
 
+DEAD_PORT = ("Cannot configure port, something went wrong. Original message: OSError(22, 'A device "
+             "which does not exist was specified', None, 433)")
+
+
 class FakePort(object):
     """One open port to a FakeBoard's console. Bytes written are lines to the firmware; bytes read
     are what it printed. A port opened at 1200 baud and closed is the touch."""
@@ -398,6 +419,7 @@ class FakePort(object):
         self._in = b""
         self._out = b""
         self.is_boot = device == board.boot_device
+        self.dead = False       # the reset took the USB device away under this handle
         if not self.is_boot and baud == 115200:
             # the banner a freshly booted board printed: only if the board just came up
             if board.app_port is None and board._fresh:
@@ -408,6 +430,8 @@ class FakePort(object):
     def write(self, data):
         if self.is_boot:
             return
+        if self.dead:
+            raise IOError(DEAD_PORT)
         self._in += data
         fw = self.board.firmware
         if isinstance(fw, FakeRepeaterFirmware):
@@ -421,6 +445,8 @@ class FakePort(object):
                     self.board._fresh = True
                     self.board.app_port = None
                     self.board.reboot()
+                    if self.board.port_dies_on_reset:
+                        self.dead = True
                     return
                 if reply is not None:
                     self._out += ("  -> %s\r\n" % reply).encode("utf-8")
@@ -440,6 +466,8 @@ class FakePort(object):
                 self._out += line.encode("utf-8")
 
     def read(self, n, timeout_s):
+        if self.dead:
+            raise IOError(DEAD_PORT)
         if not self._out:
             self._heartbeat()
         if self._out:
@@ -498,6 +526,34 @@ class FakePorts(Ports):
         return self.clock.now()
 
 
+class SlowToOpenPorts(FakePorts):
+    """A board whose application port is listed before it can be opened.
+
+    Windows does that with a CDC port that has just enumerated: the first flash of the first
+    RAK4630 on this bench had the application come up as COM30 and the open of it fail with
+    `FileNotFoundError(2)` while the port was in the list (p3.4-02). The first `fails` opens of the
+    application's port after a flash raise that error here - or, with `which="boot"`, of the
+    bootloader's port after the touch, which is the port nrfutil is handed. `refused` counts
+    them."""
+
+    def __init__(self, boards=None, others=None, clock=None, fails=2, which="app"):
+        super().__init__(boards=boards, others=others, clock=clock)
+        self.fails = fails
+        self.which = which          # "app": after the flash; "boot": the DFU port after the touch
+        self.refused = 0
+
+    def open(self, device, baud):
+        board = self.boards[0] if self.boards else None
+        wanted = board and (board.app_device if self.which == "app" else board.boot_device)
+        ready = board and (bool(board.flashes) if self.which == "app" else board.mode == "bootloader")
+        if board is not None and device == wanted and ready and self.refused < self.fails:
+            self.refused += 1
+            self.opened.append((device, baud))
+            raise IOError("could not open port %r: FileNotFoundError(2, 'The system cannot find the "
+                          "file specified.', None, 2)" % device)
+        return super().open(device, baud)
+
+
 # ----------------------------------------------------------------------------- the tools
 
 
@@ -506,9 +562,15 @@ class FakeRunner(object):
     linkcli.py answers out of a table. `calls` is every argv ever given."""
 
     def __init__(self, boards=None, nrfutil_exit=0, linkcli_output=None, new_firmware=None,
-                 linkcli_exit=0):
+                 linkcli_exit=0, nrfutil_exits=None):
         self.boards = list(boards or [])
         self.nrfutil_exit = nrfutil_exit
+        # One code per nrfutil call, in order, for the retry of a DFU that did not take (p3.4-02);
+        # when it runs out, `nrfutil_exit` is the answer again.
+        self.nrfutil_exits = list(nrfutil_exits or [])
+        # How many of the first nrfutil calls fail the way the real one does: the traceback of a
+        # write the device did not recognise, and **exit 0** (p3.4-02).
+        self.nrfutil_fails_silently = 0
         self.linkcli_output = linkcli_output or ""
         self.linkcli_exit = linkcli_exit
         self.new_firmware = new_firmware
@@ -518,8 +580,19 @@ class FakeRunner(object):
         self.calls.append(list(argv))
         joined = " ".join(os.path.basename(str(a)) for a in argv)
         if "adafruit-nrfutil.py" in joined:
-            if self.nrfutil_exit != 0:
-                return self.nrfutil_exit, "Failed to upgrade target. Error is: Timeout"
+            if self.nrfutil_fails_silently > 0:
+                self.nrfutil_fails_silently -= 1
+                port = argv[argv.index("-p") + 1]
+                return 0, ("Upgrading target on %s. Flow control is disabled, Single bank, "
+                           "Touch disabled\nFailed to upgrade target. Error is: WriteFile "
+                           "failed (PermissionError(13, 'The device does not recognize the "
+                           "command', None, 22))\nPossible causes:\n- Target is not in DFU "
+                           "mode." % port)
+            code = self.nrfutil_exits.pop(0) if self.nrfutil_exits else self.nrfutil_exit
+            if code != 0:
+                return code, ("Failed to upgrade target. Error is: WriteFile failed "
+                              "(PermissionError(13, 'The device does not recognize the command', "
+                              "None, 22))")
             port = argv[argv.index("-p") + 1]
             pkg = argv[argv.index("-pkg") + 1]
             for board in self.boards:

@@ -90,8 +90,17 @@ class WalkCase(BenchCase):
         super().setUp()
         shutil.copy(os.path.join(REPO, "platformio.ini"), os.path.join(self.repo, "platformio.ini"))
         os.makedirs(os.path.join(self.repo, "docs"), exist_ok=True)
-        shutil.copy(os.path.join(REPO, "docs", "bench.md"),
-                    os.path.join(self.repo, "docs", "bench.md"))
+        with open(os.path.join(REPO, "docs", "bench.md"), encoding="utf-8") as fh:
+            page = fh.read()
+        # The page's own bullets, with every tick taken off the copy: a walk on a board ticks
+        # lines in the committed page (p3.4-02 ticked the first of them), and these tests are
+        # about what a walk does to a line that is not ticked yet. The text of the bullets - what
+        # the walk's anchors are held to, both ways - is the committed one.
+        page = re.sub(r"^- \[x\] ", "- [ ] ", page, flags=re.M)
+        page = re.sub(r" \(bench, \d{4}-\d\d-\d\d, [0-9a-f]{7}\)", "", page)
+        with open(os.path.join(self.repo, "docs", "bench.md"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write(page)
         self.config()
         self.repeater_zip = self.package()
         self.scanner_zip = self.package(role="scanner", where="scanner_rak4630_single")
@@ -243,6 +252,25 @@ class NoBench(WalkCase):
 # ----------------------------------------------------------------------------- section 1
 
 class SectionOne(WalkCase):
+    def test_a_board_that_prints_every_digit_of_the_frequency_is_still_the_band(self):
+        """What the first real board answered (p3.4-02): `869.6179809,62.5,8,8` is the band's
+        `869.618,62.5,8,8` in the float upstream keeps - not a differs."""
+        board, ports, runner = self.fakes(self.board(
+            FakeRepeaterFirmware(REPEATER_ID, answers={"get radio": "> 869.6179809,62.5,8,8"})))
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNotIn("| differs |", text)
+        self.assertIn("**section 1 get radio** -> 869.6179809,62.5,8,8", text)
+
+    def test_a_board_on_another_frequency_is_a_differs(self):
+        board, ports, runner = self.fakes(self.board(
+            FakeRepeaterFirmware(REPEATER_ID, answers={"get radio": "> 868.0,62.5,8,8"})))
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("| differs |", text)
+
     def test_the_console_lines_of_section_one(self):
         board, ports, runner = self.fakes()
         code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
@@ -262,8 +290,9 @@ class SectionOne(WalkCase):
         self.assertIn("**section 1 get dutycycle** -> 10.0%", text)
         self.assertIn("**section 1 board** -> RAK 4631", text)
         self.assertIn("**section 1 application serial number** -> %s" % SERIAL, text)
-        # upstream's own `reboot` was the only reset, and it was for the banner
-        self.assertEqual(board.firmware.rebooted, 1)
+        # the identity came off `get public.key`, so section 1 resets nothing at all (p3.4-02)
+        self.assertEqual(board.firmware.rebooted, 0)
+        self.assertIn("get public.key", board.firmware.received)
         self.assertEqual(board.flashes, [])
         self.assertIsNone(load_run(self.home, SERIAL))        # section 1 opens no run
         self.assertNoPassword(text)
@@ -378,6 +407,39 @@ class SectionNine(WalkCase):
         code, out = self.walk(["walk", "9", "--collect", "60", "--baseline", "20"],
                               ports=ports, runner=runner)
         return board, code, out
+
+    def test_a_boot_line_nobody_caught_is_infos_own_fields(self):
+        """What the first real board did (p3.4-02): no `boot` line reached the host, and `info`
+        carried the same fw, role, board, ver, reset and radio_ok - which is the line."""
+        board = self.board(FakeRepeaterFirmware(REPEATER_ID))
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board],
+                            new_firmware=lambda path: FakeScannerFirmware(prints_banner=False)
+                            if "scanner" in path else FakeRepeaterFirmware(REPEATER_ID))
+        code, out = self.walk(["walk", "9", "--collect", "60", "--baseline", "20"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNotIn("| differs |", text)
+        self.assertIn("the `boot` line was not caught", text)
+        self.assertIn("**section 9 radio_ok** -> 1", text)     # info's own field
+        self.assertIn("**section 9 reset** -> soft", text)    # info's own field
+
+    def test_a_restore_that_cannot_flash_is_a_differs_and_keeps_the_result_file(self):
+        """A scanner's watchdog ended two restores on the first real board (p3.4-02) and took the
+        walk's own result file with them. The restore is a step like any other."""
+        board = self.board(FakeRepeaterFirmware(REPEATER_ID))
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for,
+                            nrfutil_exits=[0, 1, 1])      # the scanner on, the repeater back twice
+        code, out = self.walk(["walk", "9", "--collect", "60", "--baseline", "20"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()                   # the evidence of the walk survived
+        self.assertIn("RESTORE FAILED", text)
+        self.assertIn("| differs |", text)
+        self.assertIn("**section 9 rom** -> SX1261 V2D 2D02", text)
+        self.assertEqual(board.flashes, [self.scanner_zip])
 
     def test_the_round_trip(self):
         board, code, out = self.walk_nine()
@@ -507,7 +569,10 @@ class SectionTen(WalkCase):
         self.config(identity="disposable")
 
     def walk_ten(self, firmware=None, others=None, **kw):
-        board = self.board(firmware or FakeRepeaterFirmware(REPEATER_ID))
+        # The fake answers `get name` with what this build sets, as a fresh board does: the walk
+        # reads `-D ADVERT_NAME` out of platformio.ini and not upstream's own default (p3.4-02).
+        board = self.board(firmware or FakeRepeaterFirmware(REPEATER_ID,
+                                                            name=walk.advert_name(REPO)))
         ports = FakePorts(boards=[board], clock=self.clock, others=others)
         runner = FakeRunner(boards=[board], new_firmware=firmware_for, **kw)
         bench = self.bench(ports=ports, runner=runner)
@@ -515,6 +580,22 @@ class SectionTen(WalkCase):
         bench.walk_password = PASSWORD      # a session generates one and keeps it nowhere
         code = benchcli.main(["walk", "10"], bench=bench)
         return board, code, self.out.getvalue()
+
+    def test_boot_lines_nobody_could_catch_are_a_persons_and_the_key_is_still_read(self):
+        """What the first real board did (p3.4-02): the `Repeater ID:` and `First boot:` lines
+        were gone before the port was back, `get public.key` gave the new key, and
+        `firstboot.state` said `done`. The two lines themselves become a person's."""
+        board, code, out = self.walk_ten(FakeRepeaterFirmware(REPEATER_ID,
+                                                              name=walk.advert_name(REPO),
+                                                              prints_banner=False))
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNotIn("| differs |", text)
+        self.assertIn("the node's key is a new one after the erase", text)
+        self.assertIn("`get public.key`", text)
+        self.assertIn("the boot lines were gone before the port was back", text)
+        self.assertIn("**section 10 firstboot.state** -> done", text)
+        self.assertNoPassword(text)
 
     def test_an_identity_that_is_kept_is_refused(self):
         self.config(identity="keep")
@@ -666,6 +747,36 @@ class ThePieces(unittest.TestCase):
         self.assertEqual(expect["radio"], "869.618,62.5,8,8")
         self.assertEqual(expect["dutycycle"], "10.0%")
         self.assertIsNone(walk.band_expectations(REPO, band="nosuchband"))
+
+    def test_a_number_read_back_is_held_as_a_number(self):
+        """`set lat 55.3250` reads back `55.3250007` on a real board (p3.4-02)."""
+        self.assertTrue(walk.same_number("55.3250007", "55.3250"))
+        self.assertTrue(walk.same_number(" 10.4899998 ", "10.4900"))
+        self.assertFalse(walk.same_number("55.4250007", "55.3250"))
+        self.assertFalse(walk.same_number("", "55.3250"))
+        self.assertFalse(walk.same_number("Unknown command: get lat", "55.3250"))
+
+    def test_the_node_name_is_this_builds_and_not_upstreams(self):
+        """What the first real board answered to `get name` (p3.4-02): `-D ADVERT_NAME` of
+        platformio.ini, not upstream's own `repeater`."""
+        self.assertEqual(walk.advert_name(REPO), "RAK4631 Repeater")
+        self.assertEqual(walk.advert_name(os.path.join(REPO, "nosuchdirectory")), "repeater")
+
+    def test_get_radio_is_held_to_the_band_as_numbers(self):
+        """What the first real board answered (p3.4-02): upstream prints every digit of the float
+        it keeps, so the string is not the band's and the frequency is."""
+        self.assertTrue(walk.same_radio("869.6179809,62.5,8,8", "869.618,62.5,8,8"))
+        self.assertTrue(walk.same_radio("869.618,62.5,8,8", "869.618,62.5,8,8"))
+        self.assertTrue(walk.same_radio(" 869.6179809 , 62.5 , 8 , 8 ", "869.618,62.5,8,8"))
+        # a different radio is still a different radio
+        self.assertFalse(walk.same_radio("868.0,62.5,8,8", "869.618,62.5,8,8"))
+        self.assertFalse(walk.same_radio("869.6179809,125.0,8,8", "869.618,62.5,8,8"))
+        self.assertFalse(walk.same_radio("869.6179809,62.5,7,8", "869.618,62.5,8,8"))
+        self.assertFalse(walk.same_radio("869.6179809,62.5,8,5", "869.618,62.5,8,8"))
+        # and nothing, or something that is not four numbers, is not the band
+        self.assertFalse(walk.same_radio("", "869.618,62.5,8,8"))
+        self.assertFalse(walk.same_radio("869.618,62.5,8", "869.618,62.5,8,8"))
+        self.assertFalse(walk.same_radio("Unknown command: get radio", "869.618,62.5,8,8"))
 
     def test_the_fw_version_line(self):
         parsed = walk.parse_fw_version_line(

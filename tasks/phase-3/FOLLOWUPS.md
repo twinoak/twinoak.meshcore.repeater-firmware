@@ -61,3 +61,45 @@ matter; the rest is small.
 - **Once is exact** (03): one preferences write for both decisions, held across `firstBoot()`;
   no second marker. The console's reply buffer fix is a real upstream overflow, measured.
 - **Sizes:** repeater +164 (01), 0 (02), +1408 (03) flash; every byte itemised from the map.
+
+## What p3.4-02 answered, on the first real board (22 October 2026)
+
+The third `[3.3]` item above — *nothing on this phase's bench list has been walked* — is what this
+is about. A RAK4630 on the production adapter, its base written by a probe, `rf: dummy-load`,
+`identity: disposable`; `bench walk 1`, `8`, `9` and `10` at `9fb721b`, result files under
+`out/bench/` and the detail in `tasks/phase-3.4/reports/02.md`. The boxes are the reviewer's to
+tick; what the board said is:
+
+- **`radio_ok` with the power-enable pin high: yes.** The scanner came up with
+  `"radio_ok": 1`, `"radio": "sx1262"`, `"rom": "SX1261 V2D 2D02"` and answered `sweep`, `hist`,
+  `dwell`, `cad` and `scope` — so driving `SX126X_POWER_EN` (P1.05) high is right for this stamp
+  and 02's decision 1 holds (`out/bench/walk-9-20261022-174804-9fb721b.md`).
+- **The scanner → repeater round trip keeps the identity: yes.** `Repeater ID`
+  `A76C9F71…F997DE` before the scanner and the same after the repeater went back, with the name
+  and the version (§9's own last step, the same file). It took **two DFUs**, for the reason below.
+- **The power cut during a first boot: still a person's.** The exact moment:
+  `bench console "erase"` with `identity: disposable`, then pull the USB power **within the first
+  second of the boot that follows** — before the two `First boot:` lines appear — and on the next
+  boot read `sensor get firstboot.state`, `get path.hash.mode` and `get dutycycle`. What must
+  never be seen is no `First boot:` line together with `path.hash.mode` `0` or `dutycycle`
+  `> 50.0%`. Three or four attempts; `docs/bench.md` §10 has the line.
+
+### Open, from the same walks
+
+- [ ] **[reviewer] The scanner's watchdog ends the DFU that would replace it.** `wdtBegin()`
+  (`src/roles/scanner/Wdt.h`) starts the nRF52840's WDT at 8 s with `CONFIG.SLEEP = Run`, and a
+  **soft reset does not stop it** — so after the 1200-baud touch the bootloader has about eight
+  seconds to take a 414 KB image, and it does not get there: `adafruit-nrfutil` dies with
+  `WriteFile failed (PermissionError(13) … ERROR_BAD_COMMAND)` or `Write timeout`, the watchdog
+  resets the part mid-DFU, and the board comes back in its full bootloader (`239A:0029`) with no
+  application. The second attempt, from that bootloader, works — there is no WDT running there.
+  p3.4-02 made `tools/bench` survive it (it waits for the port the DFU died on to go, finds the
+  bootloader the board is now in, and runs nrfutil once more), so **a scanner can always be
+  flashed back, in two DFUs**; what it did not do is decide whether the scanner should keep a
+  watchdog it cannot be updated through. Three ways out, for whoever owns that decision: leave it
+  as it is and let the bench tool do the two DFUs (what happens today, and a person with a UF2
+  drive does the same thing twice); have the role feed the WDT from a `dfu`-like console line that
+  resets *after* a WDT-free window (there is none - the WDT cannot be stopped); or drop the
+  hardware WDT for a software one. `docs/bench.md` §9 and §0a now say what a person should expect.
+  Evidence: `out/bench/flash.log` (every flash of the session, with `what` and `result`) and
+  `tasks/phase-3.4/reports/02.md`.

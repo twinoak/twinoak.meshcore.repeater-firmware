@@ -482,6 +482,17 @@ before it is flashed: its descriptor's role byte is 3.
 *Phase 3.1's task [`01`](../tasks/phase-3.1/01-the-fast-sweep.md); the page for
 it is §1, §5 and §6 above, and this is what was decided and where it lives.*
 
+> **On a real board, so far: one or two segments.** The first RAK4630 this was
+> run on (`rom` `SX1261 V2D 2D02`, p3.4-02) streams `scope 863 870` — one
+> segment — at tens of sweeps a second, and two-segment spans up to 60 MHz the
+> same way. A span that takes **four or more** segments either stops at the
+> third with `scope setup failed (-707)` (`RADIOLIB_ERR_SPI_CMD_FAILED` out of
+> `armSegment`) or sends no frame at all, so the whole-range baseline
+> `scope 150 960 2048` has not been captured yet. The table of what was sent
+> and what came back is in
+> [`tasks/phase-3.1/FOLLOWUPS.md`](../tasks/phase-3.1/FOLLOWUPS.md), and it is
+> open.
+
 MeshCore issue [#3578](https://github.com/meshcore-dev/MeshCore/issues/3578),
 *Radio spectrum visualization* (sleeply4cat, 12 October 2026), is where the
 trick comes from: run the sweep **inside the SX1262** rather than stepping it
