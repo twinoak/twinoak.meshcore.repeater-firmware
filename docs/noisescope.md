@@ -113,9 +113,12 @@ files every image of a release carries (`docs/release.md`):
 A release names them `twinoak-scanner-rak4630-single-868-vX.Y.Z.*`.
 
 **Remote (Walter, SWD):** flash over the SWD lines (D-sub pins 3/4/5),
-application range only. Same procedure back to the repeater. The nRF52
-watchdog (8 s) plus the bootloader living in protected flash means a bad day
-ends in a reboot loop you can still flash out of — not a brick.
+application range only. Same procedure back to the repeater. The watchdogs
+(§6: 8 s in software, 60 s in hardware) plus the bootloader living in protected
+flash means a bad day ends in a reboot loop you can still flash out of — not a
+brick. The hardware one is paused while a debugger holds the core
+(`CONFIG.HALT = Pause`), so an SWD update is not racing it; a **USB** update is,
+which is why 60 s is twice the longest one ever measured on the bench.
 
 **Field (USB-C on the adapter):** double-tap reset or send `dfu` over any
 serial console → UF2 bootloader (drag and drop) — or
@@ -215,6 +218,7 @@ host is attached.
 | `time <unix_epoch>` | set the clock; also written to the RV-3028 when present. An epoch before November 2023 is refused |
 | `reboot` | software reset |
 | `dfu [serial]` | reboot into the UF2 bootloader (or serial-only DFU with `serial`) |
+| `hang [ms]` | **stop the main loop on purpose**, for the bench: the loop watchdog then resets the unit (§6). Default 12000 ms, clamped to 30000 — past the 8 s deadline and short of the hardware watchdog's — so a hang either ends in the software reset or comes back and answers an `err`. The scanner's only |
 
 **Both ends of a range are read together or not at all**: `sweep 865` is the
 default sweep, not a sweep from 865 MHz. A sweep is refused when the ends are
@@ -223,6 +227,26 @@ crossed, either end is outside 150–960 MHz, the step is below 1 kHz or above
 goes further and **requires** both ends — it has no default span, because the
 span is the whole point of it — and is refused for a step below 100 Hz (finer
 than the radio tunes) as well.
+
+**`hang` is the one command whose point is to break something**, and it is here so that
+*the watchdog is live* can be walked on a bench instead of argued about
+(`docs/bench.md` §9). What it costs is one reset of a role that never transmits and
+never writes flash, into the passive monitor mode a watchdog reset boots into anyway —
+so a Walter forwarding somebody's text at a scanner on a mast can cost that scanner a
+reset and nothing else. The repeater has no such line, and `test/test_rails` holds that
+(rule 12). The unit acks first and stops afterwards, so the ack always gets out:
+
+```
+> hang
+{"t":"ack","cmd":"hang","ok":true,
+ "msg":"the loop stops for 12000 ms; the loop watchdog resets the unit after 8000 ms of it"}
+   (about eight seconds of silence, then the port goes and comes back)
+{"t":"boot", … ,"reset":"wdt","wdt":"loop", … }
+```
+
+A `hang` shorter than the deadline is the other half of the same demonstration: the
+loop comes back and the unit says so with an `err`
+(`the loop came back after 3000 ms and was not reset`) rather than resetting.
 
 A `scope` ack carries what was *taken*, which is not always what was asked:
 
@@ -248,9 +272,15 @@ the unit says and what the file said before it was flashed cannot differ.
 
 ```json
 {"t":"boot","fw":"noisescope","ver":"1.2.3","role":"scanner","board":"rak4630-single",
- "hw":"rak4630","radio":"sx1262","reset":"por","radio_ok":true,"rtc":1,"ina":1,
+ "hw":"rak4630","radio":"sx1262","reset":"por","wdt":"","radio_ok":true,"rtc":1,"ina":1,
  "ts":1754820000}
 ```
+
+**`wdt` says which watchdog, when `reset` is `wdt`:** `loop` for the 8 s software check
+and `hw` for the nRF52840's own (§6). It is a field beside `reset` and **not** a sixth
+`reset` word, because both watchdogs mean the same thing — *the loop stopped* — and a
+reader enumerating the five words above would not know a new one. It is `""` for every
+other reset and never absent, like `rom` in `info`. `info` carries the same pair.
 
 `info` — the same six identity fields, plus the build date, the nRF52's device
 id, which peripherals answered, the boosted-gain and auto-sweep settings, the
@@ -414,9 +444,32 @@ before it is flashed: its descriptor's role byte is 3.
 
 ## 6. Design notes and safety
 
-* **Watchdog:** an 8 s hardware WDT, fed from the main loop. Any hang → reset →
-  boots into passive monitor mode. A scan step feeds nothing: a step that
-  outlasts the timeout is a step that should not have started.
+* **Watchdog, in two halves.** Any hang → reset → boots into passive monitor mode, and
+  `boot` says `reset: wdt` for either of them (§5, and `wdt` says which).
+
+  **The 8 s loop check**, which is the one that says the loop has stopped. The main loop
+  leaves a heartbeat (`LoopWatch::beat()`, the top of `loop()`); an RTC2 interrupt every
+  125 ms asks whether one has been left since it last looked (`tick()`), and after 8 s of
+  silence it writes a marker and resets. It does not depend on the loop it watches — RTC2
+  is a peripheral nothing else in this image uses, RTC1 being FreeRTOS's tick — and the
+  deadline itself is host-portable and native-tested (`src/roles/scanner/LoopWatch.h`,
+  `test/test_scanner`). A scan step feeds nothing: a step that outlasts the deadline is a
+  step that should not have started. `hang` is how it is seen to work (§5).
+
+  **The 60 s hardware WDT** behind it (`WDT_TIMEOUT_S`), the backstop for a part so far
+  gone that the interrupt has stopped too. The nRF52840's watchdog cannot be stopped and
+  **survives the soft reset into the bootloader with the same timeout**, and the
+  bootloader feeds nothing — so its timeout is also the time a USB update has to finish
+  in. At 8 s it did not: a 414 KB DFU over 115200 baud takes **26.3 s**, measured four
+  times on the bench, the watchdog bit in the middle of it, and replacing the scanner
+  took two DFUs. 60 s is twice the longest measured update, rounded up to whole tens
+  (`src/roles/scanner/config.h` and `tasks/phase-3.5/reports/03.md` carry the numbers;
+  `docs/bench.md` §0a is what a person should expect now). `CONFIG.HALT = Pause` keeps it
+  stopped while a debugger holds the core, which is why the Walter's SWD updates were
+  never affected, and a rails test holds that word where it is. The marker that makes a
+  software reset report `wdt` is a word of `.noinit` RAM and deliberately **not**
+  `GPREGRET`, which is the bootloader's mailbox (`src/roles/scanner/LoopWdt.h`,
+  `loopwdt.ld`).
 * **Serial always live:** scans are chunked, and command input is drained
   during blocking steps and executed between them.
 * **Spectral-scan patch:** a ~2 kB Semtech blob (from `Lora-net/sx1302_hal`,

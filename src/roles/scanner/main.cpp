@@ -24,6 +24,7 @@
 #include "common/fwdesc/ImageDescriptor.h"
 #include "roles/scanner/Commands.h"
 #include "roles/scanner/Lines.h"
+#include "roles/scanner/LoopWdt.h"
 #include "roles/scanner/Radio.h"
 #include "roles/scanner/ScannerHeaders.h"
 #include "roles/scanner/Sweep.h"
@@ -118,12 +119,24 @@ void feed(LineBuffer& line, Stream& from) {
 const char* imageRoleName() { return fwdesc::roleName(fwdesc::imageRole()); }
 
 char g_reset_reason[8] = "por";
+// Which of the two watchdogs, when the reason is `wdt`; empty otherwise (src/roles/scanner/Wdt.h
+// is the hardware one, LoopWdt.h the 8 s loop check).
+const char* g_wdt_half = "";
 
 void captureResetReason() {
   const uint32_t reason = NRF_POWER->RESETREAS;
   NRF_POWER->RESETREAS = reason;  // write 1 to clear
+  // The loop check resets with NVIC_SystemReset, which RESETREAS calls SREQ like any other soft
+  // reset: its own marker in RAM is what tells the two apart, and reading it clears it, so this
+  // runs once per boot and before loopWdtBegin() (LoopWdt.h). Both watchdogs mean *the loop
+  // stopped*, so both are the one word `wdt` (docs/noisescope.md section 6).
+  const bool loop_wdt = loopWdtReason() == kLoopWdtFired;
   if (reason & POWER_RESETREAS_DOG_Msk) {
     strcpy(g_reset_reason, "wdt");
+    g_wdt_half = "hw";
+  } else if (loop_wdt) {
+    strcpy(g_reset_reason, "wdt");
+    g_wdt_half = "loop";
   } else if (reason & POWER_RESETREAS_SREQ_Msk) {
     strcpy(g_reset_reason, "soft");
   } else if (reason & POWER_RESETREAS_LOCKUP_Msk) {
@@ -144,6 +157,7 @@ BootFields bootFields() {
   f.hw = "rak4630";
   f.radio = "sx1262";
   f.reset = g_reset_reason;
+  f.wdt = g_wdt_half;
   f.radio_ok = radio::ok();
   f.rtc = telemetry::rtcPresent();
   f.ina = telemetry::inaPresent();
@@ -354,6 +368,29 @@ void handleCommand(char* line, Source from) {
       return;
     }
 
+    case kVerbHang: {
+      // A deliberate stall of the main loop, so that the loop watchdog can be *seen* to work on a
+      // bench rather than argued about (docs/bench.md section 9's watchdog line, which this makes
+      // walkable). The scanner's only: it stops a role that never transmits and never writes
+      // flash, and the reset it ends in is the one a hang would have ended in anyway - back into
+      // passive monitor mode. A Walter forwarding somebody's text at a scanner on a mast can
+      // therefore cost that scanner one reset and nothing else.
+      const uint32_t ms = parseHangMs(tokens);
+      char msg[kMaxAckMessageBytes];
+      snprintf(msg, sizeof(msg),
+               "the loop stops for %lu ms; the loop watchdog resets the unit after %lu ms of it",
+               (unsigned long)ms, (unsigned long)loopWdtDeadlineMs());
+      g_lines.ack(name, true, msg);
+      delay(50);  // let the ack leave the UART before the loop goes quiet
+      loopWdtStall(ms);
+      // Here only when the stall was shorter than the deadline, which is the other half of the
+      // same demonstration: the check does not fire early.
+      snprintf(msg, sizeof(msg), "the loop came back after %lu ms and was not reset",
+               (unsigned long)ms);
+      g_lines.err(msg);
+      return;
+    }
+
     case kVerbReboot:
       g_lines.ack(name, true, "rebooting");
       delay(50);  // let the last line leave the UART
@@ -404,7 +441,8 @@ void inputPoll() {
 void setup() {
   captureResetReason();
   beginPorts();
-  wdtBegin();
+  wdtBegin();      // the hardware backstop, at a timeout a USB update fits in (config.h)
+  loopWdtBegin();  // and the 8 s check that says the loop has stopped
   delay(100);  // let the 3V3 rail and the TCXO settle after a power-kill cycle
   telemetry::begin();
   radio::begin(g_lines);
@@ -417,6 +455,7 @@ void setup() {
 
 void loop() {
   wdtFeed();
+  loopWdtBeat();
   g_usb_attached = (bool)Serial;
   inputPoll();
   checkCommands();

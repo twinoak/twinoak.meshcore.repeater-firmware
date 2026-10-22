@@ -811,10 +811,11 @@ class AFlash(BenchCase):
         self.repeater_zip = self.package()
         self.scanner_zip = self.package(role="scanner", where="scanner_rak4630_single")
 
-    def fakes(self, board=None, nrfutil_exit=0):
+    def fakes(self, board=None, nrfutil_exit=0, nrfutil_exits=None):
         board = board or self.board()
         ports = FakePorts(boards=[board], clock=self.clock)
-        runner = FakeRunner(boards=[board], nrfutil_exit=nrfutil_exit, new_firmware=firmware_for)
+        runner = FakeRunner(boards=[board], nrfutil_exit=nrfutil_exit, nrfutil_exits=nrfutil_exits,
+                            new_firmware=firmware_for)
         return board, ports, runner
 
     def test_the_whole_sequence(self):
@@ -851,6 +852,25 @@ class AFlash(BenchCase):
             self.assertEqual(len(lines[0]["application_sha256"]), 64)
             self.assertEqual(lines[0]["result"], "ok")
             self.assertEqual(lines[0]["serial"], SERIAL)
+            # and with how long it took and how many DFUs it took: the measurement p3.5-03
+            # derives WDT_TIMEOUT_S from, and the line that says a scanner was replaced in one.
+            self.assertEqual(lines[0]["attempts"], 1)
+            self.assertIsInstance(lines[0]["update_s"], float)
+            self.assertIsInstance(lines[0]["dfu_s"], float)
+            self.assertGreaterEqual(lines[0]["update_s"], lines[0]["dfu_s"])
+        self.assertIn("the update took", out)
+
+    def test_a_dfu_that_needed_a_second_attempt_says_two_in_the_log(self):
+        """The two-DFU recovery p3.4-02 added is still there for a scanner image from before
+        p3.5-03, and `attempts` is how a reader of the log tells the two cases apart."""
+        board, ports, runner = self.fakes(self.board(), nrfutil_exits=[1, 0])
+        code, out = self.run_cli(["flash", self.scanner_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertIn("once more", out)
+        with open(os.path.join(self.home, "flash.log")) as fh:
+            lines = [json.loads(l) for l in fh if l.strip()]
+        self.assertEqual(lines[-1]["attempts"], 2)
+        self.assertEqual(lines[-1]["result"], "ok")
 
     def test_a_board_with_no_application_is_not_touched(self):
         """A board that shows only its bootloader has no application port to touch, so the tool

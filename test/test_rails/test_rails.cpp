@@ -1,4 +1,4 @@
-// The rails, as a test and not a promise: eleven rules, one test apiece, each failing with a
+// The rails, as a test and not a promise: twelve rules, one test apiece, each failing with a
 // sentence that names the rule it holds (tasks/phase-2/04-the-rails.md and phase-3/02, README.md's
 // "Rails that hold in every task", spec/SYSTEM.md S-12 and S-13, spec/LINK-PROTOCOL.md section
 // 6's head).
@@ -56,8 +56,9 @@
 // **a request on the box link never performs I2C** (one file reaches a bus, the handlers answer
 // out of a cache - phase 1's task 06), and the two prints rails of rule 2 above.
 //
-// And two the scanner brought with it (phase 3's task 02), which are NoiseScope's own two
-// promises and the reason a scanner-and-back round trip is safe for the repeater's identity:
+// And three the scanner brought with it - two from phase 3's task 02, which are NoiseScope's own
+// promises and the reason a scanner-and-back round trip is safe for the repeater's identity, and
+// one from phase 3.5's task 03, which is the reason that round trip takes one DFU:
 //
 //  10. **nothing under src/roles/scanner/ transmits.** Not one of RadioLib's transmit entry
 //      points is named in that directory - and the role is the only one that drives the radio
@@ -68,6 +69,15 @@
 //      cannot lose them - which is what makes "flash the scanner, then flash the repeater back"
 //      a round trip and not a provisioning. Does not catch: a raw write through the nRF52's NVMC
 //      registers, which nothing in this repository names.
+//  12. **the scanner's hardware watchdog still pauses for a debugger, and the command that stops
+//      its loop is the scanner's alone.** `CONFIG.HALT = Pause` is what keeps the Walter's SWD
+//      updates working while a debugger holds the core, and it is one word in one register that
+//      a later edit could flip without anything noticing (p3.5-03, deliverable 2). The other
+//      half is the `hang` command: a line that deliberately stops the main loop belongs to the
+//      role that never transmits and never writes flash, and must never appear in the image that
+//      has to repeat for months. Does not catch: a timeout the hardware watchdog could not be
+//      flashed through - that is a number, measured on a board, and docs/bench.md section 9 is
+//      where it is walked.
 //
 // The forbidden names are written as split strings so that a grep of the repository for them
 // finds the places that set them and not this test.
@@ -1113,6 +1123,67 @@ TEST(Rails, Rule11_NothingUnderTheScannerNamesAFileSystem) {
       }
     }
   }
+}
+
+// ------------------------------------------------------------------------------------ rule 12
+
+TEST(Rails, Rule12_TheScannersWatchdogStillPausesForADebugger) {
+  // `HALT = Pause` stops the watchdog while a debugger holds the core, which is why the Walter's
+  // SWD updates were never the problem the USB ones were (p3.5-03's head). One grep, because it
+  // is one word: that it is Pause in the file that starts the watchdog, and that `Run` - the
+  // other value of the same field - is nowhere under src/ at all.
+  const fs::path root = projectRoot();
+  const fs::path wdt = root / "src" / "roles" / "scanner" / "Wdt.h";
+  ASSERT_TRUE(fs::exists(wdt)) << rel(root, wdt) << " is gone - is PROJECT_DIR right?";
+  bool pauses = false;
+  for (const std::string& raw : linesOf(wdt)) {
+    if (withoutComment(raw).find("WDT_CONFIG_HALT_Pause") != std::string::npos) pauses = true;
+  }
+  EXPECT_TRUE(pauses) << rel(root, wdt) << ": the watchdog's CONFIG must set HALT = Pause, or a"
+                         " debugger holding the core resets the part under the Walter's SWD"
+                         " update (docs/noisescope.md section 6)";
+  for (const fs::path& file : filesUnder(root / "src")) {
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      if (withoutComment(raw).find("WDT_CONFIG_HALT_Run") != std::string::npos) {
+        ADD_FAILURE() << rel(root, file) << ":" << n << ": HALT = Run would let the watchdog bite"
+                         " while a debugger has the core";
+      }
+    }
+  }
+}
+
+TEST(Rails, Rule12_OnlyTheScannerCanBeToldToStopItsLoop) {
+  // `hang` stops the main loop on purpose so that the loop watchdog can be seen to work on a
+  // bench (docs/noisescope.md section 5). In the scanner that costs one reset of a role that
+  // never transmits and never writes flash; in the repeater it would be a way to take a node off
+  // the mesh with one text line, and the repeater's console is upstream's.
+  const fs::path root = projectRoot();
+  const char* const kNames[] = {"kVerbHang", "parseHangMs", "loopWdtStall"};
+  int found_in_scanner = 0;
+  for (const fs::path& file : filesUnder(root / "src")) {
+    const std::string where = rel(root, file);
+    const bool scanner = where.find("roles/scanner/") != std::string::npos;
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      const std::string code = withoutComment(raw);
+      for (const char* name : kNames) {
+        if (code.find(name) == std::string::npos) continue;
+        if (scanner) {
+          found_in_scanner++;
+        } else {
+          ADD_FAILURE() << where << ":" << n << ": '" << name << "' - stopping the main loop on"
+                           " purpose is the scanner's alone (p3.5-03)";
+        }
+      }
+    }
+  }
+  EXPECT_GT(found_in_scanner, 2) << "the scanner's own `hang` is gone: either the command was"
+                                    " removed - and docs/bench.md section 9's watchdog line is a"
+                                    " person's again - or these names changed and this rail is"
+                                    " now watching nothing";
 }
 
 int main(int argc, char** argv) {

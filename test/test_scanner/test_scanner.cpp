@@ -19,6 +19,12 @@
 //      three of those and is therefore kept together at the end: the command, the plan (the
 //      span cut into segments, each with its own image calibration), the frame and its base64,
 //      the three aggregates, and the pinned binary of the plugin that runs inside the radio.
+//   5. **the loop watchdog's deadline** - src/roles/scanner/LoopWatch.h, phase 3.5's task 03.
+//      The 8 s check NoiseScope was designed around, which used to be the hardware watchdog's
+//      timeout and is now arithmetic: a heartbeat from the loop, a cadence from an interrupt, and
+//      the one question of whether the loop has come round. The board half of it is registers and
+//      a vector (LoopWdt.h) and is not testable here; *when* it fires is, and that is what the
+//      hardware watchdog's own timeout no longer says.
 //
 // ArduinoJson is the native environment's fixture reader already (test/test_link_codec) and it
 // is here for the same reason: a line is held against a real parser and not against a string
@@ -38,6 +44,7 @@
 
 #include "roles/scanner/Commands.h"
 #include "roles/scanner/Lines.h"
+#include "roles/scanner/LoopWatch.h"
 #include "roles/scanner/Sweep.h"
 // The vendored sweep plugin's binary, pinned by the last test of this file: a program for the
 // radio's own core, and the one file under src/roles/scanner/vendor/ that is host-portable (it
@@ -186,6 +193,7 @@ TEST(Commands, EveryWordOfTheProtocolIsAVerbAndNothingElseIs) {
       {"dwell", kVerbDwell},   {"cad", kVerbCad},     {"stop", kVerbStop},
       {"home", kVerbHome},     {"boost", kVerbBoost}, {"auto", kVerbAuto},
       {"time", kVerbTime},     {"reboot", kVerbReboot}, {"dfu", kVerbDfu},
+      {"hang", kVerbHang},
   };
   for (const auto& row : kTable) {
     EXPECT_EQ(row.verb, verbOf(row.word)) << row.word;
@@ -344,6 +352,29 @@ TEST(Commands, DfuIsTheDriveUnlessTheWordIsSerial) {
   EXPECT_FALSE(parseDfuSerialOnly(tokensOf(other)));
 }
 
+TEST(Commands, HangDefaultsPastTheDeadlineAndIsClampedShortOfTheHardwareWatchdog) {
+  // The one command of this firmware whose point is to stop the loop (docs/noisescope.md section
+  // 5). What the numbers have to be: a default past the 8 s the loop check allows, so that `hang`
+  // with no argument demonstrates the reset; and a clamp well short of WDT_TIMEOUT_S, so that no
+  // argument can reach the *hardware* watchdog and leave a reader wondering which of the two
+  // fired.
+  Line bare("hang");
+  EXPECT_EQ(kHangDefaultMs, parseHangMs(tokensOf(bare)));
+  Line zero("hang 0");
+  EXPECT_EQ(kHangDefaultMs, parseHangMs(tokensOf(zero))) << "0 is not a hang, it is no argument";
+  Line word("hang now");
+  EXPECT_EQ(kHangDefaultMs, parseHangMs(tokensOf(word))) << "a word that is not a number reads as"
+                                                            " absent";
+  Line short_one("hang 3000");
+  EXPECT_EQ(3000u, parseHangMs(tokensOf(short_one))) << "a stall shorter than the deadline is"
+                                                        " allowed: it shows the check *not*"
+                                                        " firing";
+  Line long_one("hang 600000");
+  EXPECT_EQ(kHangMaxMs, parseHangMs(tokensOf(long_one)));
+  EXPECT_GT(kHangDefaultMs, 8000u) << "the default must outlast the loop check's deadline";
+  EXPECT_LT(kHangMaxMs, 60000u) << "and the clamp must not reach the hardware watchdog's timeout";
+}
+
 TEST(Commands, EveryCommandThatCanBeRefusedHasAUsageLine) {
   for (Verb verb : {kVerbScope, kVerbDwell, kVerbHome, kVerbBoost, kVerbAuto, kVerbTime}) {
     const std::string usage = usageOf(verb);
@@ -352,7 +383,7 @@ TEST(Commands, EveryCommandThatCanBeRefusedHasAUsageLine) {
         << "a usage line names its own command: " << usage;
   }
   for (Verb verb : {kVerbHelp, kVerbInfo, kVerbStat, kVerbStop, kVerbSweep, kVerbHist, kVerbCad,
-                    kVerbReboot, kVerbDfu}) {
+                    kVerbReboot, kVerbDfu, kVerbHang}) {
     EXPECT_STREQ("", usageOf(verb)) << "verb " << int(verb) << " has no argument to be refused"
                                        " over";
   }
@@ -393,11 +424,37 @@ TEST(Lines, BootSaysWhatTheImageIs) {
   EXPECT_STREQ("rak4630", doc["hw"].as<const char*>());
   EXPECT_STREQ("sx1262", doc["radio"].as<const char*>());
   EXPECT_STREQ("por", doc["reset"].as<const char*>());
+  EXPECT_TRUE(doc["wdt"].is<const char*>()) << "the field is there even when no watchdog fired";
+  EXPECT_STREQ("", doc["wdt"].as<const char*>());
   EXPECT_TRUE(doc["radio_ok"].is<bool>());
   EXPECT_TRUE(doc["radio_ok"].as<bool>());
   EXPECT_EQ(1, doc["rtc"].as<int>());
   EXPECT_EQ(0, doc["ina"].as<int>());
   EXPECT_EQ(1754820000u, doc["ts"].as<uint32_t>());
+}
+
+TEST(Lines, BootSaysWhichWatchdogWithoutANewResetWord) {
+  // Both watchdogs mean *the loop stopped*, so both are the one `reset` word a reader already
+  // enumerates (docs/noisescope.md section 5: por|pin|wdt|soft|lockup). Which of the two it was
+  // is a field beside it and not a sixth word - phase 3.5's task 03, deliverable 3.
+  for (const char* half : {"loop", "hw"}) {
+    StringSink sink;
+    Lines lines(sink);
+    BootFields f = bootFields();
+    f.reset = "wdt";
+    f.wdt = half;
+    lines.boot(f);
+    const JsonDocument doc = parseOne(sink);
+    EXPECT_STREQ("wdt", doc["reset"].as<const char*>()) << half;
+    EXPECT_STREQ(half, doc["wdt"].as<const char*>());
+  }
+  // And a null, which is what a caller that has nothing to say should be able to pass.
+  StringSink sink;
+  Lines lines(sink);
+  BootFields f = bootFields();
+  f.wdt = nullptr;
+  lines.boot(f);
+  EXPECT_STREQ("", parseOne(sink)["wdt"].as<const char*>());
 }
 
 TEST(Lines, InfoSaysTheSameAndTheHomeChannel) {
@@ -419,6 +476,8 @@ TEST(Lines, InfoSaysTheSameAndTheHomeChannel) {
   EXPECT_STREQ("info", doc["t"].as<const char*>());
   EXPECT_STREQ("scanner", doc["role"].as<const char*>());
   EXPECT_STREQ("deadbeef01020304", doc["devid"].as<const char*>()) << "both halves, zero-padded";
+  EXPECT_STREQ("por", doc["reset"].as<const char*>());
+  EXPECT_STREQ("", doc["wdt"].as<const char*>()) << "`info` carries the pair `boot` carries";
   EXPECT_EQ(1, doc["boost"].as<int>());
   EXPECT_EQ(10u, doc["auto_min"].as<uint32_t>());
   EXPECT_FLOAT_EQ(869.618, doc["home"]["f"].as<double>());
@@ -1744,6 +1803,103 @@ TEST(Scope, ThePluginBinaryIsTheOneTheForkAssembled) {
   // And the tag it writes into the ROM string once it is loaded, which is what says it is still
   // there before every sweep (spectrum.asm: SX_TAG = 'P').
   EXPECT_EQ('P', SX126X_SPECTRUM_PLUGIN_TAG);
+}
+
+// ================================================================= 5. the loop watchdog
+
+// src/roles/scanner/LoopWatch.h: the 8 s check, as arithmetic. On the board `beat()` is the top
+// of loop() and `tick()` is an RTC interrupt every 125 ms whose `true` is a reset
+// (src/roles/scanner/LoopWdt.h); here the cadence is a for-loop, which is the only way *when* it
+// fires can be stated at all.
+
+namespace {
+
+// Ticks until the watch says the loop has stopped, or `limit` if it never does.
+int ticksUntilFired(LoopWatch& watch, int limit) {
+  for (int i = 1; i <= limit; i++) {
+    if (watch.tick()) return i;
+  }
+  return limit;
+}
+
+}  // namespace
+
+TEST(LoopWatch, AHeartbeatEveryTickIsNeverAReset) {
+  LoopWatch watch(8000, 125);
+  for (int i = 0; i < 1000; i++) {  // two minutes of a loop that is coming round
+    watch.beat();
+    ASSERT_FALSE(watch.tick()) << "tick " << i;
+  }
+  EXPECT_EQ(0u, watch.silentMs());
+  EXPECT_FALSE(watch.fired());
+}
+
+TEST(LoopWatch, AHeartbeatEveryFewTicksIsNeverAResetEither) {
+  // The loop is not expected at the cadence of the check: a 2048-sample `hist` step is tens of
+  // milliseconds and a `scope` segment is one pass of the loop, so several ticks may pass between
+  // two heartbeats. What matters is that one heartbeat clears the whole count.
+  LoopWatch watch(8000, 125);
+  for (int i = 0; i < 400; i++) {
+    const bool fired = watch.tick();
+    ASSERT_FALSE(fired) << "tick " << i;
+    if (i % 60 == 0) watch.beat();  // a heartbeat every 7.5 s, inside the deadline
+  }
+}
+
+TEST(LoopWatch, TheDeadlineIsReachedAfterTheDeadlineAndNotBefore) {
+  LoopWatch watch(8000, 125);
+  watch.beat();
+  EXPECT_FALSE(watch.tick()) << "the heartbeat is taken by the first tick";
+  // 8000 ms of silence at 125 ms a tick is 64 ticks, and the 64th is the one that says so.
+  EXPECT_EQ(64, ticksUntilFired(watch, 200));
+  EXPECT_EQ(8000u, watch.silentMs());
+  EXPECT_TRUE(watch.fired());
+}
+
+TEST(LoopWatch, ACadenceThatDoesNotDivideTheDeadlineOvershootsAndNeverUndershoots) {
+  // The resolution of the answer is one tick: a deadline is reached between `deadline` and
+  // `deadline + tick` of silence. Never before - a reset that should not have happened is the one
+  // failure a watchdog must not have.
+  LoopWatch watch(8000, 300);
+  EXPECT_EQ(27, ticksUntilFired(watch, 200)) << "26 ticks is 7800 ms, which is not yet 8000";
+  EXPECT_EQ(8100u, watch.silentMs());
+}
+
+TEST(LoopWatch, ItSaysSoOnceAndThenKeepsQuiet) {
+  // The reset is already on its way; a second `true` would only be a second reset, and on the
+  // board it would be a second NVIC_SystemReset from inside an interrupt.
+  LoopWatch watch(1000, 125);
+  EXPECT_EQ(8, ticksUntilFired(watch, 100));
+  for (int i = 0; i < 100; i++) {
+    ASSERT_FALSE(watch.tick()) << "tick " << i << " after it had already fired";
+  }
+  EXPECT_TRUE(watch.fired());
+}
+
+TEST(LoopWatch, AHeartbeatAfterItHasFiredDoesNotUnfireIt) {
+  LoopWatch watch(1000, 125);
+  ticksUntilFired(watch, 100);
+  watch.beat();
+  EXPECT_FALSE(watch.tick());
+  EXPECT_TRUE(watch.fired()) << "the part is going; nothing takes that back";
+}
+
+TEST(LoopWatch, ADeadlineOfZeroIsTheCheckTurnedOff) {
+  // What a build that wanted the hardware watchdog alone would ask for
+  // (src/roles/scanner/config.h, LOOP_WDT_TIMEOUT_MS).
+  LoopWatch watch(0, 125);
+  for (int i = 0; i < 10000; i++) {
+    ASSERT_FALSE(watch.tick()) << "tick " << i;
+  }
+  EXPECT_FALSE(watch.fired());
+  EXPECT_EQ(0u, watch.deadlineMs());
+}
+
+TEST(LoopWatch, ACadenceOfZeroIsOneMillisecondAndNotADeadlineThatNeverGrows) {
+  // The constructor runs before main() on the board and has nowhere to refuse, so it clamps.
+  LoopWatch watch(10, 0);
+  EXPECT_EQ(1u, watch.tickMs());
+  EXPECT_EQ(10, ticksUntilFired(watch, 100));
 }
 
 int main(int argc, char** argv) {

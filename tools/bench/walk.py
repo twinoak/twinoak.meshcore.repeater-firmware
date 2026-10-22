@@ -172,9 +172,8 @@ _section("9", "NoiseScope", [
              "there"),
     PageLine("9.5", ("p3-02",), "Flash the repeater back, and nothing of the node is gone",
              "the restore: the same `Repeater ID`, the same name, a repeater's `fw.version` again"),
-    PageLine("9.6", ("p3-02",), "The watchdog is live",
-             "a watchdog reset, and `reset` reading `wdt` after it",
-             person="an induced hang; a session cannot contrive one"),
+    PageLine("9.6", ("p3-02", "p3.5-03"), "The watchdog is live",
+             "`hang`, the reset about eight seconds later, and `reset` reading `wdt` after it"),
     PageLine("9.7", ("p3.1-01",), "**The radio's ROM.**",
              "`info`'s `rom`, which decides whether any `scope` can run on this part"),
     PageLine("9.8", ("p3.1-01",), "**`scope 863 870` over USB, with the plotter.**",
@@ -843,7 +842,12 @@ class Walker(object):
         finally:
             port.close()
 
-        for key in ("9.3", "9.6", "9.10", "9.11", "9.12"):
+        # The watchdog, which the scanner can now be *told* to stop its loop for (p3.5-03): the
+        # last thing done to the scanner, because it ends in a reset and because a board that has
+        # just come back from one is exactly what the restore after it should find.
+        self._walk_9_watchdog()
+
+        for key in ("9.3", "9.10", "9.11", "9.12"):
             self.person(key)
 
         # The page's own order puts the repeater back here; it is run last of all the steps
@@ -948,6 +952,92 @@ class Walker(object):
             return rom
         self._walk_9_scope(scanner)
         return rom
+
+    def _walk_9_watchdog(self):
+        """`hang`, and what comes back: the loop stops, the loop watchdog resets the part about
+        eight seconds later, and `boot` says `wdt` (docs/bench.md section 9, *The watchdog is
+        live*; docs/noisescope.md sections 5 and 6).
+
+        Until p3.5-03 this was a person's line - *a session cannot cause one* - because nothing in
+        the firmware could be asked to hang. The hardware watchdog is at a timeout a USB update
+        fits in now and the 8 s check is software, so what is walked here is the software half;
+        the hardware one is the backstop for a part whose interrupts have stopped too, and
+        provoking that is still nobody's."""
+        app = self._app_port("ask the scanner to hang")
+        port = self.ports.open_ready(app.device, 115200, self.timeouts.open_s)
+        asked, ack = None, None
+        try:
+            scanner = ScannerConsole(port, log=(lambda line: None),
+                                     disposable=self.config.disposable, now=self.ports.now,
+                                     sleep=self.ports.sleep)
+            ack, _batch = scanner.send("hang", timeout_s=3.0)
+            asked = self.ports.now()
+        except (IOError, OSError) as exc:
+            # Not expected - the ack leaves before the loop goes quiet - but a port that dies
+            # under the line is the reset, exactly as RepeaterConsole.send_reset reads it.
+            self.say("                   (the port went away with the line: %s)"
+                     % str(exc).split(".")[0])
+            asked = self.ports.now()
+        finally:
+            port.close()
+        if ack is None or not ack.get("ok", False):
+            return self.step("9.6", "`hang` is acked, and then the loop stops", ok=False,
+                             sent=["hang"],
+                             saw="no `ack` for `hang` came back" if ack is None
+                                 else frame_summary(ack),
+                             expected="an ack naming the deadline the unit will reset after",
+                             note="an image without the `hang` command cannot walk this line: it "
+                                  "is a person's again, with an induced hang (docs/noisescope.md "
+                                  "section 5)")
+
+        # The reset takes the port with it, and the application's comes back about 1.4 s later.
+        self.ports.wait_until_gone(lambda info: info.device == app.device,
+                                   self.timeouts.application_port_s)
+        again = self.ports.wait_for(
+            lambda info: info.is_application and same_serial(info.serial_number,
+                                                             self.config.serial),
+            self.timeouts.application_port_s)
+        took = self.ports.now() - asked
+        if again is None:
+            return self.step(
+                "9.6", "the unit comes back from the watchdog reset", ok=False, sent=["hang"],
+                saw="the application's port did not come back within %.0f s of `hang`"
+                    % self.timeouts.application_port_s,
+                expected="a reset and a boot",
+                note="the board may be in its bootloader: `bench status`, and `bench flash` or a "
+                     "double-tap")
+
+        port = self.ports.open_ready(again.device, 115200, self.timeouts.open_s)
+        try:
+            scanner = ScannerConsole(port, log=(lambda line: None),
+                                     disposable=self.config.disposable, now=self.ports.now,
+                                     sleep=self.ports.sleep)
+            # The `boot` line is a race on a real board (section 0a); `info` carries the same
+            # `reset` and the same `wdt`, so it is what the line is held to when the race is lost.
+            fields = scanner.first("boot", self.timeouts.banner_s)
+            how = "the `boot` line"
+            if not fields:
+                _ack, batch = scanner.send("info", timeout_s=3.0)
+                found = batch.of_type("info")
+                fields = found[0] if found else (scanner.first("info", 2.0) or {})
+                how = "`info` (the `boot` line was not caught)"
+        finally:
+            port.close()
+        reset = (fields or {}).get("reset")
+        half = (fields or {}).get("wdt")
+        return self.step("9.6", "`hang` stops the loop and the watchdog resets the unit, which "
+                                "comes back saying `reset` `wdt`",
+                         ok=reset == "wdt", sent=["hang", "info"],
+                         saw="%s after %.1f s: %s" % (how, took, frame_summary(fields)),
+                         expected="reset wdt (and `wdt` `loop`, the software half)",
+                         blanks={"section 9 watchdog reset": reset,
+                                 "section 9 watchdog half": half or "(not said)",
+                                 "section 9 watchdog, time to the port": "%.1f s" % took},
+                         note=None if half == "loop" else
+                         "`wdt` says %r where the loop check's own reset says `loop`: a hardware "
+                         "watchdog reset here would mean the loop check did not fire first, and an "
+                         "empty one that the marker did not survive "
+                         "(src/roles/scanner/loopwdt.ld)" % (half,))
 
     def _walk_9_scope(self, scanner):
         ack, batch = scanner.send("scope 863 870", timeout_s=5.0)

@@ -113,7 +113,27 @@
 #define I2C_CLOCK_HZ 100000  // 1k pullups through bulkhead filter: keep at/below 100 kHz
 #endif
 
-// ---- Watchdog ----
+// ---- The two watchdogs ----
+//
+// **The hardware one** (src/roles/scanner/Wdt.h): the nRF52840's WDT, which cannot be stopped and
+// which survives the soft reset into the bootloader with the same timeout - so the bootloader,
+// which feeds nothing, has exactly this long to take an image. 60 s is the longest **measured**
+// USB update of the largest image the scanner is replaced by, doubled and rounded up to whole
+// tens: four flashes of the 414 052-byte repeater package from the bootloader of the first board
+// on this bench each took **26.3 s** from the start of the DFU to the application's port coming
+// back, 25.2 s of it adafruit-nrfutil's bytes at 115200 baud
+// (tasks/phase-3.5/reports/03.md, *The measurement*; every flash of tools/bench logs its own
+// `update_s`). It was 8 s until that measurement, and 8 s is what ended the DFU that would have
+// replaced the scanner (tasks/phase-3/FOLLOWUPS.md).
+//
+// **The software one** (src/roles/scanner/LoopWatch.h and LoopWdt.h): the 8 s check NoiseScope
+// was designed around - *a step that takes longer than the timeout is a step that should not have
+// been started* - now where it belongs, in a cadence an interrupt keeps rather than in a
+// peripheral a bootloader inherits. This is the number that says the loop has stopped; the one
+// above is the backstop for a part so far gone that the interrupt has stopped too.
 #ifndef WDT_TIMEOUT_S
-#define WDT_TIMEOUT_S 8
+#define WDT_TIMEOUT_S 60
+#endif
+#ifndef LOOP_WDT_TIMEOUT_MS
+#define LOOP_WDT_TIMEOUT_MS 8000  // 0 turns the loop check off and leaves the hardware one alone
 #endif

@@ -52,6 +52,7 @@ enum Verb : uint8_t {
   kVerbTime,
   kVerbReboot,
   kVerbDfu,
+  kVerbHang,
 };
 
 // The words of one line, split in place: `line` is modified and the pointers are into it, so it
@@ -158,6 +159,14 @@ bool parseEpoch(const Tokens& tokens, uint32_t& epoch);
 
 // `dfu [serial]`: true for the bootloader's serial-only DFU, false for the UF2 drive.
 bool parseDfuSerialOnly(const Tokens& tokens);
+
+// `hang [ms]`: how long the main loop is to stop, which is how the loop watchdog is made
+// observable on a bench (docs/noisescope.md section 5, docs/bench.md section 9's watchdog line).
+// The default is past the deadline and the clamp is short of the hardware watchdog's, so what
+// this command can do is end in the software reset or come back - never in the other one.
+constexpr uint32_t kHangDefaultMs = 12000;
+constexpr uint32_t kHangMaxMs = 30000;
+uint32_t parseHangMs(const Tokens& tokens);
 
 }  // namespace scanner
 }  // namespace twinoak

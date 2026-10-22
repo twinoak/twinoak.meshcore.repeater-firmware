@@ -90,13 +90,20 @@ port is not back before 1.4 s: a run of the tool catches them sometimes and not 
 tool reads the node's key with upstream's own **`get public.key`** (the same 32 bytes,
 `src/helpers/CommonCLI.cpp:902` at the pin) and resets nothing for it; §10 holds the first boot to
 what it left behind (a new key, `firstboot.state`) and the two lines themselves are a person's,
-with a terminal already open across the reset button. *Flashing away from the scanner takes two
-DFUs.* The scanner starts the nRF52840's watchdog (8 s, `src/roles/scanner/Wdt.h`) and a soft
-reset does not stop it, so it bites in the middle of the DFU that would replace the scanner; the
-tool waits for the port to go, finds the bootloader the board was left in and runs
-`adafruit-nrfutil` once more, which works (`tasks/phase-3/FOLLOWUPS.md` has the decision that is
-still open). `adafruit-nrfutil` **exits 0 even when its write failed**, so what the tool holds it
-to is its own `Device programmed.` line.
+with a terminal already open across the reset button. *Flashing away from the scanner takes one
+DFU - and took two.* The scanner used to start the nRF52840's watchdog at **8 s**
+(`src/roles/scanner/Wdt.h`), and a soft reset does not stop it, so it bit in the middle of the DFU
+that would replace the scanner: the tool waited for the port to go, found the bootloader the board
+was left in and ran `adafruit-nrfutil` once more, which worked. `p3.5-03` measured the update
+instead - four flashes of the 414 052-byte repeater package, **26.3 s each** from the start of the
+DFU to the application's port - and set `WDT_TIMEOUT_S` to **60 s**, twice the longest, with the
+8 s check moved into software (`src/roles/scanner/LoopWatch.h`). So a scanner is replaced in
+**one** DFU now. The recovery stays, because a scanner image from before that still has the 8 s
+watchdog, and its own line says which case it was (*the board reset under the DFU and is in its
+bootloader* against *the board is still in its bootloader*). Every flash logs `dfu_s`, `update_s`
+and `attempts`, so the measurement is in `out/bench/flash.log` and not only in a report.
+`adafruit-nrfutil` **exits 0 even when its write failed**, so what the tool holds it to is its own
+`Device programmed.` line.
 
 ## 0b. What a session walks, and what stays yours
 
@@ -114,7 +121,7 @@ rest of this page is a person's, and so are the lines in the right-hand column:
 |---|---|---|
 | §1 | the console on a repeater: the banner's `Repeater ID`, `ver`, `board`, `get radio`, both `sensor list` pages with the cut digit, `sensor get fw.version`, `sensor set fw.version x` refused, and `get dutycycle` | the adverts and the repeating, a phone's login, `INFO.VARIANT`, the scope on SCL, the two USB serial numbers (a double-tap), and the refusals with `rf: antenna` in the config |
 | §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the three agreeing | the Walter's half, which is another repository's |
-| §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline — and the repeater back with its identity | `pwr` against the boards, the watchdog, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
+| §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
 | §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
 | §0, §2–§7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
 
@@ -679,13 +686,21 @@ of the first.
   `sensor get fw.version` reads `twinoak-repeater …`. **This is the promise the
   scanner's two rails exist for** — it compiles no file system and never
   transmits — and it is the one thing on this page that only a board can show.
-  Expect **two DFUs**: the scanner's watchdog bites in the middle of the first
-  one and `bench` runs the second from the bootloader that is left (§0a). (bench, 2026-10-22, 9fb721b)
-- [ ] **p3-02** **The watchdog is live.** With the scanner flashed, hold the
-  unit in a `hist` pass and pull the SX1262 into a stall if you can contrive
-  one, or simply confirm from a `boot` line after an induced hang that `reset`
-  reads `wdt`. A reset that boots into passive monitor mode is the safe end of
-  a bad day on a mast; a session cannot cause one.
+  Expect **one DFU**: `p3.5-03` moved the scanner's 8 s watchdog into software
+  and left the hardware one at a timeout an update measurably fits in. The
+  two-DFU recovery is still in `tools/bench` for a scanner image from before
+  that, and it says which case it was (§0a). (bench, 2026-10-22, 9fb721b)
+- [ ] **p3-02, p3.5-03** **The watchdog is live.** With the scanner flashed,
+  **`hang`** on either console: the unit acks, the main loop stops, and the 8 s
+  loop check resets it about eight seconds later — the port goes and comes back
+  — with `reset` → ______ (`wdt`) and `wdt` → ______ (`loop`, the software
+  half; `hw` would be the nRF52840's own). A reset that boots into passive
+  monitor mode is the safe end of a bad day on a mast, and this is that end on
+  purpose (`docs/noisescope.md` §5 and §6). `hang 3000` is the other half of
+  the same demonstration: shorter than the deadline, so the loop comes back and
+  the unit answers an `err` instead of resetting. The **hardware** watchdog
+  behind it (60 s, `WDT_TIMEOUT_S`) is the backstop for a part whose interrupts
+  have stopped too, and provoking that is still nobody's.
 
 ### The fast sweep
 

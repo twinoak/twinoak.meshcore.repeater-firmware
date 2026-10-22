@@ -66,6 +66,7 @@ Verb verbOf(const char* word) {
   if (same(word, "time")) return kVerbTime;
   if (same(word, "reboot")) return kVerbReboot;
   if (same(word, "dfu")) return kVerbDfu;
+  if (same(word, "hang")) return kVerbHang;
   return kVerbUnknown;
 }
 
@@ -86,6 +87,7 @@ const char* nameOf(Verb verb) {
     case kVerbTime: return "time";
     case kVerbReboot: return "reboot";
     case kVerbDfu: return "dfu";
+    case kVerbHang: return "hang";
     default: return "";
   }
 }
@@ -198,6 +200,15 @@ bool parseEpoch(const Tokens& tokens, uint32_t& epoch) {
 bool parseDfuSerialOnly(const Tokens& tokens) {
   const char* word = arg(tokens, 1);
   return word != nullptr && same(word, "serial");
+}
+
+uint32_t parseHangMs(const Tokens& tokens) {
+  // No refusal and no usage line: every argument of this one is a number of milliseconds, and a
+  // word that is not a number reads as 0, which is the default. The clamp is the point - a hang
+  // is only ever as long as the loop check needs to notice it.
+  const uint32_t asked = asU32(arg(tokens, 1), 0);
+  if (asked == 0) return kHangDefaultMs;
+  return asked > kHangMaxMs ? kHangMaxMs : asked;
 }
 
 }  // namespace scanner

@@ -192,8 +192,17 @@ class FakeScannerFirmware(object):
 
     def __init__(self, version="0.0.0-dev", rom="SX1261 V2D 2D02", radio_ok=True,
                  devid="deadbeef01020304", extra_lines=None, sweep_points=281, scope_frames=3,
-                 scope_sps=476, answers_data=True, chatter=None, prints_banner=True):
+                 scope_sps=476, answers_data=True, chatter=None, prints_banner=True,
+                 reset="soft", wdt="", hangs=True):
         self.version = version
+        # What `boot` and `info` say the last reset was, and which watchdog it was when the word
+        # is `wdt` (docs/noisescope.md section 5). `hang` moves both, which is what the walk of
+        # section 9's watchdog line reads back (p3.5-03).
+        self.reset = reset
+        self.wdt = wdt
+        # False: an image from before p3.5-03, which has no `hang` command - the walk's line is
+        # then a person's again and says so.
+        self.hangs = hangs
         self.rom = rom
         self.radio_ok = radio_ok
         self.devid = devid
@@ -219,7 +228,8 @@ class FakeScannerFirmware(object):
         if not self.prints_banner:
             return ""
         boot = dict(self.identity())
-        boot.update({"t": "boot", "reset": "soft", "radio_ok": self.radio_ok, "rtc": 0, "ina": 0, "ts": 0})
+        boot.update({"t": "boot", "reset": self.reset, "wdt": self.wdt,
+                     "radio_ok": self.radio_ok, "rtc": 0, "ina": 0, "ts": 0})
         return json.dumps(boot) + "\n"
 
     def _stat(self):
@@ -301,13 +311,23 @@ class FakeScannerFirmware(object):
         out = []
         if word == "info":
             info = dict(self.identity())
-            info.update({"t": "info", "build": "Oct 18 2026", "devid": self.devid, "reset": "soft",
+            info.update({"t": "info", "build": "Oct 18 2026", "devid": self.devid,
+                         "reset": self.reset, "wdt": self.wdt,
                          "rtc": 0, "ina": 0, "radio_ok": 1 if self.radio_ok else 0, "boost": 1,
                          "auto_min": 10, "rom": self.rom,
                          "home": {"f": 869.618, "bw": 62.5, "sf": 8, "cr": 8}})
             out.append(json.dumps(info))
         elif word == "stat":
             out.append(json.dumps(self._stat()))
+        elif word == "hang" and self.hangs:
+            # The loop stops, the loop watchdog resets the part about eight seconds later, and the
+            # unit comes back saying `wdt` (docs/noisescope.md sections 5 and 6). The ack is out
+            # before the loop goes quiet - the firmware waits 50 ms for it - so the port is taken
+            # away afterwards: FakePort does that, and this is what the next boot will say it was.
+            out.append(json.dumps({"t": "ack", "cmd": word, "ok": True,
+                                   "msg": "the loop stops for 12000 ms; the loop watchdog resets"
+                                          " the unit after 8000 ms of it"}))
+            self.reset, self.wdt = "wdt", "loop"
         elif word == "scope" and self.rom != "SX1261 V2D 2D02":
             # The plugin is a program for the radio's own core: another ROM is a refusal, and
             # nothing is uploaded (docs/bench.md section 9, *The fast sweep*, first line).
@@ -456,6 +476,13 @@ class FakePort(object):
                 text = line.decode("utf-8", errors="replace").strip()
                 if text:
                     self._out += fw.handle(text).encode("utf-8")
+                    # `hang` is the scanner's one line that ends in a reset. The ack is already in
+                    # self._out and the caller reads it - a real board sends it and then goes
+                    # quiet - so this handle is left alive and only the board moves.
+                    if text.split()[0].lower() == "hang" and getattr(fw, "hangs", False):
+                        self.board._fresh = True
+                        self.board.app_port = None
+                        self.board.reboot()
 
     def _heartbeat(self):
         """A scanner talks when nobody asked: its `stat` every ten seconds."""

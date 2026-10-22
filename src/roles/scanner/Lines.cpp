@@ -110,19 +110,20 @@ void Lines::base64(const uint8_t* bytes, uint16_t count) {
 void Lines::boot(const BootFields& f) {
   raw("{\"t\":\"boot\",");
   bootBody(f);
-  text(",\"reset\":\"%s\",\"radio_ok\":%s,\"rtc\":%d,\"ina\":%d,\"ts\":%lu}", f.reset,
-       asBool(f.radio_ok), asFlag(f.rtc), asFlag(f.ina), (unsigned long)f.ts);
+  text(",\"reset\":\"%s\",\"wdt\":\"%s\",\"radio_ok\":%s,\"rtc\":%d,\"ina\":%d,\"ts\":%lu}",
+       f.reset, f.wdt == nullptr ? "" : f.wdt, asBool(f.radio_ok), asFlag(f.rtc), asFlag(f.ina),
+       (unsigned long)f.ts);
   end();
 }
 
 void Lines::info(const InfoFields& f) {
   raw("{\"t\":\"info\",");
   bootBody(f.boot);
-  text(",\"build\":\"%s\",\"devid\":\"%08lx%08lx\",\"reset\":\"%s\",\"rtc\":%d,\"ina\":%d,"
-       "\"radio_ok\":%d,\"boost\":%d,\"auto_min\":%lu,",
+  text(",\"build\":\"%s\",\"devid\":\"%08lx%08lx\",\"reset\":\"%s\",\"wdt\":\"%s\","
+       "\"rtc\":%d,\"ina\":%d,\"radio_ok\":%d,\"boost\":%d,\"auto_min\":%lu,",
        f.build, (unsigned long)f.devid_high, (unsigned long)f.devid_low, f.boot.reset,
-       asFlag(f.boot.rtc), asFlag(f.boot.ina), asFlag(f.boot.radio_ok), asFlag(f.boosted_gain),
-       (unsigned long)f.auto_minutes);
+       f.boot.wdt == nullptr ? "" : f.boot.wdt, asFlag(f.boot.rtc), asFlag(f.boot.ina),
+       asFlag(f.boot.radio_ok), asFlag(f.boosted_gain), (unsigned long)f.auto_minutes);
   // The radio's ROM string, which is what says whether `scope` can run on this chip. Empty when
   // the radio did not answer at boot, never absent: a reader that looks for it finds a field.
   text("\"rom\":\"%s\",", f.rom == nullptr ? "" : f.rom);
