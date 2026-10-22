@@ -34,14 +34,14 @@ synthetic logs only.
   Thomas's, with a dummy load on the RAK's antenna port for the baseline.
 - [ ] **The stale remote branch** `origin/task/p3.1-01-the-fast-sweep`:
   the driver could not delete it (`logs/run-all.log`); delete it by hand.
-- [ ] **Phase 3's own review** (`../phase-3/FOLLOWUPS.md`) is still
+- [x] *(written 18 October: `../phase-3/FOLLOWUPS.md`)* **Phase 3's own review** (`../phase-3/FOLLOWUPS.md`) is still
   *Nothing yet*; 3.1 ran without it. Nothing in 3.1 depends on it, but the
   roles, the descriptor and the first-boot profile have had no second
   reading.
 
 ## From a bench walk of section 9 (2026-10-22)
 
-- [ ] **[01] `docs/bench.md` 9.9 differs from the board** (a bench walk of 2026-10-22 at `9fb721b`). `scope 150 960 2048` on the dummy load, the NDJSON kept and the picture saved
+- [ ] **[01] `docs/bench.md` 9.9 differs from the board** *(→ p3.5-02 takes it)* (a bench walk of 2026-10-22 at `9fb721b`). `scope 150 960 2048` on the dummy load, the NDJSON kept and the picture saved
   the baseline: `scope 150 960 2048` on the dummy load, kept: saw `{"cmd": "scope", "msg": "n=2048 step=395.5078k...", "ok": true, "t": "ack"} / 0 frame(s) in 20 s -> out/bench/baseline-150-960-20261022-174804-9fb721b.ndjson / err: scope setup failed (-707) at 212.6880`, expected `None`.
   The walk's result file under `out/bench/` has the transcript.
 

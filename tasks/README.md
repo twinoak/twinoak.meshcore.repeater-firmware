@@ -77,6 +77,7 @@ pick them up. Merging never releases; a release is a person pushing a tag.
 | [3.2](phase-3.2/README.md) | a MeshCore bump can be green: the version tests assert the defines, not a release | 1 |
 | [3.3](phase-3.3/README.md) | the band's ceiling, and a bench a session may use: `tools/bench/`, `bench walk` | 3 |
 | [3.4](phase-3.4/README.md) | the base in the release (`use: provision`, `spec/SYSTEM.md` S-5a), and the first board walked | 2 |
+| [3.5](phase-3.5/README.md) | what the first board showed: a new unit on the bench, the scope across the band, a watchdog an update gets through, the clock and the thresholds walked, the Danish standard, MeshCore 1.18 | 6 |
 
 Not in these piles, on purpose: anything that needs the rig (a bench pile
 follows the first boards), the bridge role and the dual adapter (the structure

@@ -14,7 +14,7 @@ both. The structure is the one the phase asked for — a role is a directory and
 board a target and a table row — and the scanner compiles not one line of MeshCore. Three things
 matter; the rest is small.
 
-- [ ] **[3.3] The band's legal duty cycle is not in the band, and a fresh unit starts at five
+- [x] *(done: p3.3-01)* **[3.3] The band's legal duty cycle is not in the band, and a fresh unit starts at five
   times it.** Upstream's repeater starts at `airtime_factor` 1.0 — a 50 % budget
   (`docs/ARCHITECTURE.md`'s duty-cycle section, `MyMesh.cpp:890` at `d9296435`) — and the
   home channel, 869.618 MHz, is in the 869.40–869.65 MHz band whose limit is **10 %** at 500 mW
@@ -24,10 +24,10 @@ matter; the rest is small.
   about the neighbourhood* — the 10 is not a judgement, it is the band's ceiling (a lower value
   may be one). It belongs in `[band_868]` beside the frequency and the power, and the profile's
   second line is generated from it.
-- [ ] **[3.3] `tools/linkloop/check.sh` is in no gate.** 01's move left its seventeen includes
+- [x] *(done: p3.3-01)* **[3.3] `tools/linkloop/check.sh` is in no gate.** 01's move left its seventeen includes
   stale and nothing noticed until 03 needed it (03, *Deviations*). It needs a host compiler, which
   the native step's container already has: run it there.
-- [ ] **[3.3] Nothing on this phase's bench list has been walked**, and three of its lines decide
+- [x] *(done: p3.3-03 built the walks, p3.4-02 walked them on 22 October — see below)* **[3.3] Nothing on this phase's bench list has been walked**, and three of its lines decide
   whether work already merged is right: `radio_ok` with the power-enable pin driven high (02,
   *Decisions* 1), the scanner → repeater round trip that leaves the identity in place (the promise
   both scanner rails exist for), and the power cut during the first boot (03). With a RAK4630 on
@@ -38,7 +38,7 @@ matter; the rest is small.
   leave it to provisioning (`docs/provisioning.md` §2, as today) or a change to S-13 in the
   hardware repository for this one public word. MeshMaster's guest-door pairing (meshmaster.dk
   D-44) works either way once the owner stores what was set.
-- [ ] **[Thomas] The rest of the Danish standard.** `flood.advert.interval` 60–85 h chosen from the
+- [x] *(decided by Thomas on 22 October: all four go in → p3.5-05)* **[Thomas] The rest of the Danish standard.** `flood.advert.interval` 60–85 h chosen from the
   node's own key (upstream: 47), `agc.reset.interval` 4, `loop.detect moderate`,
   `flood.max.unscoped` 15 — none of them per site in the way the three delays are. 03 left them
   to the reviewer; the reviewer leaves them to you, because each changes what a repeater does in
@@ -47,7 +47,7 @@ matter; the rest is small.
 - [ ] **[Thomas] The hardware repository's old NoiseScope** (`software/firmware/noisescope-rak4630/`)
   is still there; replace it with a pointer to this repository's `docs/noisescope.md` in its
   `PROJECT-KNOWLEDGE.md` §8 (02's first paragraph). No session of this repository writes there.
-- [ ] **[reviewer]** 02's RadioLib decision is right and its reason is the one that matters: the
+- [x] **[reviewer]** 02's RadioLib decision is right and its reason is the one that matters: the
   repeater cannot build against MeshCore's pinned commit, so pinning it in the scanner would have
   made the two *differ*. "RSSI comparable with the repeater's" is now true by construction.
 
@@ -86,7 +86,7 @@ tick; what the board said is:
 
 ### Open, from the same walks
 
-- [ ] **[reviewer] The scanner's watchdog ends the DFU that would replace it.** `wdtBegin()`
+- [ ] **[3.5-03] The scanner's watchdog ends the DFU that would replace it.** *(Thomas decided on 22 October: a hardware watchdog at a timeout an update fits in, the 8 s check in software → p3.5-03.)* `wdtBegin()`
   (`src/roles/scanner/Wdt.h`) starts the nRF52840's WDT at 8 s with `CONFIG.SLEEP = Run`, and a
   **soft reset does not stop it** — so after the 1200-baud touch the bootloader has about eight
   seconds to take a 414 KB image, and it does not get there: `adafruit-nrfutil` dies with

@@ -8,7 +8,7 @@ Only the reviewer ticks an item.
 Two warts of `tools/bench` that the first board showed and that 02 did not change, because each
 is a change to what a command *means* rather than a fix to what it does:
 
-- [ ] **[reviewer] A board that arrives in its bootloader leaves a run nothing can restore.**
+- [ ] **[3.5-01] A board that arrives in its bootloader leaves a run nothing can restore.**
   `bench flash` on a radio with a base and no application records `role: None, how: bootloader`
   (`runs.record_board`), which is honest - nothing of what it ran can be read - but then
   `bench restore` says `THE RUN RECORDED NO RECOGNISABLE ROLE ON THE BOARD` and the walk of
@@ -17,7 +17,7 @@ is a change to what a command *means* rather than a fix to what it does:
   which is the state to put back for a first unit. Either the message should name that command,
   or `bench flash` on a bootloader-only board should record the image it is about to write as the
   run's `found_image`. It is the normal case for every new unit, so it is worth one of the two.
-- [ ] **[reviewer] `--tick` says *not found in docs/bench.md* for a line that is already
+- [ ] **[3.5-01] `--tick` says *not found in docs/bench.md* for a line that is already
   ticked.** A second walk of a section prints `not found in docs/bench.md, so not ticked: 9.2,
   9.4, 9.7, 9.8` when those lines are ticked from an earlier run - `tick_page` looks for
   `- [ ] ` and an already-ticked bullet is `- [x] `. Nothing is wrong and nothing is lost (the
