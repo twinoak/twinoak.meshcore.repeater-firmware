@@ -108,7 +108,7 @@ and `attempts`, so the measurement is in `out/bench/flash.log` and not only in a
 ## 0b. What a session walks, and what stays yours
 
 `python tools/bench/bench.py walk <section>` (§0a, task `p3.3-03`) runs the
-lines of four sections of this page as steps, in the page's order: it prints the
+lines of six sections of this page as steps, in the page's order: it prints the
 line, what it sent, what it saw and *ok*, *differs* or *needs a person*, and
 leaves a result file under `out/bench/` with every `→ ______` of the lines it
 walked filled in. `--tick` then ticks what came back *ok* here and writes what
@@ -120,10 +120,12 @@ rest of this page is a person's, and so are the lines in the right-hand column:
 | | `bench walk` runs | Yours |
 |---|---|---|
 | §1 | the console on a repeater: the banner's `Repeater ID`, `ver`, `board`, `get radio`, both `sensor list` pages with the cut digit, `sensor get fw.version`, `sensor set fw.version x` refused, and `get dutycycle` | the adverts and the repeating, a phone's login, `INFO.VARIANT`, the scope on SCL, the two USB serial numbers (a double-tap), and the refusals with `rf: antenna` in the config |
+| §3 | the clock on the USB console: `sensor get clock.state` on a node that has never had one, upstream's own `clock`, a `time <epoch>` set, `clock sync`, a `reboot` and a `clkreboot` — and `rtc` never said on a board with no RV-3028 | the `linkcli.py` lines, the reset switch, a minute without power, a companion's view of the adverts, and a hand-fitted RV-3028 |
+| §5 | the two thresholds on the USB console: `power.low_mv` set to 3600 and still 3600 after a `reboot`, and `3350`, `2400` and `4400` refused with nothing changed — **and both values put back as they were found**, which is the walk's last line | the DMM, the phone's telemetry, the thermometer, the simulator's steps, the unplugged I2C bus, and the boot-voltage question (its three `get`s are read and filled in here) |
 | §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the three agreeing | the Walter's half, which is another repository's |
 | §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
 | §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
-| §0, §2–§7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
+| §0, §2, §4, §6, §7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
 
 A walk needs the board (§0a): with no `bench.local.json`, or no port with its
 serial number, it exits 3 and the task that would have walked it says *Not
@@ -322,9 +324,11 @@ is put the bytes on a real UART through real filters.
 ## 3. The clock
 
 `docs/link.md` §2a is the page: what each `time_state` means and when a
-backwards set is accepted. Nothing below has ever run on a board — the rules are
-native tests and the commands ran against the firmware's own session behind a
-pipe (`tools/linkloop/`), but no clock has ever ticked on a RAK4630.
+backwards set is accepted. The rules are native tests and the commands ran
+against the firmware's own session behind a pipe (`tools/linkloop/`); what a
+clock does on a RAK4630 is the six console lines below, which are
+**`bench walk 3`** (§0b). Everything else here needs the link, the reset
+switch, a minute without power, a companion or a part nobody has.
 
 - [ ] **p1-04** `linkcli.py time` on a node that was just flashed says
   `time_state 0 (unset)` and an epoch in **May 2024** (upstream's built-in
@@ -352,10 +356,34 @@ pipe (`tools/linkloop/`), but no clock has ever ticked on a RAK4630.
   keeper. The way to see it fail is `clkreboot` on the USB console, which sets
   the clock back to 2024 deliberately; this firmware restores the saved time on
   the boot that follows, so even that does not put the node behind itself.
-- [ ] **p1-04** On the USB console: `sensor get clock.state` says `unset`,
-  `restored`, `set` or `rtc`, matching `status`; upstream's own `time <epoch>`
-  and `clock sync` still work and move the state to `set` within one pass of
-  `loop()` (the keeper polls for a clock somebody else moved).
+- [x] **p1-04** **On the USB console of a node whose clock has never been
+  set**: `sensor get clock.state` says `unset` — the same word the link's
+  `time_state` carries in the lines above — and upstream's own `clock` answers
+  its built-in date in **May 2024** (`VolatileRTCClock`, epoch 1715770351):
+  → ______. Only an `erase` takes a node back to that state, because the
+  keeper's `/clock` survives a flash, so this line is read on a unit §3 has
+  not been walked on before. (bench, 2026-10-22, b391890)
+- [x] **p1-04** **Upstream's own `time <epoch>` at the console**, with this
+  machine's time: it answers `OK - clock set: <HH:MM - D/M/YYYY UTC>`
+  → ______, `clock` reads back the same minute, and `sensor get clock.state`
+  says `set` within one pass of `loop()` — the keeper polls for a clock
+  somebody else moved rather than patching upstream's CLI. (bench, 2026-10-22, b391890)
+- [ ] **p1-04** **Upstream's own `clock sync` at the console** moves the state
+  the same way: → ______.
+- [x] **p1-04** **After a `reboot` at the console**: `sensor get clock.state`
+  says `restored` and `clock` is within a minute or so of the set — not 2024,
+  and not an hour on, because the firmware wrote its file on the way down and
+  the boot that follows is the one that may use it without a margin
+  (`ClockKeeper.h`, `clean`). → ______ s from the set. (bench, 2026-10-22, b391890)
+- [x] **p1-04** **`clkreboot` at the console**, which sets upstream's clock
+  back to 2024 and restarts: the boot after it says `restored` and a time
+  **ahead** of where the set left it — never behind, which is the keeper's
+  whole point. The margin is the save interval (an hour,
+  `kSaveIntervalSeconds`), because the 2024 value is not a sane epoch and
+  nothing was written on the way down. → ______ s ahead. (bench, 2026-10-22, b391890)
+- [x] **p1-04** **No RV-3028 is fitted on this batch** (U5 is DNP, the hardware
+  repository's `PROJECT-KNOWLEDGE.md` §1): `clock.state` never says `rtc` on
+  such a board, whatever else it says. If it does, that is a finding. (bench, 2026-10-22, b391890)
 - [ ] **p1-04** **An RV-3028 hand-fitted** (a later batch, or a bench part on
   `0x52`): `time` says `time_state 3 (rtc)` after a power cycle, `status` never
   holds the adverts back, and a `time set` is written through to the part. No
@@ -431,7 +459,10 @@ The hardware repository's `hardware/pcb/CURRENT-SENSE.md` §6 is the fuller
 procedure for this block — the zero-current offsets, the known-current check at
 0.1/0.5/1.0/2.0 A, the charge profile, the "dead-battery dawn" case and the
 thermal check. These are the **firmware's** lines on top of it, and the first
-of them is the exit criterion of the whole phase.
+of them is the exit criterion of the whole phase. The two threshold lines are
+**`bench walk 5`** (§0b), which records `power.low_mv` and `power.crit_mv`
+before it touches either and puts both back as it found them; everything else
+here needs a meter, a phone, the lab supply's knob or a hand on the I2C bus.
 
 - [ ] **p1-06** **[boards]** **`linkcli.py power` against a multimeter — sign
   first, then size.** With the bench supply at 18–21 V standing in for the panel:
@@ -465,11 +496,19 @@ of them is the exit criterion of the whole phase.
   held a minute: **reason 3**. A dip of a few seconds — or a transmit burst —
   raises nothing. Coming back needs 100 mV of hysteresis *and* the same minute.
   A second reason 2 inside the hour raises nothing (the machine's limit, §2c).
-- [ ] **p1-06** **The thresholds are settable and survive a restart.**
-  `cli "sensor set power.low_mv 3600"` answers `ok`, `cli "sensor list 5"` shows
-  it, `reboot 0` — and it is still 3600 after the boot. `sensor set
-  power.low_mv 3350` is refused (`can't find custom var`) because it would sit
-  less than 100 mV above `crit`, and so are `2400` and `4400`.
+- [x] **p1-06** **The thresholds are settable and survive a restart.** At the
+  USB console — `cli "…"` over the link is the same interpreter, and
+  `reboot 0` is the link's word for the console's `reboot`:
+  `sensor set power.low_mv 3600` answers `ok`, `sensor list 5` shows
+  `power.low_mv=3600`, and after a restart it is still 3600. → ______ (bench, 2026-10-22, b391890)
+- [x] **p1-06** **A pair this firmware will not take is refused, and nothing
+  changes.** `sensor set power.low_mv 3350` is refused because it would sit
+  less than 100 mV above `crit` (`kHysteresisMv`), `2400` because it would sit
+  below it, and `4400` because it is over the 4300 mV ceiling
+  (`kThresholdCeilingMv`); upstream's CLI has one word for all three
+  (`can't find custom var`, its wording for a `sensor set` the table refused)
+  → ______, and `sensor get power.low_mv` reads the same after each as
+  before it. (bench, 2026-10-22, b391890)
 - [ ] **p1-06** **[boards]** **With the INA3221's bus unplugged, the repeater
   keeps repeating** and `power` answers `valid 0` with every number 0. Nothing
   on the console hangs, `ping` still answers inside its 250 ms, and a packet

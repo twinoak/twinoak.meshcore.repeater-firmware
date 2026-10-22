@@ -111,11 +111,12 @@ Say in the report that the task was done in more than one session.
   builds against; everything else is Thomas's to walk with the rig on the
   bench, so every task ends with a *Not verified here* list precise enough to
   be walked, and the same lines are added to `docs/bench.md` in the order the
-  rig is brought up (`spec/SYSTEM.md` §7). Four of that page's sections are
-  already walks — `bench walk 1`, `8`, `9`, `10` (`docs/bench.md` §0b) — so a
-  task whose *Not verified here* is one of their lines runs the walk when the
-  board is there, puts the result file in the report and ticks the line with
-  `--tick`; everything the walk calls *needs a person* stays in the list.
+  rig is brought up (`spec/SYSTEM.md` §7). Six of that page's sections are
+  already walks — `bench walk 1`, `3`, `5`, `8`, `9`, `10` (`docs/bench.md`
+  §0b) — so a task whose *Not verified here* is one of their lines runs the
+  walk when the board is there, puts the result file in the report and ticks
+  the line with `--tick`; everything the walk calls *needs a person* stays in
+  the list.
 - Nobody will answer a question. Where the spec and the task are silent, take
   the smallest decision consistent with the spec and record it in the report
   under "Decisions taken without asking".

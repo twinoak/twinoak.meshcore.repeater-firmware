@@ -1,14 +1,17 @@
 """docs/bench.md, walked: the lines a script can check, as steps the tool runs.
 
     python tools/bench/bench.py walk 1                            the repeater alone on USB
+    python tools/bench/bench.py walk 3                            the clock
+    python tools/bench/bench.py walk 5                            power: the two thresholds
     python tools/bench/bench.py walk 8  [--image <zip>]           what an image says it is
     python tools/bench/bench.py walk 9  [--scanner-image <zip>]   NoiseScope, a round trip
     python tools/bench/bench.py walk 10                           first boot and provisioning
 
 docs/bench.md is what every task left under *Not verified here*, in the order the rig is brought
-up. Four of its sections are lines a script can check with nothing but the board on USB - §1 the
-repeater alone, §8 what an image says it is, §9 NoiseScope as a round trip, §10 first boot and
-provisioning - and this file is those sections, as walks:
+up. Six of its sections have lines a script can check with nothing but the board on USB - §1 the
+repeater alone, §3 the clock, §5 the battery thresholds, §8 what an image says it is, §9
+NoiseScope as a round trip, §10 first boot and provisioning - and this file is those sections, as
+walks:
 
   * a walk is the section's bullets **in the page's order**, each bullet one step or several, and
     a step says the line it checks, what it sent, what it saw and `ok`, `differs`, `needs a
@@ -24,9 +27,15 @@ provisioning - and this file is those sections, as walks:
     goes through console.redact, and §10's generated admin password is never written down at all
     (it is a bench unit's);
   * the board is left as it was found. §8 and §9 flash, so they open a run (runs.py) and end in
-    the restore that closes it; §1 reads consoles only; §10 erases, which is why it runs only
-    with `"identity": "disposable"` in bench.local.json and refuses while a run is open - the
-    erase makes a recorded Repeater ID unrestorable.
+    the restore that closes it; §1 reads consoles only; §5 moves `power.low_mv` and puts it and
+    `power.crit_mv` back as it found them, which is its last step; §10 erases, which is why it
+    runs only with `"identity": "disposable"` in bench.local.json and refuses while a run is
+    open - the erase makes a recorded Repeater ID unrestorable. §3 is the one walk that cannot
+    put back what it moved: a clock this firmware keeps only goes forward
+    (src/roles/repeater/clock/ClockKeeper.h), so the node is left `restored` and about an hour
+    ahead of the truth, which is the keeper working and which the Walter corrects within seconds
+    of EV_BOOT. §3 and §5 reset the board with upstream's own console lines (`reboot`,
+    `clkreboot`) and flash nothing.
 
 What a step expects is read and not remembered: the home channel and the duty cycle come from
 `[band_<band>]` of platformio.ini (phase 3.3's task 01 put the band's ceiling there and nowhere
@@ -71,6 +80,13 @@ PLUGIN_ROM = "SX1261 V2D 2D02"
 # tag our own `fw.version` names.
 PAGE_VER = "v1.17.1 (Build: 14 Aug 2026)"
 PAGE_BOARD = "RAK 4631"
+
+# What `power.crit_mv` is on a node whose thresholds nobody has moved, and what docs/bench.md
+# section 5's three refused values are refusals *of*: `3350` sits less than the hysteresis above
+# it, `2400` below it, `4400` over the ceiling (src/common/power/BatteryWatch.h's
+# kDefaultCritMv, kHysteresisMv and kThresholdCeilingMv). A node holding another `crit` makes
+# some of the three legal, so the walk skips them there rather than calling a correct `ok` wrong.
+PAGE_CRIT_MV = "3300"
 
 # `sensor list`'s two pages, as upstream pages them (docs/provisioning.md section 3, and
 # test/test_settings, which measures the arithmetic).
@@ -142,6 +158,83 @@ _section("1", "The repeater alone on USB", [
              "the refusals, on a board, with `rf: antenna` in the config",
              person="an edit of bench.local.json (`rf: antenna`), which is the person's own file. "
                     "The guards themselves open no port and are host tests (test_bench.py)"),
+])
+
+_section("3", "The clock", [
+    PageLine("3.1", ("p1-04",), "`linkcli.py time` on a node that was just flashed says",
+             "the link's `time` and `status` on a node whose clock has never been set",
+             person="the dongle on the link pins (bench.local.json's `dongle_serial`) or the "
+                    "Walter: `linkcli.py` speaks the box link, which this tool does not"),
+    PageLine("3.2", ("p1-04",), "`time set`, then `reboot 0`: after the restart",
+             "the link's `time set` and `reboot 0`, and the epoch after the restart",
+             person="the same dongle. The console's own half of it - `time <epoch>` and "
+                    "`reboot` - is walked below"),
+    PageLine("3.3", ("p1-04",), "The same after **pressing the reset switch**",
+             "a reset switch and a watchdog reset, which leave no chance to write the file",
+             person="a hand on the reset switch, and a way to provoke the watchdog on a "
+                    "repeater image - a session resets a board only with upstream's own "
+                    "`reboot`"),
+    PageLine("3.4", ("p1-04",), "**Power off for a minute and on again**",
+             "a minute without power, and `reset_reason 1 (power-on)` after it",
+             person="the lab supply's switch, and the link to read `reset_reason`"),
+    PageLine("3.5", ("p1-04",), "**With no laptop attached**, a nearby companion",
+             "the advert hold, seen from a companion about a minute after boot",
+             person="a second radio within range and a companion app - a session cannot hear a "
+                    "radio"),
+    PageLine("3.6", ("p1-04",), "**A nearby companion that saw this repeater's adverts before a",
+             "a companion that still accepts this node's adverts after a power cycle",
+             person="the same second radio, across a power cycle. What `clkreboot` does to this "
+                    "node's own clock is walked below; what a companion makes of it is not"),
+    PageLine("3.7", ("p1-04",), "**On the USB console of a node whose clock has never been",
+             "`sensor get clock.state` and upstream's own `clock` on a node that has never had "
+             "a clock"),
+    PageLine("3.8", ("p1-04",), "**Upstream's own `time <epoch>` at the console**",
+             "`time <epoch>` with this machine's time, and `clock.state` after it"),
+    PageLine("3.9", ("p1-04",), "**Upstream's own `clock sync` at the console**",
+             "`clock sync` at the console, and whether it moves the state the same way"),
+    PageLine("3.10", ("p1-04",), "**After a `reboot` at the console**",
+             "the boot after a `reboot`: `restored`, and the clock a few seconds on from the set"),
+    PageLine("3.11", ("p1-04",), "**`clkreboot` at the console**",
+             "the boot after a `clkreboot`: `restored`, and ahead of where the set left it"),
+    PageLine("3.12", ("p1-04",), "**No RV-3028 is fitted on this batch**",
+             "`clock.state` never saying `rtc` on a board with no RV-3028 fitted"),
+    PageLine("3.13", ("p1-04",), "**An RV-3028 hand-fitted**",
+             "a hand-fitted RV-3028 on 0x52, and `time_state 3 (rtc)` after a power cycle",
+             person="a part nobody on this bench has, soldered to U5's footprint or wired to "
+                    "the I2C bus"),
+])
+
+_section("5", "Power", [
+    PageLine("5.1", ("p1-06",), "**`linkcli.py power` against a multimeter",
+             "the three channels' sign and size against a DMM",
+             person="the production connector boards, a bench supply at 18-21 V, a DMM in "
+                    "series with the panel lead, and the link"),
+    PageLine("5.2", ("p1-06",), "**The same three numbers in a phone's telemetry",
+             "the same three numbers in a phone's telemetry view, and the battery in `status`",
+             person="a phone on the mesh, and the boards - a session cannot hear a radio"),
+    PageLine("5.3", ("p1-06",), "**`linkcli.py env` against a thermometer**",
+             "temperature, humidity and pressure against something trustworthy",
+             person="a thermometer in the enclosure, a BME280 on the bus, and the link"),
+    PageLine("5.4", ("p1-06",), "**The battery thresholds, with the simulator.**",
+             "the minute below a threshold, the hysteresis and the hourly limit",
+             person="the lab supply's knob (or a battery simulator) and the link, which is "
+                    "where an `EV_ATTENTION` arrives"),
+    PageLine("5.5", ("p1-06",), "**The thresholds are settable and survive a restart.**",
+             "`sensor set power.low_mv 3600`, `sensor list 5`, and 3600 still there after a "
+             "restart"),
+    PageLine("5.6", ("p1-06",), "**A pair this firmware will not take is refused, and nothing",
+             "`3350`, `2400` and `4400` refused, with the value unchanged after each"),
+    PageLine("5.7", ("p1-06",), "**With the INA3221's bus unplugged, the repeater",
+             "a bus that is gone, and the three channels back when it returns",
+             person="a hand on the I2C connector (or SDA held low) and the boards; a session "
+                    "that cannot see the bus cannot unplug it"),
+    PageLine("5.8", ("p1-06",), "**`sensor list` really does page.**",
+             "upstream's paging of the ten keys over the link"),
+    PageLine("5.9", ("p1-06",), "**The boot-voltage question, which is the reviewer's.**",
+             "a node coming up with the pack at 3.2 V, and what upstream's power management "
+             "says about it",
+             person="the lab supply's knob at 3.2 V, which is the whole of this line; the "
+                    "three `get`s it asks for are read here and filled in"),
 ])
 
 _section("8", "What an image says it is", [
@@ -385,6 +478,41 @@ def same_radio(saw, expected):
         return False
 
 
+# Upstream's own `clock` line, which is the only time readout the USB console has:
+# `sprintf(reply, "%02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(),
+# dt.year())` (src/helpers/CommonCLI.cpp at the pin d9296435). The seconds are not in it.
+_CLOCK_LINE = re.compile(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*UTC$")
+
+# What that costs a comparison: a reading is its own minute, so it sits between the true second
+# and 59 seconds before it. Anything inside this of the time that was set is "the same minute".
+CLOCK_MINUTE_S = 60
+
+
+def clock_epoch(text):
+    """Upstream's `clock` reply as an epoch, or None. The minute it prints is taken as :00, so a
+    reading is up to CLOCK_MINUTE_S *behind* the second the clock really holds."""
+    match = _CLOCK_LINE.match((text or "").strip())
+    if not match:
+        return None
+    import calendar
+    hour, minute, day, month, year = [int(part) for part in match.groups()]
+    try:
+        return calendar.timegm((year, month, day, hour, minute, 0, 0, 0, 0))
+    except (ValueError, OverflowError):
+        return None
+
+
+def clock_is_upstreams_default(text):
+    """True when `clock` answers the date VolatileRTCClock starts every boot at - 15 May 2024,
+    epoch 1715770351 (src/helpers/ArduinoHelpers.h at the pin). The node has been up for a while
+    by the time a walk reads it, so the day is what is held, not the second."""
+    match = _CLOCK_LINE.match((text or "").strip())
+    if not match:
+        return False
+    _hour, _minute, _day, month, year = [int(part) for part in match.groups()]
+    return year == 2024 and month == 5
+
+
 _FW_VERSION = re.compile(r"^twinoak-(\S+)\s+(\S+)\s+on\s+MeshCore\s+(\S+)\s+\(([0-9a-f]{8})\)$")
 
 
@@ -470,6 +598,9 @@ class Walker(object):
         self.collect_s = float(collect_s)
         self.baseline_s = float(baseline_s)
         self._password = password
+        # Wall-clock seconds, for the one walk that sets a node's clock to this machine's time
+        # (section 3). ports.now() is a monotonic clock and not this.
+        self.now_epoch = getattr(bench, "now_epoch", None) or (lambda: int(time.time()))
         self.expect = band_expectations(self.repo) or {}
         self.result = WalkResult(self.section, self.config, bench.commit or git_commit(self.repo),
                                  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
@@ -699,6 +830,355 @@ class Walker(object):
         self.step("1.1", "`sensor list 5` is the other five", ok=keys2 == list(SECOND_PAGE_KEYS),
                   sent=["sensor list 5"], saw=page2, expected=", ".join(SECOND_PAGE_KEYS),
                   blanks={"section 1 sensor list 5": ",".join(keys2)})
+
+    # -- section 3 -----------------------------------------------------------
+
+    def walk_3(self):
+        """docs/bench.md section 3's console lines: what a clock does on a RAK4630 with no RTC.
+
+        The six lines this walks are the ones a USB console can read. The node's clock is moved
+        by them - a `time <epoch>` set, then a `reboot`, then a `clkreboot` - and a clock this
+        firmware keeps never comes back down (ClockKeeper.h: the memories are a high-water
+        mark), so the walk ends with the node `restored` and about an hour ahead of the truth.
+        That is the keeper working, the Walter corrects it within seconds of EV_BOOT, and it is
+        said in the result file's notes. Nothing else of the node is touched: no flash, no run,
+        no erase, no identity."""
+        app = self._app_port("walk section 3 with")
+        self.result.note("The application's port is %s (USB serial number %s)."
+                         % (app.device, app.serial_number))
+        self.result.note("This walk performs two resets, both of them upstream's own console "
+                         "lines (`reboot` and `clkreboot`), and no flash: no run is opened and "
+                         "nothing of the node's identity is touched.")
+        self.result.note("A clock this firmware keeps only goes forward (`ClockKeeper.h`), so "
+                         "the node is left `restored` and about an hour ahead of the real time - "
+                         "the `clkreboot` line's own margin. The Walter sets the time after "
+                         "every boot (`spec/LINK-PROTOCOL.md` 5.4), and `bench walk 10`'s erase "
+                         "is what takes a node back to `unset`.")
+
+        for key in ("3.1", "3.2", "3.3", "3.4", "3.5", "3.6"):
+            self.person(key)
+
+        states = []                 # every `clock.state` this walk read, for 3.12
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            fw = parse_fw_version_line(self.ask(repeater, "sensor get fw.version"))
+            if fw is None or fw["role"] != "repeater":
+                raise cfg.Refused("`sensor get fw.version` said nothing a repeater says: "
+                                  "section 3 is the repeater's clock keeper, and this board is "
+                                  "not running one")
+
+            # 3.7 - a node whose clock has never been set.
+            before_state = self._value(self.ask(repeater, "sensor get clock.state"))
+            states.append(before_state)
+            before_clock = self._value(self.ask(repeater, "clock"))
+            fresh = before_state == "unset"
+            if fresh:
+                self.step("3.7", "`sensor get clock.state` says `unset`", ok=True,
+                          sent=["sensor get clock.state"], saw=before_state, expected="unset",
+                          blanks={"section 3 clock.state, before any set": before_state})
+                self.step("3.7", "upstream's own `clock` answers its built-in date in May 2024",
+                          ok=clock_is_upstreams_default(before_clock), sent=["clock"],
+                          saw=before_clock, expected="a date in May 2024 (epoch 1715770351)",
+                          blanks={"section 3 clock, before any set": before_clock})
+            else:
+                why = ("this node's clock has been set before: `clock.state` says %r and `clock` "
+                       "says %r. Only an `erase` takes a node back to `unset` - the keeper's "
+                       "`/clock` survives a flash - and that is `bench walk 10`'s, not this "
+                       "walk's. Not a differs: the line is about a node this one no longer is"
+                       % (before_state, before_clock))
+                self.skip("3.7", why, what="`clock.state` `unset` and upstream's own `clock` in "
+                                           "May 2024")
+                self.result.note("Section 3's first console line was not read: %s" % why)
+
+            # 3.8 - upstream's own `time <epoch>`, with this machine's time.
+            target = int(self.now_epoch())
+            before_epoch = clock_epoch(before_clock)
+            set_ok = False
+            if before_epoch is not None and before_epoch > target:
+                ahead = before_epoch - target
+                why = ("the node's clock is already %d s ahead of this machine's, so upstream's "
+                       "`time` refuses to move it (`ERR: clock cannot go backwards`, "
+                       "src/helpers/CommonCLI.cpp at the pin d9296435). That is what a second "
+                       "walk of this section meets, an hour after the first one's `clkreboot`: "
+                       "the three lines below need a node whose clock is behind the walker's"
+                       % ahead)
+                for key in ("3.8", "3.9", "3.10"):
+                    self.skip(key, why)
+                self.result.note("Section 3's `time`, `clock sync` and `reboot` lines were not "
+                                 "read: %s" % why)
+            else:
+                reply = self.ask(repeater, "time %d" % target)
+                set_ok = reply.strip().startswith("OK - clock set:")
+                self.step("3.8", "`time <epoch>` with this machine's time is accepted",
+                          ok=set_ok, sent=["time %d" % target], saw=reply,
+                          expected="OK - clock set: <HH:MM - D/M/YYYY UTC>",
+                          blanks={"section 3 time <epoch>": reply or "(nothing)"})
+                after_clock = self._value(self.ask(repeater, "clock"))
+                after_epoch = clock_epoch(after_clock)
+                self.step("3.8", "`clock` reads back the minute that was set",
+                          ok=(after_epoch is not None
+                              and -CLOCK_MINUTE_S <= after_epoch - target <= CLOCK_MINUTE_S),
+                          sent=["clock"], saw=after_clock,
+                          expected="the same minute as %d" % target,
+                          note="upstream prints the minute and not the second, so a reading sits "
+                               "between its own minute and 59 s after it")
+                state = self._value(self.ask(repeater, "sensor get clock.state"))
+                states.append(state)
+                self.step("3.8", "`clock.state` says `set` within one pass of `loop()`",
+                          ok=state == "set", sent=["sensor get clock.state"], saw=state,
+                          expected="set",
+                          blanks={"section 3 clock.state, after the set": state},
+                          note="the keeper polls for a clock somebody else moved rather than "
+                               "patching upstream's CLI (`ClockKeeper::loop`)")
+
+                # 3.9 - and `clock sync`, which the page says does the same.
+                sync = self.ask(repeater, "clock sync")
+                sync_state = self._value(self.ask(repeater, "sensor get clock.state"))
+                states.append(sync_state)
+                moved = sync.strip().startswith("OK - clock set:") and sync_state == "set"
+                self.step("3.9", "`clock sync` moves the state the same way", ok=moved,
+                          sent=["clock sync"],
+                          saw="%s\n(`clock.state` is now %s)" % (sync or "(nothing)", sync_state),
+                          expected="OK - clock set: <HH:MM - D/M/YYYY UTC>, and `clock.state` set",
+                          blanks={"section 3 clock sync": sync or "(nothing)"},
+                          note=None if moved else
+                          "upstream's `clock sync` sets the clock to the *sender's* timestamp "
+                          "plus one and refuses when that is not ahead of the node's own clock "
+                          "(src/helpers/CommonCLI.cpp:199-207 at the pin d9296435). The USB "
+                          "console has no sender and ours calls `handleCommand(0, ...)` "
+                          "(src/roles/repeater/main.cpp:176), so at this port the line can only "
+                          "answer what it answered; over the mesh, where an admin's message "
+                          "carries a timestamp, it is the page's line. A follow-up for p1-04, "
+                          "which wrote the line - never a fix here")
+        finally:
+            port.close()
+
+        # 3.10 - the boot after a `reboot`.
+        if set_ok:
+            app = self._reset(app, "reboot")
+            port, repeater = self._open_repeater(app)
+            try:
+                repeater.drain(0.3)
+                state = self._value(self.ask(repeater, "sensor get clock.state"))
+                states.append(state)
+                clock = self._value(self.ask(repeater, "clock"))
+                epoch = clock_epoch(clock)
+                delta = None if epoch is None else epoch - target
+                ok = (state == "restored" and delta is not None
+                      and -CLOCK_MINUTE_S <= delta <= 2 * CLOCK_MINUTE_S)
+                self.step("3.10", "`clock.state` is `restored` and the clock is a few seconds on "
+                                  "from the set", ok=ok,
+                          sent=["sensor get clock.state", "clock"],
+                          saw="%s\n%s" % (state, clock),
+                          expected="restored, and within a minute of %d" % target,
+                          blanks={"section 3 after a reboot":
+                                  "%s, %s (%s s from the set)"
+                                  % (state, clock,
+                                     "unreadable" if delta is None else "%+d" % delta)},
+                          note="the file was written on the way down with `clean` set, and this "
+                               "is the boot that may use it without the save interval's margin "
+                               "(`ClockKeeper::saveBeforeRestart`, `begin`)")
+            finally:
+                port.close()
+
+        # 3.11 - and the boot after a `clkreboot`, which sets upstream's clock back to 2024.
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            was = self._value(self.ask(repeater, "clock"))
+            was_epoch = clock_epoch(was)
+        finally:
+            port.close()
+        app = self._reset(app, "clkreboot")
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            state = self._value(self.ask(repeater, "sensor get clock.state"))
+            states.append(state)
+            clock = self._value(self.ask(repeater, "clock"))
+            epoch = clock_epoch(clock)
+            ahead = None if (epoch is None or was_epoch is None) else epoch - was_epoch
+            ok = (state == "restored" and ahead is not None and ahead >= 0
+                  and not clock_is_upstreams_default(clock))
+            self.step("3.11", "the boot after `clkreboot` says `restored`, ahead of where the set "
+                              "left it and never behind", ok=ok,
+                      sent=["clock", "clkreboot", "sensor get clock.state", "clock"],
+                      saw="before: %s\nafter:  %s\nclock.state: %s" % (was, clock, state),
+                      expected="restored, and not behind %s" % was,
+                      blanks={"section 3 after a clkreboot":
+                              "%s, %s (%s s ahead of where the set left it)"
+                              % (state, clock,
+                                 "unreadable" if ahead is None else "%+d" % ahead)},
+                      note="the margin is the save interval (3600 s, `kSaveIntervalSeconds`): "
+                           "the 2024 value `clkreboot` wrote is not a sane epoch, so nothing was "
+                           "saved on the way down and the file's value was not this restart's")
+        finally:
+            port.close()
+
+        # 3.12 - and no reading of any of them said `rtc`.
+        self.step("3.12", "`clock.state` never said `rtc`", ok="rtc" not in states,
+                  saw="the words this walk read: %s" % (", ".join(states) or "(none)"),
+                  expected="unset, set or restored - never rtc",
+                  blanks={"section 3 the clock.state words read": ", ".join(states) or "none"},
+                  note="U5 (the RV-3028 and its backup capacitors) is DNP on this batch, and a "
+                       "VolatileRTCClock answering 2024 fails the keeper's sane-epoch floor "
+                       "(`BoardClock.cpp` says why the question is answered from the answer)")
+        self.person("3.13")
+
+    # -- section 5 -----------------------------------------------------------
+
+    def walk_5(self):
+        """docs/bench.md section 5's two threshold lines, at the USB console.
+
+        `power.low_mv` and `power.crit_mv` are read before anything is sent and put back as they
+        were found, which is this walk's last step. Everything else in section 5 needs a meter, a
+        phone, the lab supply's knob or a hand on the I2C bus."""
+        app = self._app_port("walk section 5 with")
+        self.result.note("The application's port is %s (USB serial number %s)."
+                         % (app.device, app.serial_number))
+        self.result.note("This walk performs one reset, upstream's own `reboot`, and no flash: "
+                         "no run is opened and nothing of the node's identity is touched.")
+
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            fw = parse_fw_version_line(self.ask(repeater, "sensor get fw.version"))
+            if fw is None or fw["role"] != "repeater":
+                raise cfg.Refused("`sensor get fw.version` said nothing a repeater says: "
+                                  "section 5's thresholds are the repeater's, and this board is "
+                                  "not running one")
+            found_low = self._value(self.ask(repeater, "sensor get power.low_mv"))
+            found_crit = self._value(self.ask(repeater, "sensor get power.crit_mv"))
+            self.result.note("Found `power.low_mv` %s and `power.crit_mv` %s. Both are put back "
+                             "as they were found, which is this walk's last step."
+                             % (found_low, found_crit))
+
+            for key in ("5.1", "5.2", "5.3", "5.4"):
+                self.person(key)
+
+            # 5.5 - settable, listed, and still there after a restart.
+            reply = self.ask(repeater, "sensor set power.low_mv 3600")
+            self.step("5.5", "`sensor set power.low_mv 3600` answers `ok`",
+                      ok=reply.strip() == "ok", sent=["sensor set power.low_mv 3600"], saw=reply,
+                      expected="ok",
+                      note="upstream's own word for a `sensor set` the table took "
+                           "(src/helpers/CommonCLI.cpp at the pin d9296435)")
+            page2 = self.ask(repeater, "sensor list 5")
+            self.step("5.5", "`sensor list 5` shows `power.low_mv=3600`",
+                      ok="power.low_mv=3600" in page2, sent=["sensor list 5"], saw=page2,
+                      expected="power.low_mv=3600 on the second page")
+        finally:
+            port.close()
+
+        app = self._reset(app, "reboot")
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.drain(0.3)
+            after = self._value(self.ask(repeater, "sensor get power.low_mv"))
+            self.step("5.5", "it is still 3600 after a restart", ok=after == "3600",
+                      sent=["reboot", "sensor get power.low_mv"], saw=after, expected="3600",
+                      blanks={"section 5 power.low_mv after the restart": after},
+                      note="our own preferences file and not upstream's /prefs.json "
+                           "(src/common/power/Prefs.h)")
+
+            # 5.6 - and a pair this firmware will not take. The page's three values are
+            # refusals of a node whose `crit` is 3300; on a node holding another one, some of
+            # them are pairs this firmware accepts, and the line is then not this node's.
+            refusals = [(3350, "less than 100 mV above `crit` (kHysteresisMv)"),
+                        (2400, "below `crit`"),
+                        (4400, "over the 4300 mV ceiling (kThresholdCeilingMv)")]
+            if found_crit != PAGE_CRIT_MV:
+                self.skip("5.6", "this node's `power.crit_mv` is %s and the page's three values "
+                                 "are refusals of a node whose is %s: `3350` and `2400` are "
+                                 "judged against `crit` (`thresholdsAcceptable`, "
+                                 "src/common/power/BatteryWatch.cpp), so on this node they are "
+                                 "not all refusals. Put `power.crit_mv` back to %s to walk this "
+                                 "line" % (found_crit, PAGE_CRIT_MV, PAGE_CRIT_MV))
+                refusals = []
+            for mv, why in refusals:
+                line = "sensor set power.low_mv %d" % mv
+                reply = self.ask(repeater, line)
+                back = self._value(self.ask(repeater, "sensor get power.low_mv"))
+                refused = "can't find custom var" in reply.lower()
+                self.step("5.6", "`%s` is refused - %s - and nothing changed" % (line, why),
+                          ok=refused and back == after,
+                          sent=[line, "sensor get power.low_mv"],
+                          saw="%s\n(`power.low_mv` is still %s)" % (reply or "(nothing)", back),
+                          expected="can't find custom var, and power.low_mv still %s" % after,
+                          blanks={"section 5 the refusal of %d" % mv: reply or "(nothing)"})
+
+            self.person("5.7")
+            self.skip("5.8", "`bench walk 1` reads the same two pages at the same console - its "
+                             "line 1.1 holds `10 vars`, the five keys of each page and the cut "
+                             "digit of `... next:5` - and the `cli` half of this line is the "
+                             "link's, which this tool does not speak",
+                      what="upstream's paging of the ten keys")
+
+            # 5.9 - the lab supply's, but the three `get`s of the line are free.
+            pwr = {}
+            for key in ("pwrmgt.bootmv", "pwrmgt.support", "pwrmgt.bootreason"):
+                pwr[key] = self._value(self.ask(repeater, "get %s" % key))
+            self.person("5.9",
+                        saw="\n".join("get %s -> %s" % (key, pwr[key]) for key in sorted(pwr)),
+                        blanks={"section 5 get pwrmgt.bootmv": pwr["pwrmgt.bootmv"],
+                                "section 5 get pwrmgt.support": pwr["pwrmgt.support"],
+                                "section 5 get pwrmgt.bootreason": pwr["pwrmgt.bootreason"]})
+
+            # And back where they were found, which is this walk's last step.
+            put = self._put_thresholds_back(repeater, found_low, found_crit)
+            self.step("5.5", "`power.low_mv` and `power.crit_mv` are back at the values this "
+                             "walk found", ok=put["ok"], sent=put["sent"], saw=put["saw"],
+                      expected="power.low_mv %s, power.crit_mv %s" % (found_low, found_crit),
+                      blanks={"section 5 the thresholds this walk found, and left":
+                              "power.low_mv %s, power.crit_mv %s" % (found_low, found_crit)},
+                      note=None if put["ok"] else
+                      "THE THRESHOLDS ARE NOT WHAT THIS WALK FOUND: put them back by hand "
+                      "(`sensor set power.low_mv %s`, `sensor set power.crit_mv %s`)"
+                      % (found_low, found_crit))
+        finally:
+            port.close()
+
+    def _put_thresholds_back(self, repeater, low, crit):
+        """Both thresholds as they were found. A pair is refused as a pair
+        (`thresholdsAcceptable`, src/common/power/BatteryWatch.cpp), so the order can matter:
+        whichever order leaves both values where they were found is kept, and a walk that cannot
+        put them back says so in capitals."""
+        sent, saw = [], []
+        orders = ((("power.low_mv", low), ("power.crit_mv", crit)),
+                  (("power.crit_mv", crit), ("power.low_mv", low)))
+        for order in orders:
+            for key, value in order:
+                line = "sensor set %s %s" % (key, value)
+                reply = self.ask(repeater, line)
+                sent.append(line)
+                saw.append("%s -> %s" % (line, reply or "(nothing)"))
+            now_low = self._value(self.ask(repeater, "sensor get power.low_mv"))
+            now_crit = self._value(self.ask(repeater, "sensor get power.crit_mv"))
+            saw.append("power.low_mv %s, power.crit_mv %s" % (now_low, now_crit))
+            if (now_low, now_crit) == (low, crit):
+                return {"ok": True, "sent": sent, "saw": "\n".join(saw)}
+        return {"ok": False, "sent": sent, "saw": "\n".join(saw)}
+
+    def _reset(self, app, line):
+        """Upstream's own `reboot` or `clkreboot` at the console, and the application's port back.
+
+        The board takes its USB device down with the reset (console.send_reset), so the handle
+        dies rather than falling quiet, and the port is not back before about 1.4 s (p3.4-02)."""
+        port, repeater = self._open_repeater(app)
+        try:
+            repeater.send_reset(line)
+        finally:
+            port.close()
+        self.ports.sleep(self.timeouts.settle_s)
+        again = self.ports.wait_for(
+            lambda info: info.is_application and same_serial(info.serial_number,
+                                                             self.config.serial),
+            self.timeouts.application_port_s)
+        if again is None:
+            raise cfg.Refused("the board did not come back after `%s`: section %s cannot go on"
+                              % (line, self.section.number))
+        return again
 
     # -- section 8 -----------------------------------------------------------
 
