@@ -10,10 +10,14 @@ that each step can be refused, logged and faked:
      (libraries/Adafruit_TinyUSB_Arduino/src/arduino/Adafruit_USBD_CDC.cpp, tud_cdc_line_state_cb,
      at the core's pinned commit d541301; cores/nRF5/wiring.c, enterSerialDfu). A board found
      already in its bootloader skips this step;
-  2. wait for the bootloader's port - the same serial number, product id 0x0029 - because on
-     Windows it is not always the same COM number as the application's;
+  2. wait for the bootloader's port - the same serial number, product id 0x0029 or 0x002A
+     (boards/rak4631.json; the touch's serial-only DFU is the second of them, which is what the
+     first board on this bench came up as, p3.4-02) - because on Windows it is not always the
+     same COM number as the application's;
   3. `adafruit-nrfutil dfu serial -p <that port> -b 115200 --singlebank -pkg <image>`, the
-     platform's own flags, run as a subprocess of the copy PlatformIO bundles
+     platform's own flags, run as a subprocess of the copy PlatformIO bundles - and run once more
+     when it failed and the board is still in a bootloader, which is what the first board on this
+     bench needed every time the touch came from the scanner (p3.4-02)
      (packages/tool-adafruit-nrfutil, version 1.503.0 = adafruit-nrfutil 0.5.3.post16 - pinned by
      the platform, platformio/nordicnrf52@11.0.0 in platformio.ini). Its own `--touch` is not
      used: step 1 is it, with the re-enumeration handled here;
@@ -26,13 +30,14 @@ directory, and a copy under out/bench/ beside the rest of the evidence).
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 from config import NoBench
 from console import RepeaterConsole, ScannerConsole
-from ports import same_serial
+from ports import RAK_APP_PIDS, RAK_BOOT_PIDS, same_serial
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -40,6 +45,11 @@ REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 NRFUTIL_PACKAGE = "tool-adafruit-nrfutil"
 NRFUTIL_SCRIPT = "adafruit-nrfutil.py"
 NRFUTIL_BAUD = "115200"
+# adafruit-nrfutil 0.5.3.post16 prints its traceback and **exits 0** when the DFU failed (the
+# `serial` command of nordicsemi/__main__.py catches the exception), so the exit code is not the
+# answer: this line of its output is. The first RAK4630 on this bench showed it - a write the
+# device did not recognise, exit 0, and an application that never came back (p3.4-02).
+NRFUTIL_DONE = "Device programmed."
 
 
 class FlashError(Exception):
@@ -54,9 +64,15 @@ DOUBLE_TAP = ("If the board shows no port at all now: double-tap the reset butto
 
 class Timeouts(object):
     def __init__(self, bootloader_port_s=15.0, application_port_s=40.0, banner_s=6.0,
-                 nrfutil_s=240.0, settle_s=0.5):
+                 nrfutil_s=240.0, settle_s=0.5, open_s=10.0, dfu_settle_s=2.0):
         self.bootloader_port_s = bootloader_port_s
         self.application_port_s = application_port_s
+        # A port that has just enumerated is not openable the instant Windows lists it
+        # (Ports.open_ready, p3.4-02): how long an open of one is retried for.
+        self.open_s = open_s
+        # And the bootloader's port, once it can be opened, is given this long before nrfutil is
+        # handed it (p3.4-02: a write that the device did not recognise, nothing written).
+        self.dfu_settle_s = dfu_settle_s
         self.banner_s = banner_s
         self.nrfutil_s = nrfutil_s
         self.settle_s = settle_s
@@ -101,6 +117,24 @@ class FlashOutcome(object):
         self.board_says = {}
 
 
+def _nrfutil(runner, log, python, nrfutil, boot, image, timeouts):
+    """One run of adafruit-nrfutil against the bootloader's port: what went wrong, or None.
+
+    Done is its own `Device programmed.` and not its exit code (NRFUTIL_DONE)."""
+    argv = nrfutil_argv(python, nrfutil, boot.device, image.path)
+    log("3. %s" % " ".join(os.path.basename(a) if i < 2 else a for i, a in enumerate(argv)))
+    code, output = runner.run(argv, timeout_s=timeouts.nrfutil_s)
+    for line in (output or "").splitlines():
+        if line.strip():
+            log("   nrfutil: %s" % line.rstrip())
+    if code != 0:
+        return "adafruit-nrfutil exited %d" % code
+    if NRFUTIL_DONE not in (output or ""):
+        return ("adafruit-nrfutil exited 0 and never said %r, so nothing was written"
+                % NRFUTIL_DONE)
+    return None
+
+
 def flash_image(image, config, ports, runner, log, nrfutil, python=None, timeouts=None):
     """Steps 1 to 4 over an Image that passed every guard. Raises FlashError or NoBench."""
     timeouts = timeouts or Timeouts()
@@ -116,46 +150,78 @@ def flash_image(image, config, ports, runner, log, nrfutil, python=None, timeout
     touched = False
     if boot is None:
         log("1. the 1200-baud touch on %s" % app.device)
-        port = ports.open(app.device, 1200)
+        port = ports.open_ready(app.device, 1200, timeouts.open_s)
         ports.sleep(0.1)
         port.close()
         touched = True
-        log("2. waiting up to %.0f s for the bootloader's port (serial %s, pid 0x%04X)"
-            % (timeouts.bootloader_port_s, config.bootloader_serial, 0x0029))
+        log("2. waiting up to %.0f s for the bootloader's port (serial %s, pid %s)"
+            % (timeouts.bootloader_port_s, config.bootloader_serial,
+               " or ".join("0x%04X" % pid for pid in RAK_BOOT_PIDS)))
         boot = ports.wait_for(lambda i: i.is_bootloader and same_serial(i.serial_number, config.bootloader_serial),
                               timeouts.bootloader_port_s)
         if boot is None:
             raise FlashError("the bootloader's port did not appear within %.0f s of the touch. Nothing "
                              "was written. %s" % (timeouts.bootloader_port_s, DOUBLE_TAP))
-        ports.sleep(timeouts.settle_s)
+        # The port is listed before the bootloader's CDC endpoint will take bytes: nrfutil's first
+        # write failed on this bench with `PermissionError(13) ... ERROR_BAD_COMMAND` and nothing
+        # was written (p3.4-02, the restore at the end of the first walk of section 9). Opening the
+        # port here and letting go of it again is the proof that it is there to be written to, and
+        # the wait after it is the one PlatformIO's own uploader takes before nrfutil.
+        ports.open_ready(boot.device, int(NRFUTIL_BAUD), timeouts.open_s).close()
+        ports.sleep(timeouts.dfu_settle_s)
     else:
         log("1-2. the board is already in its bootloader on %s (no touch needed)" % boot.device)
 
-    argv = nrfutil_argv(python, nrfutil, boot.device, image.path)
-    log("3. %s" % " ".join(os.path.basename(a) if i < 2 else a for i, a in enumerate(argv)))
-    code, output = runner.run(argv, timeout_s=timeouts.nrfutil_s)
-    for line in (output or "").splitlines():
-        if line.strip():
-            log("   nrfutil: %s" % line.rstrip())
-    if code != 0:
-        raise FlashError("adafruit-nrfutil exited %d: the image was not activated. The bootloader is "
-                         "untouched and the board should still be in it - `bench flash` again. %s"
-                         % (code, DOUBLE_TAP))
+    wrong = _nrfutil(runner, log, python, nrfutil, boot, image, timeouts)
+    if wrong:
+        # The board is still in a bootloader after a DFU that did not take, and the next attempt
+        # is what takes: the first RAK4630 on this bench answered nrfutil's first write with
+        # `PermissionError(13) ... ERROR_BAD_COMMAND` every time the touch came from the scanner,
+        # and the same command run again from the bootloader it was left in worked (p3.4-02,
+        # out/bench/flash.log). So one retry, inside the same lock, against the bootloader's port
+        # as it is now - and no second one.
+        # The port the DFU died on may be a port the board has already left: the scanner's
+        # watchdog (8 s, SLEEP_Run, and a soft reset does not stop the nRF52840's WDT) bites while
+        # the bootloader is taking the image, and the board comes back as the bootloader it is
+        # left in with no application to run (p3.4-02). So the failed port is let go of first.
+        went = ports.wait_until_gone(lambda i: i.device == boot.device,
+                                     timeouts.bootloader_port_s)
+        again = ports.wait_for(lambda i: i.is_bootloader and same_serial(i.serial_number,
+                                                                        config.bootloader_serial),
+                               timeouts.bootloader_port_s)
+        if again is None:
+            raise FlashError("%s, and the board is in no bootloader this tool can see%s: the image "
+                             "was not activated. %s"
+                             % (wrong, " (the port it failed on is gone)" if went else "",
+                                DOUBLE_TAP))
+        log("3b. %s; %s on %s - once more"
+            % (wrong, "the board reset under the DFU and is in its bootloader" if went else
+               "the board is still in its bootloader", again.device))
+        ports.open_ready(again.device, int(NRFUTIL_BAUD), timeouts.open_s).close()
+        ports.sleep(timeouts.dfu_settle_s)
+        boot = again
+        wrong = _nrfutil(runner, log, python, nrfutil, boot, image, timeouts)
+        if wrong:
+            raise FlashError("%s - twice: the image was not activated. The bootloader is untouched "
+                             "and the board should still be in it - `bench flash` again. %s"
+                             % (wrong, DOUBLE_TAP))
 
-    log("4. waiting up to %.0f s for the application's port (serial %s, pid 0x%04X)"
-        % (timeouts.application_port_s, config.serial, 0x8029))
+    log("4. waiting up to %.0f s for the application's port (serial %s, pid %s)"
+        % (timeouts.application_port_s, config.serial,
+           " or ".join("0x%04X" % pid for pid in RAK_APP_PIDS)))
     ports.sleep(timeouts.settle_s)
     app = ports.wait_for(lambda i: i.is_application and same_serial(i.serial_number, config.serial),
                          timeouts.application_port_s)
     if app is None:
         raise FlashError("the application did not enumerate within %.0f s of the flash. %s"
                          % (timeouts.application_port_s, DOUBLE_TAP))
-    return FlashOutcome(boot.device, app, touched, output)
+    return FlashOutcome(boot.device, app, touched, NRFUTIL_DONE)
 
 
 # ----------------------------------------------------------------------------- what the board says
 
 _FW_VERSION_PREFIX = "> twinoak-"
+_KEY = re.compile(r"\b([0-9A-Fa-f]{64})\b")
 
 
 def parse_fw_version(reply_text):
@@ -172,7 +238,7 @@ def parse_fw_version(reply_text):
 def read_repeater(ports, app_info, log, disposable, timeouts, expect_banner=True, reboot_for_id=True):
     """Open a repeater's console and read what it is: the banner's Repeater ID (if it can be caught)
     and `sensor get fw.version`. Returns {role, version, repeater_id, name, how}."""
-    port = ports.open(app_info.device, 115200)
+    port = ports.open_ready(app_info.device, 115200, timeouts.open_s)
     try:
         console = RepeaterConsole(port, log=log, disposable=disposable, now=ports.now, sleep=ports.sleep)
         banner = {"repeater_id": None, "first_boot": []}
@@ -189,13 +255,24 @@ def read_repeater(ports, app_info, log, disposable, timeouts, expect_banner=True
                 name = got.text[2:].strip()
         found = {"role": role, "version": version, "repeater_id": banner["repeater_id"],
                  "first_boot": banner["first_boot"], "name": name, "how": "console"}
+        if role is not None and found["repeater_id"] is None:
+            # The banner is printed a second after boot and only while a host holds the port
+            # (Adafruit_USBD_CDC::write drops bytes while tud_cdc_connected() is false), so on a
+            # board that has been up it cannot be caught at all: the first RAK4630 on this bench
+            # gave it neither on the first open nor after a `reboot` (p3.4-02). Upstream's own
+            # console prints the same 32 bytes - `get public.key` is
+            # mesh::Utils::toHex(getSelfId().pub_key) at the pin d9296435
+            # (src/helpers/CommonCLI.cpp:902), and `Repeater ID:` is that key - so it is asked
+            # first and the reset is only the fallback.
+            got = console.send("get public.key")
+            key = _KEY.search(got.text or "")
+            if key:
+                found["repeater_id"] = key.group(1).upper()
+                found["how"] = "console (get public.key)"
+                log("the boot banner was not caught; `get public.key` is the same key")
         if role is not None and found["repeater_id"] is None and reboot_for_id:
-            # The banner is printed one second after boot and only while a host holds the port
-            # (Adafruit_USBD_CDC::write drops bytes while tud_cdc_connected() is false), so it can
-            # be missed. One `reboot` - upstream's own, the clock file written first - and the port
-            # is reopened as soon as it is back.
             log("the boot banner was not caught; `reboot` once to read Repeater ID")
-            console.send("reboot", timeout_s=0.5)
+            console.send_reset("reboot")
             port.close()
             port = None
             ports.sleep(timeouts.settle_s)
@@ -203,7 +280,7 @@ def read_repeater(ports, app_info, log, disposable, timeouts, expect_banner=True
                                    timeouts.application_port_s)
             if again is None:
                 raise FlashError("the board did not come back after `reboot`. %s" % DOUBLE_TAP)
-            port = ports.open(again.device, 115200)
+            port = ports.open_ready(again.device, 115200, timeouts.open_s)
             console = RepeaterConsole(port, log=log, disposable=disposable, now=ports.now, sleep=ports.sleep)
             banner = console.read_banner(timeouts.banner_s)
             found["repeater_id"] = banner["repeater_id"]
@@ -216,7 +293,7 @@ def read_repeater(ports, app_info, log, disposable, timeouts, expect_banner=True
 
 def read_scanner(ports, app_info, log, disposable, timeouts, expect_banner=True):
     """Open a scanner's console: the `boot` line if it can be caught, then `info`."""
-    port = ports.open(app_info.device, 115200)
+    port = ports.open_ready(app_info.device, 115200, timeouts.open_s)
     try:
         console = ScannerConsole(port, log=log, disposable=disposable, now=ports.now, sleep=ports.sleep)
         boot = console.first("boot", timeouts.banner_s) if expect_banner else None

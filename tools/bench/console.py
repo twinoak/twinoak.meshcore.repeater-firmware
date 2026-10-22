@@ -202,6 +202,23 @@ class RepeaterConsole(object):
             self.log("  -> %s" % one)
         return Reply(text, reply, False, redact(raw))
 
+    def send_reset(self, line, timeout_s=0.5):
+        """A line that takes the board away under the port: upstream's own `reboot`.
+
+        The nRF52840 resets as the line is taken and the USB device goes with it, so the open
+        handle dies: on Windows the next read of it raises `SerialException ... OSError(22, ...,
+        433)` rather than timing out (the first RAK4630 on this bench, p3.4-02; the port is gone
+        0.2 s after the line and back 1.4 s later). The line went out and the board is resetting,
+        which is what the line means - so the death of the port is the expected answer. The caller
+        waits for the application's port to come back."""
+        try:
+            return self.send(line, timeout_s=timeout_s)
+        except (IOError, OSError) as exc:
+            self.log("> %s" % line)
+            self.log("  (the port went away with the reset, which is the reset: %s)"
+                     % str(exc).split(".")[0])
+            return Reply(line, "", True, "")
+
     def read_banner(self, timeout_s=4.0):
         """What a repeater prints when it boots: `Repeater ID: <64 hex>` and any `First boot:`
         lines. Returns a dict with repeater_id (or None), first_boot (a list of lines) and raw."""

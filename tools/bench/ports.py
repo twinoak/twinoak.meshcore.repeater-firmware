@@ -1,12 +1,13 @@
 """The serial layer, behind an interface with a fake.
 
-Everything that can open a port goes through a Ports object: list(), open(). The real one is
+Everything that can open a port goes through a Ports object: list(), open(), open_ready(). The real one is
 pyserial; the fake (tools/bench/fakes.py) records every open, so a test can prove a refusal
 opened nothing (tools/bench/test_bench.py). Nothing else in tools/bench/ imports pyserial.
 
 A board is found by its USB serial number and told apart from its own bootloader by the USB
-product id: boards/rak4631.json (vendored from the pin) lists 0x239A:0x8029 for the application
-and 0x239A:0x0029 for the bootloader, and the Adafruit core's TinyUSB_Port_GetSerialNumber
+product id: boards/rak4631.json (vendored from the pin) lists 0x239A:0x8029 and 0x239A:0x802A for
+the application and 0x239A:0x0029 and 0x239A:0x002A for the bootloader (a double-tap and the
+serial-only DFU of the touch), and the Adafruit core's TinyUSB_Port_GetSerialNumber
 (libraries/Adafruit_TinyUSB_Arduino/src/arduino/ports/nrf/Adafruit_TinyUSB_nrf.cpp:96-100 at the
 core's pinned commit d541301) builds the serial string from the nRF52840's FICR DEVICEID words.
 """
@@ -14,8 +15,15 @@ core's pinned commit d541301) builds the serial string from the nRF52840's FICR 
 import time
 
 RAK_VID = 0x239A
-RAK_APP_PID = 0x8029
-RAK_BOOT_PID = 0x0029
+# boards/rak4631.json's `hwids`, vendored from the platform at the pin: the application (0x8029,
+# and 0x802A for a second USB configuration of it) and the bootloader - 0x0029 after a double-tap,
+# where it offers its drive, and **0x002A** when the application reset into the serial-only DFU
+# that the 1200-baud touch asks for. The first RAK4630 on this bench came up at 0x0029 after a
+# double-tap and at 0x002A after the touch (p3.4-02), which is why both are here.
+RAK_APP_PIDS = (0x8029, 0x802A)
+RAK_BOOT_PIDS = (0x0029, 0x002A)
+RAK_APP_PID = RAK_APP_PIDS[0]
+RAK_BOOT_PID = RAK_BOOT_PIDS[0]
 
 
 class PortInfo(object):
@@ -33,11 +41,11 @@ class PortInfo(object):
 
     @property
     def is_bootloader(self):
-        return self.vid == RAK_VID and self.pid == RAK_BOOT_PID
+        return self.vid == RAK_VID and self.pid in RAK_BOOT_PIDS
 
     @property
     def is_application(self):
-        return self.vid == RAK_VID and self.pid == RAK_APP_PID
+        return self.vid == RAK_VID and self.pid in RAK_APP_PIDS
 
 
 def same_serial(a, b):
@@ -53,6 +61,23 @@ class Ports(object):
 
     def open(self, device, baud):
         raise NotImplementedError
+
+    def open_ready(self, device, baud, timeout_s=10.0, poll_s=0.25):
+        """open(), retried until the port can be opened or the deadline passes.
+
+        Windows lists a CDC port a moment before it can be opened: the first flash of the first
+        RAK4630 on this bench had the application enumerate as COM30 and the open of it fail with
+        `FileNotFoundError(2)` (p3.4-02, out/bench/flash.log). Every console open of a port that
+        has just come back from a flash or a reset goes through here; the last error is raised, so
+        a port that never opens still says what it said."""
+        deadline = self.now() + timeout_s
+        while True:
+            try:
+                return self.open(device, baud)
+            except (IOError, OSError):
+                if self.now() >= deadline:
+                    raise
+                self.sleep(poll_s)
 
     def sleep(self, seconds):
         time.sleep(seconds)
@@ -78,6 +103,20 @@ class Ports(object):
             if same_serial(info.serial_number, serial):
                 return info
         return None
+
+    def wait_until_gone(self, predicate, timeout_s, poll_s=0.2):
+        """True once no listed port satisfies predicate, False if the timeout came first.
+
+        A board that reset under a DFU takes its port with it, and the port the DFU failed on is
+        listed for a moment after: `flash_image` waits for it to go before it tries again
+        (p3.4-02, the scanner's watchdog)."""
+        deadline = self.now() + timeout_s
+        while True:
+            if not any(predicate(info) for info in self.list()):
+                return True
+            if self.now() >= deadline:
+                return False
+            self.sleep(poll_s)
 
     def wait_for(self, predicate, timeout_s, poll_s=0.1):
         """The first PortInfo that satisfies predicate within timeout_s, else None."""

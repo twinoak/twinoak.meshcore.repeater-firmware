@@ -48,7 +48,7 @@ import time
 import config as cfg
 import console as consolemod
 from console import RepeaterConsole, ScannerConsole, console_guard
-from flash import Timeouts, read_repeater
+from flash import FlashError, Timeouts, read_repeater
 from lock import BoardLock
 from ports import same_serial
 from runs import (RestoreNotPossible, choose_restore_image, git_commit, load_run, own_image_of,
@@ -335,6 +335,57 @@ def band_expectations(repo=REPO, band="868"):
     }
 
 
+def advert_name(repo=REPO):
+    """The node name a fresh unit carries: `-D ADVERT_NAME` of platformio.ini, which is this
+    build's and not upstream's.
+
+    Upstream's own default is `repeater` (examples/simple_repeater/MyMesh.cpp:22-23 at the pin
+    d9296435, `StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, ...)` at :894); this repository
+    builds with `RAK4631 Repeater`, which is what the first real board answered to `get name`
+    (p3.4-02). Read from the file, so the walk cannot drift from the build; upstream's default
+    when there is no such line."""
+    try:
+        with open(os.path.join(repo, "platformio.ini"), "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except (IOError, OSError):
+        return "repeater"
+    found = re.findall(r"^\s*-D\s+ADVERT_NAME='\"(.*)\"'\s*$", text, re.M)
+    return found[-1] if found else "repeater"
+
+
+def same_number(saw, expected, tol=0.001):
+    """A number read back, as a number.
+
+    Upstream keeps a coordinate as a `float` and prints every digit of it (`StrHelper::ftoa`), so
+    `set lat 55.3250` reads back as `55.3250007` on a real board (p3.4-02) - the same place to
+    11 cm."""
+    try:
+        return abs(float((saw or "").strip()) - float(str(expected).strip())) <= tol
+    except ValueError:
+        return False
+
+
+def same_radio(saw, expected):
+    """`get radio`'s four fields against `[band_868]`'s, the frequency as a number.
+
+    Upstream keeps the frequency as a `float` and prints every digit it has
+    (`StrHelper::ftoa(_prefs->freq)`, src/helpers/CommonCLI.cpp at the pin d9296435), so the first
+    real board answered `869.6179809,62.5,8,8` for the `869.618` of the band - the same frequency
+    to 19 Hz, which is what a float32 can hold at 869 MHz (p3.4-02). The frequency and the
+    bandwidth are compared to 1 kHz, the spreading factor and the coding rate exactly."""
+    got = [part.strip() for part in (saw or "").split(",")]
+    want = [part.strip() for part in (expected or "").split(",")]
+    if len(got) != 4 or len(want) != 4:
+        return False
+    try:
+        for i in (0, 1):
+            if abs(float(got[i]) - float(want[i])) > 0.001:
+                return False
+        return [int(got[2]), int(got[3])] == [int(want[2]), int(want[3])]
+    except ValueError:
+        return False
+
+
 _FW_VERSION = re.compile(r"^twinoak-(\S+)\s+(\S+)\s+on\s+MeshCore\s+(\S+)\s+\(([0-9a-f]{8})\)$")
 
 
@@ -481,7 +532,7 @@ class Walker(object):
     # ---- a repeater's console
 
     def _open_repeater(self, app):
-        port = self.ports.open(app.device, 115200)
+        port = self.ports.open_ready(app.device, 115200, self.timeouts.open_s)
         return port, RepeaterConsole(port, log=(lambda line: None),
                                      disposable=self.config.disposable, now=self.ports.now,
                                      sleep=self.ports.sleep)
@@ -497,11 +548,14 @@ class Walker(object):
         body = (text or "").strip()
         return body[1:].strip() if body.startswith(">") else body
 
-    def check_line(self, key, repeater, line, expected, what=None, blank=None, note=None):
-        """Send one line and hold its reply to `expected`."""
+    def check_line(self, key, repeater, line, expected, what=None, blank=None, note=None,
+                   same=None):
+        """Send one line and hold its reply to `expected` - by string, or by `same(saw, expected)`
+        where the board's own way of printing a value is not the page's (`same_radio`)."""
         saw = self.ask(repeater, line)
         value = self._value(saw)
-        return self.step(key, what or "`%s`" % line, ok=value == expected, sent=[line], saw=saw,
+        ok = same(value, expected) if same else value == expected
+        return self.step(key, what or "`%s`" % line, ok=ok, sent=[line], saw=saw,
                          expected=expected, blanks={blank: value} if blank else None, note=note)
 
     def _app_port(self, what):
@@ -523,14 +577,17 @@ class Walker(object):
         app = self._app_port("walk section 1 with")
         self.result.note("The application's port is %s (USB serial number %s)."
                          % (app.device, app.serial_number))
-        self.result.note("The banner is read as `bench record` reads it: if the board has been up "
-                         "and its `Repeater ID:` line is long gone, upstream's own `reboot` is "
-                         "sent once and the port reopened. That is the only reset this walk "
-                         "performs, and the clock keeper's file is written on the way down.")
+        self.result.note("The identity is read as `bench record` reads it: the banner's "
+                         "`Repeater ID:` when it can be caught, else upstream's own "
+                         "`get public.key`, which is the same 32 bytes "
+                         "(src/helpers/CommonCLI.cpp:902 at the pin d9296435). On a board that "
+                         "has been up the banner is long gone - it is printed a second after boot "
+                         "and only while a host holds the port - and only a board whose console "
+                         "does not answer that line is reset once for it (p3.4-02).")
 
-        # The banner is a boot line and not a command, and it is read as `bench record` reads it:
-        # upstream's own `reboot` once when the board has been up and the banner is long gone
-        # (p3.3-02's report, *Decisions* 4 - the clock file is written on the way down).
+        # The banner is a boot line and not a command: `get public.key` is the same key and
+        # needs no reset (flash.read_repeater; p3.4-02 read it off the first real board), and
+        # upstream's own `reboot` is the fallback for a console that does not answer it.
         found = read_repeater(self.ports, app, lambda line: None, self.config.disposable,
                               self.timeouts, expect_banner=False, reboot_for_id=True)
         rid = found.get("repeater_id")
@@ -566,8 +623,10 @@ class Walker(object):
             self.check_line("1.1", repeater, "board", PAGE_BOARD, blank="section 1 board")
             if self.expect:
                 self.check_line("1.1", repeater, "get radio", self.expect["radio"],
-                                blank="section 1 get radio",
-                                note="[band_%s] of platformio.ini is where that comes from"
+                                blank="section 1 get radio", same=same_radio,
+                                note="[band_%s] of platformio.ini is where that comes from; the "
+                                     "frequency is held as a number, because upstream prints "
+                                     "every digit of the float it keeps (p3.4-02)"
                                      % self.expect["band"])
             else:
                 self.skip("1.1", "platformio.ini's [band_868] could not be read, so there is "
@@ -746,21 +805,36 @@ class Walker(object):
         reset = boot.get("reset", info.get("reset"))
         radio = boot.get("radio_ok", info.get("radio_ok"))
         radio_ok = radio in (True, 1, "1", "true")
+        # The `boot` line is printed within a second of the reset and only while a host holds
+        # the port (Adafruit_USBD_CDC::write drops bytes while tud_cdc_connected() is false), so a
+        # host that opens the port when it enumerates cannot catch it: the first real board gave
+        # none (p3.4-02). `info` answers the same five fields and `radio_ok` with them, which is
+        # what this line is about.
+        fields = boot or info
+        notes = [] if radio_ok else [
+            "radio_ok is not true: the power-enable pin (SX126X_POWER_EN, P1.05) is the first "
+            "thing to look at - this port drives it high where NoiseScope never did "
+            "(tasks/phase-3/reports/02.md)"]
+        if not boot:
+            notes.append("the `boot` line was not caught - it is printed within a second of the "
+                         "reset and only while a host holds the port - so `info`'s own `fw`, "
+                         "`role`, `board`, `ver`, `reset` and `radio_ok` are what is held here "
+                         "(p3.4-02)")
         self.step("9.1", "the `boot` line: fw `noisescope`, role `scanner`, board `%s`, and "
-                         "`radio_ok`" % self.config.board,
-                  ok=(boot.get("fw") == "noisescope" and boot.get("role") == "scanner"
-                      and boot.get("board") == self.config.board and radio_ok),
-                  saw=json.dumps(boot, sort_keys=True) if boot else "(no `boot` line was caught)",
+                         "`radio_ok` (or `info`'s, when the line was not caught)"
+                         % self.config.board,
+                  ok=(fields.get("fw") == "noisescope" and fields.get("role") == "scanner"
+                      and fields.get("board") == self.config.board and radio_ok),
+                  saw=json.dumps(fields, sort_keys=True) if fields else
+                      "(neither a `boot` line nor an `info` line)",
                   expected="fw noisescope, role scanner, board %s, radio_ok true"
                            % self.config.board,
                   blanks={"section 9 ver": ver, "section 9 reset": reset,
                           "section 9 radio_ok": radio},
-                  note=None if radio_ok else
-                  "radio_ok is not true: the power-enable pin (SX126X_POWER_EN, P1.05) is the "
-                  "first thing to look at - this port drives it high where NoiseScope never did "
-                  "(tasks/phase-3/reports/02.md)")
+                  note="; ".join(notes) or None)
 
-        port = self.ports.open(self._app_port("talk to the scanner").device, 115200)
+        port = self.ports.open_ready(self._app_port("talk to the scanner").device, 115200,
+                                     self.timeouts.open_s)
         try:
             scanner = ScannerConsole(port, log=(lambda line: None),
                                      disposable=self.config.disposable, now=self.ports.now,
@@ -915,6 +989,11 @@ class Walker(object):
         more, raw = scanner.collect_raw(self.baseline_s)
         scanner.send("stop", timeout_s=3.0)
         frames = batch.of_type("scope") + more.of_type("scope")
+        # A `scope` that stopped itself says why on the same console, and the reason belongs in
+        # the result file rather than only in the NDJSON: the first real board answered
+        # `scope setup failed (-707) at 212.6880` and sent no frame at all (p3.4-02).
+        errors = [obj.get("msg") for obj in batch.objects + more.objects
+                  if obj.get("t") == "err" and obj.get("msg")]
         with open(ndjson, "w", encoding="utf-8") as fh:
             for obj in batch.objects:
                 fh.write(json.dumps(obj, sort_keys=True) + "\n")
@@ -933,9 +1012,10 @@ class Walker(object):
         return self.step("9.9", "the baseline: `scope 150 960 2048` on the dummy load, kept",
                          ok=bool(ack and ack.get("ok")) and bool(frames),
                          sent=["scope 150 960 2048"],
-                         saw="%s\n%d frame(s) in %.0f s -> %s"
+                         saw="%s\n%d frame(s) in %.0f s -> %s%s"
                              % (frame_summary(ack), len(frames), self.baseline_s,
-                                _rel(ndjson, self.repo)),
+                                _rel(ndjson, self.repo),
+                                "".join("\nerr: %s" % self.safe(msg) for msg in errors)),
                          blanks={"section 9 baseline": "%d frames, %s"
                                                        % (len(frames), stem + ".ndjson"),
                                  "section 9 peaks seen on the dummy load":
@@ -978,16 +1058,34 @@ class Walker(object):
 
         banner = self._reboot_and_read(app)
         rid = banner.get("repeater_id")
-        self.step("10.1", "the console prints `Repeater ID:` with a new key",
+        where = banner.get("id_from")
+        self.step("10.1", "the node's key is a new one after the erase",
                   ok=bool(rid) and rid != (was or "").upper(),
-                  saw="Repeater ID: %s" % (rid or "(not caught)"),
+                  saw="%s %s" % ("`get public.key`" if where else "Repeater ID:",
+                                 rid or "(not caught)"),
                   expected="64 hex digits, and not the ones before the erase",
-                  blanks={"section 10 the new Repeater ID": rid})
+                  blanks={"section 10 the new Repeater ID": rid},
+                  note="the banner's `Repeater ID:` line was not caught, so the key is "
+                       "upstream's own `get public.key` - the same 32 bytes (p3.4-02)"
+                       if where else None)
         first = banner.get("first_boot") or []
-        self.step("10.1", "both `First boot:` lines are printed", ok=len(first) == 2,
-                  saw="\n".join(first) or "(none)",
-                  expected="the random admin password, and the profile's 2 of 2 lines",
-                  blanks={"section 10 First boot": "%d line(s)" % len(first)})
+        if first:
+            self.step("10.1", "both `First boot:` lines are printed", ok=len(first) == 2,
+                      saw="\n".join(first),
+                      expected="the random admin password, and the profile's 2 of 2 lines",
+                      blanks={"section 10 First boot": "%d line(s)" % len(first)})
+        else:
+            # What the first real board showed (p3.4-02): the boot lines go out before a host can
+            # hold the port, so no run of this tool can see them. What they left behind is the
+            # step above (a new key) and `firstboot.state` below.
+            self.person("10.1", note="the two `First boot:` lines are printed about a second "
+                                     "after the reset and only while a host holds the port; the "
+                                     "port is not back before 1.4 s, so a terminal already open "
+                                     "across a reset button is the only way to read them. What "
+                                     "they left behind is checked here: a new key, and "
+                                     "`firstboot.state` = done",
+                        saw="(the boot lines were gone before the port was back)",
+                        blanks={"section 10 First boot": "not readable by `tools/bench`"})
 
         port, repeater = self._open_repeater(app)
         try:
@@ -1000,10 +1098,13 @@ class Walker(object):
                                 note="the band's, from [band_%s]; upstream's own default is 50.0%%"
                                      % self.expect["band"])
                 self.check_line("10.1", repeater, "get radio", self.expect["radio"],
-                                blank="section 10 get radio")
+                                blank="section 10 get radio", same=same_radio)
             self.check_line("10.1", repeater, "get path.hash.mode", "1",
                             blank="section 10 path.hash.mode")
-            self.check_line("10.1", repeater, "get name", "repeater", blank="section 10 get name")
+            self.check_line("10.1", repeater, "get name", advert_name(self.repo),
+                        blank="section 10 get name",
+                        note="`-D ADVERT_NAME` of platformio.ini; upstream's own default is "
+                             "`repeater`")
             guest = self.ask(repeater, "get guest.password")
             self.step("10.1", "`get guest.password` is empty", ok=self._value(guest) == "",
                       sent=["get guest.password"], saw=guest or "(empty)", expected="(empty)",
@@ -1038,7 +1139,7 @@ class Walker(object):
         the clock keeper's file is written on the way down (docs/bench.md section 3)."""
         port, repeater = self._open_repeater(app)
         try:
-            repeater.send("reboot", timeout_s=0.5)
+            repeater.send_reset("reboot")
         finally:
             port.close()
         self.ports.sleep(self.timeouts.settle_s)
@@ -1049,7 +1150,17 @@ class Walker(object):
             raise cfg.Refused("the board did not come back after `reboot`: section 10 cannot go on")
         port, repeater = self._open_repeater(again)
         try:
-            return repeater.read_banner(self.timeouts.banner_s)
+            banner = repeater.read_banner(self.timeouts.banner_s)
+            if not banner.get("repeater_id"):
+                # The banner is printed about a second after the reset and only while a host
+                # holds the port, and the port is not back before 1.4 s: on a real board the
+                # lines are gone before anything can read them (p3.4-02). The key itself is
+                # still there - `get public.key`, upstream's own line for the same 32 bytes.
+                key = self._value(self.ask(repeater, "get public.key"))
+                if re.match(r"^[0-9A-Fa-f]{64}$", key or ""):
+                    banner["repeater_id"] = key.upper()
+                    banner["id_from"] = "get public.key"
+            return banner
         finally:
             port.close()
 
@@ -1106,9 +1217,13 @@ class Walker(object):
                       note=("these were not taken: %s" % ", ".join(bad)) if bad else
                            "the admin password was generated here, sent once and written down "
                            "nowhere: this is a bench unit (docs/provisioning.md section 5)")
-            for line, expected in (("get name", "bench-walk"), ("get lat", "55.3250"),
-                                   ("get owner.info", "a bench unit|tools/bench walk")):
-                self.check_line("10.4", repeater, line, expected, blank="section 10 %s" % line)
+            for line, expected, same in (("get name", "bench-walk", None),
+                                         ("get lat", "55.3250", same_number),
+                                         ("get owner.info", "a bench unit|tools/bench walk", None)):
+                self.check_line("10.4", repeater, line, expected, blank="section 10 %s" % line,
+                                same=same,
+                                note="upstream prints every digit of the float it keeps"
+                                     if same else None)
             scope = self.ask(repeater, "region default")
             self.step("10.4", "`region default` reads back", ok=bool(scope),
                       sent=["region default"], saw=scope,
@@ -1190,7 +1305,15 @@ class Walker(object):
         except RestoreNotPossible as exc:
             return self.step(key, what, ok=False, saw="RESTORE NOT POSSIBLE: %s" % exc)
         image = self.bench.inspect(path)
-        code = self.bench.restore_locked(run, image, how)
+        try:
+            code = self.bench.restore_locked(run, image, how)
+        except (FlashError, cfg.Refused) as exc:
+            # A restore that could not flash is a *differs* and not the end of the walk: the
+            # result file of everything before it is the evidence (p3.4-02, where a scanner's
+            # watchdog ended two restores and took the walk's result file with them).
+            return self.step(key, what, ok=False, sent=["bench restore"],
+                             saw="RESTORE FAILED: %s" % exc,
+                             blanks={"section %s the restore" % self.section.number: "failed"})
         said = self.bench.last_restore or {}
         ok = code == cfg.EXIT_OK
         checks = []

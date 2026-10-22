@@ -38,3 +38,36 @@ synthetic logs only.
   *Nothing yet*; 3.1 ran without it. Nothing in 3.1 depends on it, but the
   roles, the descriptor and the first-boot profile have had no second
   reading.
+
+## From a bench walk of section 9 (2026-10-22)
+
+- [ ] **[01] `docs/bench.md` 9.9 differs from the board** (a bench walk of 2026-10-22 at `9fb721b`). `scope 150 960 2048` on the dummy load, the NDJSON kept and the picture saved
+  the baseline: `scope 150 960 2048` on the dummy load, kept: saw `{"cmd": "scope", "msg": "n=2048 step=395.5078k...", "ok": true, "t": "ack"} / 0 frame(s) in 20 s -> out/bench/baseline-150-960-20261022-174804-9fb721b.ndjson / err: scope setup failed (-707) at 212.6880`, expected `None`.
+  The walk's result file under `out/bench/` has the transcript.
+
+  **What p3.4-02 measured around it**, with the scanner on the first real board (`rom`
+  `SX1261 V2D 2D02`, the dummy load on the antenna port, `bench console --scanner`): the span's
+  **segment count** is what decides it, not the frequency and not the rbw.
+
+  | sent | ack | what came back |
+  |---|---|---|
+  | `scope 863 870` | n=250 seg=1 rbw=39.0k | frames, `sps` up to 41.6 a second |
+  | `scope 150 200` | n=250 seg=2 rbw=234.3k | frames, `sps` 175 |
+  | `scope 200 250` | n=250 seg=2 rbw=234.3k | frames, `sps` 172 |
+  | `scope 240 300` | n=250 seg=2 rbw=312.0k | frames, `sps` 172 |
+  | `scope 150 213` | n=250 seg=2 rbw=312.0k | frames, `sps` 178 |
+  | `scope 150 250` | n=250 seg=4 rbw=467.0k | `err: scope setup failed (-707) at 200.6000` |
+  | `scope 150 250 500` | n=500 seg=4 rbw=234.3k | `err: scope setup failed (-707) at 200.1000` |
+  | `scope 150 960 1024` | n=1024 seg=26 rbw=467.0k | `err: scope setup failed (-707) at 213.6768` |
+  | `scope 150 960 2048` | n=2048 seg=26 rbw=467.0k | `err: scope setup failed (-707) at 212.6880` |
+  | `scope 300 400` | n=250 seg=4 rbw=467.0k | no frame and no `err` in 15 s |
+  | `scope 500 600` | n=250 seg=4 rbw=467.0k | no frame and no `err` in 15 s |
+
+  So: **one or two segments stream; four or more either fail at the third segment with
+  `RADIOLIB_ERR_SPI_CMD_FAILED` (-707, `TypeDef.h:440`) or go silent.** `-707` comes out of
+  `armSegment` (`src/roles/scanner/Radio.cpp:357-369`: `standby()`, `setFrequency(centre)`,
+  `calibrateImageRejection(lo, hi)`, `setSweep(...)`) and the walk cannot tell which of the four
+  calls returned it — the next session on this should log the call as well as the frequency. Two
+  of the page's own lines rest on this: *The baseline* (`scope 150 960 2048`, seg 26) and *The
+  site through the cavity filter* (`scope 791 960`, seg 6). `scope 863 870`, the line the fast
+  sweep exists for, is seg 1 and works.

@@ -54,6 +54,35 @@ SHA-256 in `out/bench/flash.log` and under the user's local application data,
 where the lock per board also lives (one user at a time). SWD is never used by
 this tool: the `[boards]` SWD lines of this page stay a person's.
 
+**The first board this page was walked on** (p3.4-02, 22 October 2026; a RAK4630 on the
+production adapter, its base written with a probe). Its USB serial number is the nRF52840's FICR
+device id and **every mode reports the same one**, so `bootloader_serial` was not needed:
+
+| what was running | USB id | serial number | COM, on that machine |
+|---|---|---|---|
+| the application (repeater or scanner) | `239A:8029` | `E926F6BEB407A412` | COM30 |
+| the bootloader, after a double-tap or a watchdog reset | `239A:0029` | `E926F6BEB407A412` | COM29 |
+| the bootloader, after the 1200-baud touch (serial-only DFU) | `239A:002A` | `E926F6BEB407A412` | COM31 |
+
+The third row is why `tools/bench` takes **both** bootloader product ids (`boards/rak4631.json`
+lists all four): the touch's own DFU mode is `0x002A`, and a tool that waited for `0x0029` alone
+waits for a port that is already there under the other id.
+
+**Two things a real board does that a fake cannot.** *The boot lines are a race.* `Repeater ID:`
+and the `First boot:` lines are printed about a second after a reset and only while a host holds
+the port (`Adafruit_USBD_CDC::write` drops bytes while `tud_cdc_connected()` is false), and the
+port is not back before 1.4 s: a run of the tool catches them sometimes and not others. So the
+tool reads the node's key with upstream's own **`get public.key`** (the same 32 bytes,
+`src/helpers/CommonCLI.cpp:902` at the pin) and resets nothing for it; §10 holds the first boot to
+what it left behind (a new key, `firstboot.state`) and the two lines themselves are a person's,
+with a terminal already open across the reset button. *Flashing away from the scanner takes two
+DFUs.* The scanner starts the nRF52840's watchdog (8 s, `src/roles/scanner/Wdt.h`) and a soft
+reset does not stop it, so it bites in the middle of the DFU that would replace the scanner; the
+tool waits for the port to go, finds the bootloader the board was left in and runs
+`adafruit-nrfutil` once more, which works (`tasks/phase-3/FOLLOWUPS.md` has the decision that is
+still open). `adafruit-nrfutil` **exits 0 even when its write failed**, so what the tool holds it
+to is its own `Device programmed.` line.
+
 ## 0b. What a session walks, and what stays yours
 
 `python tools/bench/bench.py walk <section>` (§0a, task `p3.3-03`) runs the
@@ -144,7 +173,7 @@ verified here*, as before the tool existed.
 
 ## 1. The repeater alone on USB
 
-- [ ] **p1-01** Flash the UF2 (double-tap reset on the adapter's USB-C; the
+- [x] **p1-01** Flash the UF2 (double-tap reset on the adapter's USB-C; the
   bootloader's drive appears) and open the console at 115200. It prints
   `Repeater ID: <64 hex digits>`, and on the very first boot of a module - or
   after `erase` - one more line, `First boot: a random admin password was set
@@ -159,7 +188,7 @@ verified here*, as before the tool existed.
   `tasks/phase-3/reports/03.md` has the arithmetic); `sensor list 5` is the
   other five. `sensor get fw.version` is the same string; `sensor set
   fw.version x` is refused (`can't find custom var`, upstream's wording for a
-  key that took no value).
+  key that took no value). (bench, 2026-10-22, 9fb721b)
 - [ ] **p1-01** It hears adverts (`neighbors` after a few minutes on the roof
   antenna) and repeats (a message through it from a phone).
 - [ ] **p1-01** A phone login with the password `password` is refused, and so
@@ -180,7 +209,10 @@ verified here*, as before the tool existed.
   line — **the same** serial number. If it differs, that number goes in
   `bench.local.json` as `bootloader_serial`, and the report of p3.3-02 says why
   it could not be read off a file (the bootloader's source is not on disk).
-  Then a power cycle, and the repeater is back.
+  Then a power cycle, and the repeater is back. p3.4-02 read the **same**
+  number in all three modes of one board, including the touch's `239A:002A`
+  (§0a's table); what is left of this line is the double-tap and the power
+  cycle, which are a hand on the board.
 - [ ] **p3.3-02** **The round trip through `tools/bench/`, with the dummy load
   on the antenna port** and `bench.local.json` filled in (§0a):
   `python tools/bench/bench.py status` finds the board; `bench flash
@@ -540,22 +572,22 @@ nothing else: no second radio, no companion — the mesh advertises by itself.
 `spec/FIRMWARE-MANIFEST.md` §4 is the page. Nothing here needs a radio: a
 release's files, a flash, and one `hello` over the link.
 
-- [ ] **p3-01** **The file you are about to flash says what it is, before you
+- [x] **p3-01** **The file you are about to flash says what it is, before you
   flash it.** On a release's `.bin` (or on
   `out/build/repeater_rak4630_single/firmware.bin`, which `tools/verify.ps1`
   leaves): `python spec/tools/manifestref.py descriptor <file>` prints one
   descriptor and its offset (role → ______, board → ______, band → ______,
   version → ______, offset → ______). Two descriptors or none is a refusal, and
   the build would have failed first — what is being checked on the bench is
-  that the file which left the release is still that file.
+  that the file which left the release is still that file. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-01** **The unit then says the same thing.** After flashing it,
   `linkcli.py hello`'s `role`, `board` and `fw_version` are the three the
   descriptor gave, and `slot` is **0** on the single-RAK adapter. They are read
   out of the descriptor object inside the running firmware, so a disagreement
   here means the image on the board is not the image that was checked.
-- [ ] **p3-01** **The console agrees too.** `sensor get fw.version` on the USB
+- [x] **p3-01** **The console agrees too.** `sensor get fw.version` on the USB
   console reads `twinoak-repeater <version> on MeshCore <tag> (<pin>)` with the
-  same version, and upstream's own `ver` line is unchanged.
+  same version, and upstream's own `ver` line is unchanged. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-01** **The Walter's half, in the Walter's repository.** That a Walter
   reads the descriptor out of the file it downloaded, compares it with the
   manifest entry and with the radio position it is about to flash, and refuses
@@ -571,7 +603,7 @@ family: it is flashed in place of the repeater, and the repeater is flashed
 back. Both halves of that round trip are here, and the second one is the point
 of the first.
 
-- [ ] **p3-02** **Flash the scanner over USB.** The UF2 from
+- [x] **p3-02** **Flash the scanner over USB.** The UF2 from
   `out/build/scanner_rak4630_single/firmware.uf2` on the bootloader's drive (or
   `adafruit-nrfutil dfu serial -pkg firmware.zip -p COMx -b 115200`). The USB
   console at 115200 should show one `boot` line within a second: `fw` →
@@ -580,15 +612,18 @@ of the first.
   **If `radio_ok` is false, the power-enable pin is the first thing to look
   at** (`SX126X_POWER_EN`, P1.05): this port drives it high where NoiseScope
   never did, and no session can tell whether the stamp needed it
-  (`tasks/phase-3/reports/02.md`).
-- [ ] **p3-02** **`info`, `stat` and `sweep` behave as the page says**, on the
+  (`tasks/phase-3/reports/02.md`) — on the first real board it read **true**,
+  p3.4-02. The `boot` line itself is a race (§0a): when it was gone before the
+  port came back, `info`'s own `fw`, `role`, `board`, `ver`, `reset` and
+  `radio_ok` are what this line is held to. (bench, 2026-10-22, 9fb721b)
+- [x] **p3-02** **`info`, `stat` and `sweep` behave as the page says**, on the
   USB console and on `Serial1` — both at 115200, both serving the same
   protocol. `info` answers one line; `stat` answers one immediately and one
   every 10 s; `sweep` acks `started` and answers a `sweep` line of **281
   points** in about 7 s (n → ______, rbw → ______). Then `hist 869.4 869.8 25`
   (the RAM patch uploads: lines, or an `err` → ______), `dwell 869.618 30`,
   `cad`, and `stop` in the middle of a sweep — which must be answered between
-  steps and not after the pass.
+  steps and not after the pass. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-02** **[boards] `pwr` matches the repeater's `power` numbers for the
   same board.** `stat`'s `pwr` object against what the repeater answers for
   POWER_GET on the same connector board, within a reading: vpanel → ______,
@@ -597,21 +632,23 @@ of the first.
   (`src/common/power/`), so a disagreement here is a disagreement between two
   runs and not between two firmwares — which is exactly why this line is worth
   walking.
-- [ ] **p3-02** **Every line is JSON, and the chatter says so.** A minute of
+- [x] **p3-02** **Every line is JSON, and the chatter says so.** A minute of
   output through `python tools/noisescope/waterfall_plot.py --port COMx`, which
   drops anything not starting with `{` — or
   `python -c "import sys,json;[json.loads(l) for l in sys.stdin if l.startswith('{')]"`
   over a captured log. No line should fail to parse and none should carry
   `nan`. The native tests hold the writer to this
   (`test/test_scanner`); what the bench adds is a real radio's readings
-  going through it, including a window with no sample.
-- [ ] **p3-02** **Flash the repeater back, and nothing of the node is gone.**
+  going through it, including a window with no sample. (bench, 2026-10-22, 9fb721b)
+- [x] **p3-02** **Flash the repeater back, and nothing of the node is gone.**
   The repeater's `.uf2` or `.zip`, then on the USB console: the same
   `Repeater ID:` as before the scanner (→ ______), the same `name`, the same
   admin password still accepted, and the neighbours list filling up again.
   `sensor get fw.version` reads `twinoak-repeater …`. **This is the promise the
   scanner's two rails exist for** — it compiles no file system and never
   transmits — and it is the one thing on this page that only a board can show.
+  Expect **two DFUs**: the scanner's watchdog bites in the middle of the first
+  one and `bench` runs the second from the bootloader that is left (§0a). (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-02** **The watchdog is live.** With the scanner flashed, hold the
   unit in a `hist` pass and pull the SX1262 into a stall if you can contrive
   one, or simply confirm from a `boot` line after an induced hang that `reset`
@@ -623,13 +660,13 @@ of the first.
 `docs/noisescope.md` §6 is the page. Six lines, in this order: the first one
 decides whether any of the rest can be walked at all.
 
-- [ ] **p3.1-01** **The radio's ROM.** `info` on the RAK4630 and read `rom` →
+- [x] **p3.1-01** **The radio's ROM.** `info` on the RAK4630 and read `rom` →
   ______. The sweep plugin is a program for the radio's own core and is made
   for **`SX1261 V2D 2D02`**; **if it says anything else, stop here** — `scope`
   will refuse and say so, nothing is uploaded, and the rest of this list is
   not walkable on that part. (`sweep`, `hist`, `dwell` and `cad` are
-  unaffected: they use no plugin of this kind.)
-- [ ] **p3.1-01** **`scope 863 870` over USB, with the plotter.**
+  unaffected: they use no plugin of this kind.) (bench, 2026-10-22, 9fb721b)
+- [x] **p3.1-01** **`scope 863 870` over USB, with the plotter.**
   `python tools/noisescope/waterfall_plot.py --port COMx --scope 863 870`.
   What to see: an `ack` naming what was taken (n → ______, rbw → ______, seg
   → ______, cov → ______), then frames arriving at **tens of sweeps a
@@ -637,7 +674,7 @@ decides whether any of the rest can be walked at all.
   the home channel's own traffic showing as bursts in the waterfall. `sps`
   should agree with the fork's numbers: about 21 ms for 250 points at
   19.5 kHz, about 5 ms at 78 kHz. A `cov` below 1 draws a grey band; at this
-  span it should not.
+  span it should not. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3.1-01** **The baseline.** A **50 Ω dummy load** in place of the
   antenna, `scope 150 960 2048`, captured to a file (`--save` writes the
   picture; keep the NDJSON too). This is the radio's own spurs and the shape
@@ -676,7 +713,7 @@ which takes the node's **identity** with it: the key the mesh knows it by, and
 the one MeshMaster would have been told. A unit that has been adopted is a unit
 not to erase.
 
-- [ ] **p3-03, p3.3-01** **A first boot is a first boot.** `erase` on the USB
+- [x] **p3-03, p3.3-01** **A first boot is a first boot.** `erase` on the USB
   console (`File system erase: OK`), then reset. The console prints
   `Repeater ID:` with a **new** key (→ ______), then `First boot: a random admin
   password was set (not shown; …)` and `First boot: the profile ran 2 of 2 lines
@@ -686,12 +723,13 @@ not to erase.
   `get dutycycle` → `> 10.0%` (the band's, where upstream's own default is
   `> 50.0%`); `sensor get firstboot.state` → `> done`;
   `get path.hash.mode` → `> 1`; `get radio` → `> 869.618,62.5,8,8`;
-  `get name` → `> repeater`; `get guest.password` → `> ` (empty).
-- [ ] **p3-03, p3.3-01** **It runs once, and a reboot proves it.** `reboot`, and
+  `get name` → `> RAK4631 Repeater` (this build's `-D ADVERT_NAME` in `platformio.ini`;
+  upstream's own default is `repeater`); `get guest.password` → `> ` (empty). (bench, 2026-10-22, 9fb721b)
+- [x] **p3-03, p3.3-01** **It runs once, and a reboot proves it.** `reboot`, and
   this time there is **no** `First boot:` line at all; `sensor get
   firstboot.state` → `> never`, `get path.hash.mode` is still `> 1` and
   `get dutycycle` is still `> 10.0%` — the profile's work was saved, both lines
-  of it, and the profile did not run again.
+  of it, and the profile did not run again. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-03** **A power cut in the middle leaves no half-provisioned node.**
   `erase`, reset, and pull the power **during** the first second (before the
   `First boot:` lines appear). On the next boot one of exactly two things is
@@ -703,12 +741,12 @@ not to erase.
   a unit that is finished as far as it knows and outside the band. Worth three
   or four attempts; the arrangement that makes it so is one preferences write
   (`src/roles/repeater/app/FirstBoot.h`).
-- [ ] **p3-03** **Provision it at the USB port**, `docs/provisioning.md` §3 line
+- [x] **p3-03** **Provision it at the USB port**, `docs/provisioning.md` §3 line
   for line: `set name`, `set lat`, `set lon`, `set owner.info`,
   `set guest.password`, `region default dk`, `region save`, `password <new>`.
   Every reply should be the one the page quotes — and the one to watch for is
   `region default dk` answering ` default scope is now dk` rather than `OK`.
-  Read it back with `get name`, `get lat`, `get owner.info`, `region default`.
+  Read it back with `get name`, `get lat`, `get owner.info`, `region default`. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-03** **A phone then logs in with that admin password**, and is an
   admin: `sensor get link.errors` from the phone answers, and
   `sensor set walter.wake 1` raises an attention on the link (§4 has that
@@ -720,8 +758,8 @@ not to erase.
   password must appear nowhere on the laptop's screen**. Then take a line out
   of the middle and break it (`set nonsens 1`): the run stops there, says which
   line of the file it was, and `get lat` shows that nothing after it was sent.
-- [ ] **p3-03** **And the node is the same node afterwards.** `linkcli.py
+- [x] **p3-03** **And the node is the same node afterwards.** `linkcli.py
   identity` reads the public key and the name just set (→ ______), which is
   what MeshMaster has to be told along with the admin password
   (`docs/provisioning.md` §5). Write both down **now**: the password set above
-  is the only copy there is, and nothing in this firmware can read it back.
+  is the only copy there is, and nothing in this firmware can read it back. (bench, 2026-10-22, 9fb721b)

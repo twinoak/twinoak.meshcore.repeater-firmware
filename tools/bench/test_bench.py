@@ -44,10 +44,11 @@ import config as cfg  # noqa: E402
 import console  # noqa: E402
 import images  # noqa: E402
 from fakes import (FakeBoard, FakeClock, FakePorts, FakeProbe, FakeRepeaterFirmware,  # noqa: E402
-                   FakeRunner, FakeScannerFirmware)
+                   FakeRunner, FakeScannerFirmware, SlowToOpenPorts)
 from flash import Timeouts, nrfutil_argv  # noqa: E402
 from lock import BoardLock, Locked  # noqa: E402
-from ports import PortInfo, RAK_APP_PID, RAK_VID  # noqa: E402
+from ports import (PortInfo, Ports, RAK_APP_PID, RAK_APP_PIDS, RAK_BOOT_PIDS,  # noqa: E402
+                   RAK_VID)
 from runs import RunRecord, load_run, save_run  # noqa: E402
 
 SERIAL = "E6614C311B5C2E35"
@@ -139,7 +140,7 @@ class BenchCase(unittest.TestCase):
         chosen = self.region if region is None else (None if region is False else region)
         return benchcli.Bench(repo=self.repo, ports=self.ports, runner=self.runner, home=self.home, out=self.out,
                               probe=self.probe, nrfutil="/pio/packages/tool-adafruit-nrfutil/adafruit-nrfutil.py",
-                              python="python", timeouts=timeouts or Timeouts(settle_s=0.0),
+                              python="python", timeouts=timeouts or Timeouts(settle_s=0.0, dfu_settle_s=0.0),
                               region_for=lambda path: chosen)
 
     def run_cli(self, argv, **kw):
@@ -509,8 +510,9 @@ class TheConsoleGuard(unittest.TestCase):
 
 
 class TheRepeaterConsole(BenchCase):
-    def open(self, firmware=None, disposable=False):
+    def open(self, firmware=None, disposable=False, port_dies_on_reset=True):
         board = self.board(firmware)
+        board.port_dies_on_reset = port_dies_on_reset
         ports = FakePorts(boards=[board], clock=self.clock)
         port = ports.open("COM7", 115200)
         said = []
@@ -532,10 +534,31 @@ class TheRepeaterConsole(BenchCase):
         self.assertEqual(reply.text.splitlines(), ["10 vars", "fw.version=x", "walter.wake=0"])
 
     def test_a_line_that_answers_nothing_times_out(self):
-        board, con, said = self.open()
+        board, con, said = self.open(port_dies_on_reset=False)
         reply = con.send("reboot", timeout_s=0.5)
         self.assertTrue(reply.timed_out)
         self.assertEqual(reply.text, "")
+        self.assertEqual(board.firmware.rebooted, 1)
+
+    def test_a_reset_takes_the_port_with_it_and_that_is_the_reset(self):
+        """What the first RAK4630 on this bench did (p3.4-02): the USB device went down with the
+        reset and the next read of the open handle raised instead of falling quiet. `send_reset`
+        is the line for that; plain `send` would carry the error up."""
+        board, con, said = self.open()
+        with self.assertRaises(IOError):
+            con.send("reboot", timeout_s=0.5)
+        board, con, said = self.open()
+        reply = con.send_reset("reboot")
+        self.assertTrue(reply.timed_out)
+        self.assertEqual(reply.text, "")
+        self.assertEqual(board.firmware.rebooted, 1)
+        self.assertIn("> reboot", said)
+        self.assertTrue(any("went away with the reset" in line for line in said), said)
+
+    def test_a_reset_line_that_the_board_answers_is_an_ordinary_reply(self):
+        board, con, said = self.open(port_dies_on_reset=False)
+        reply = con.send_reset("reboot")
+        self.assertTrue(reply.timed_out)          # upstream's `reboot` answers nothing either way
         self.assertEqual(board.firmware.rebooted, 1)
 
     def test_the_password_echo_is_never_printed_nor_returned(self):
@@ -651,6 +674,121 @@ def firmware_for(path):
     return FakeRepeaterFirmware(REPEATER_ID, version=desc["version"])
 
 
+class TheProductIds(unittest.TestCase):
+    """Which USB product ids are this board, and which of them is a bootloader (p3.4-02)."""
+
+    def test_both_bootloader_ids_are_a_bootloader(self):
+        for pid in (0x0029, 0x002A):
+            info = PortInfo("COM31", SERIAL, RAK_VID, pid, "RAK4631 bootloader")
+            self.assertTrue(info.is_bootloader, "0x%04X" % pid)
+            self.assertFalse(info.is_application, "0x%04X" % pid)
+
+    def test_both_application_ids_are_the_application(self):
+        for pid in (0x8029, 0x802A):
+            info = PortInfo("COM30", SERIAL, RAK_VID, pid, "WisCore RAK4631 Board")
+            self.assertTrue(info.is_application, "0x%04X" % pid)
+            self.assertFalse(info.is_bootloader, "0x%04X" % pid)
+
+    def test_a_stranger_is_neither(self):
+        info = PortInfo("COM9", "A50285BI", 0x0403, 0x6001, "FT232")
+        self.assertFalse(info.is_application)
+        self.assertFalse(info.is_bootloader)
+
+    def test_the_ids_are_the_vendored_board_files_hwids(self):
+        """boards/rak4631.json is where they come from, so the two lists cannot drift from the
+        board file the build uses."""
+        with open(os.path.join(REPO, "boards", "rak4631.json"), encoding="utf-8") as fh:
+            hwids = json.load(fh)["build"]["hwids"]
+        pairs = set((int(vid, 16), int(pid, 16)) for vid, pid in hwids)
+        self.assertEqual(pairs, set((RAK_VID, pid) for pid in RAK_APP_PIDS + RAK_BOOT_PIDS))
+
+    def test_the_board_is_found_in_the_serial_only_dfu(self):
+        board = FakeBoard(serial=SERIAL, firmware=FakeRepeaterFirmware(REPEATER_ID),
+                          boot_pid=0x002A)
+        board.mode = "bootloader"
+        ports = FakePorts(boards=[board], clock=FakeClock())
+        app, boot = ports.find_board(SERIAL)
+        self.assertIsNone(app)
+        self.assertIsNotNone(boot)
+        self.assertEqual(boot.device, "COM8")
+
+
+class ThePortLayer(unittest.TestCase):
+    """`Ports.open_ready`: a port that has just enumerated is opened with a retry (p3.4-02)."""
+
+    class Counting(Ports):
+        def __init__(self, fails, clock):
+            self.fails = fails
+            self.tries = 0
+            self.clock = clock
+
+        def open(self, device, baud):
+            self.tries += 1
+            if self.tries <= self.fails:
+                raise IOError("could not open port %r: FileNotFoundError(2)" % device)
+            return "a port"
+
+        def sleep(self, seconds):
+            self.clock.sleep(seconds)
+
+        def now(self):
+            return self.clock.now()
+
+    def test_an_open_that_fails_twice_then_works(self):
+        clock = FakeClock()
+        ports = self.Counting(2, clock)
+        self.assertEqual(ports.open_ready("COM30", 115200, timeout_s=10.0, poll_s=0.25), "a port")
+        self.assertEqual(ports.tries, 3)
+        self.assertAlmostEqual(clock.now() - 1000.0, 0.5, places=6)
+
+    def test_an_open_that_never_works_raises_the_last_error_after_the_deadline(self):
+        clock = FakeClock()
+        ports = self.Counting(10 ** 6, clock)
+        with self.assertRaises(IOError) as caught:
+            ports.open_ready("COM30", 115200, timeout_s=2.0, poll_s=0.25)
+        self.assertIn("FileNotFoundError", str(caught.exception))
+        self.assertEqual(ports.tries, 9)                     # 2.0 s of 0.25 s polls, then one more
+        self.assertGreaterEqual(clock.now() - 1000.0, 2.0)
+
+    class Vanishing(Ports):
+        """A port that is listed for a few polls and then is not (a board that reset)."""
+
+        def __init__(self, polls, clock):
+            self.polls = polls
+            self.clock = clock
+
+        def list(self):
+            if self.polls > 0:
+                self.polls -= 1
+                return [PortInfo("COM31", SERIAL, RAK_VID, 0x002A, "RAK4631 bootloader")]
+            return []
+
+        def sleep(self, seconds):
+            self.clock.sleep(seconds)
+
+        def now(self):
+            return self.clock.now()
+
+    def test_a_port_that_goes_away_is_waited_for(self):
+        clock = FakeClock()
+        ports = self.Vanishing(3, clock)
+        self.assertTrue(ports.wait_until_gone(lambda i: i.device == "COM31", 10.0, poll_s=0.2))
+        self.assertAlmostEqual(clock.now() - 1000.0, 0.6, places=6)
+
+    def test_a_port_that_stays_is_the_timeout(self):
+        clock = FakeClock()
+        ports = self.Vanishing(10 ** 6, clock)
+        self.assertFalse(ports.wait_until_gone(lambda i: i.device == "COM31", 2.0, poll_s=0.5))
+        self.assertGreaterEqual(clock.now() - 1000.0, 2.0)
+
+    def test_an_open_that_works_at_once_sleeps_not_at_all(self):
+        clock = FakeClock()
+        ports = self.Counting(0, clock)
+        self.assertEqual(ports.open_ready("COM30", 115200), "a port")
+        self.assertEqual(ports.tries, 1)
+        self.assertEqual(clock.now(), 1000.0)
+
+
 class AFlash(BenchCase):
     def setUp(self):
         super().setUp()
@@ -710,12 +848,113 @@ class AFlash(BenchCase):
         self.assertIsNone(run.role)
         self.assertEqual(run.how, "bootloader")
 
+    def test_a_port_listed_before_it_can_be_opened_is_waited_for(self):
+        """The first flash of the first RAK4630 (p3.4-02): nrfutil said `Device programmed.`, the
+        application enumerated, and the open of it failed with `FileNotFoundError(2)` because
+        Windows lists a CDC port a shade before it can be opened. The port is waited for."""
+        board = self.board()
+        ports = SlowToOpenPorts(boards=[board], clock=self.clock, fails=3)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual(ports.refused, 3)
+        self.assertIn("the board says repeater 0.0.0-dev", out)
+        self.assertEqual(board.flashes, [self.repeater_zip])
+        self.assertEqual(load_run(self.home, SERIAL).role, "repeater")
+
+    def test_a_port_that_never_opens_is_still_a_failure_that_says_double_tap(self):
+        board = self.board()
+        ports = SlowToOpenPorts(boards=[board], clock=self.clock, fails=10 ** 6)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED)
+        self.assertIn("FileNotFoundError", out)
+        self.assertIn("double-tap", out)
+        # bounded: the retry gave up, it did not spin for ever
+        self.assertGreater(ports.refused, 1)
+        self.assertLess(ports.refused, 200)
+
+    def test_the_bootloaders_port_is_opened_before_nrfutil_is_handed_it(self):
+        """The port is listed before its endpoint will take bytes, and nrfutil's first write then
+        failed with `PermissionError(13)` and wrote nothing (p3.4-02). The open is the proof."""
+        board, ports, runner = self.fakes()
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        opened = self.ports.opened
+        self.assertIn(("COM8", 115200), opened)                    # the bootloader's own port
+        self.assertLess(opened.index(("COM8", 115200)), len(opened) - 1)
+        self.assertEqual(board.flashes, [self.repeater_zip])
+
+    def test_a_bootloader_port_that_is_listed_before_it_opens_is_waited_for(self):
+        board = self.board()
+        ports = SlowToOpenPorts(boards=[board], clock=self.clock, fails=3, which="boot")
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual(ports.refused, 3)
+        self.assertEqual(board.flashes, [self.repeater_zip])
+
+    def test_a_touch_that_lands_in_the_serial_only_dfu_is_a_bootloader(self):
+        """The touch's own DFU mode is product id 0x002A and not 0x0029 - what the first RAK4630
+        on this bench did (p3.4-02): the walk of section 8 waited 15 s for a port that was
+        already there under the other id."""
+        board = self.board()
+        board.boot_pid = 0x002A
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual(board.touches, 1)
+        self.assertEqual(board.flashes, [self.repeater_zip])
+        self.assertIn("the board says repeater 0.0.0-dev", out)
+
+    def test_a_dfu_that_did_not_take_is_run_once_more_from_the_bootloader(self):
+        """What the first RAK4630 on this bench needed every time the touch came from the scanner
+        (p3.4-02): nrfutil's first write was answered `ERROR_BAD_COMMAND`, the board stayed in a
+        bootloader, and the same command from there worked."""
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for, nrfutil_exits=[1])
+        code, out = self.run_cli(["flash", self.scanner_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertIn("still in its bootloader", out)
+        self.assertEqual(board.flashes, [self.scanner_zip])            # written once, by the retry
+        nrf = [c for c in runner.calls if "adafruit-nrfutil.py" in " ".join(c)]
+        self.assertEqual(len(nrf), 2)
+        self.assertEqual(board.touches, 1)                             # and touched only once
+
+    def test_a_dfu_that_failed_while_exiting_zero_is_not_a_flash(self):
+        """adafruit-nrfutil prints its traceback and exits 0 (p3.4-02). Without the `Device
+        programmed.` line nothing was written, and the retry is what writes it."""
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        runner.nrfutil_fails_silently = 1
+        code, out = self.run_cli(["flash", self.scanner_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertIn("never said 'Device programmed.'", out)
+        self.assertEqual(board.flashes, [self.scanner_zip])
+        self.assertEqual(board.touches, 1)
+
+    def test_a_dfu_that_never_says_it_programmed_the_device_is_a_failure(self):
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=firmware_for)
+        runner.nrfutil_fails_silently = 2
+        code, out = self.run_cli(["flash", self.scanner_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        self.assertIn("twice", out)
+        self.assertEqual(board.flashes, [])
+
     def test_nrfutil_failing_says_double_tap(self):
         board, ports, runner = self.fakes(nrfutil_exit=1)
         code, out = self.run_cli(["flash", self.scanner_zip], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_FAILED)
+        self.assertIn("twice", out)
         self.assertIn("double-tap", out)
         self.assertEqual(board.flashes, [])
+        nrf = [c for c in runner.calls if "adafruit-nrfutil.py" in " ".join(c)]
+        self.assertEqual(len(nrf), 2)                                  # one retry, and no more
         with open(os.path.join(self.home, "flash.log")) as fh:
             self.assertIn('"result": "failed', fh.read())
 
@@ -785,15 +1024,29 @@ class RecordAndRestore(BenchCase):
         runner = FakeRunner(boards=[board], new_firmware=firmware_for, **kw)
         return board, ports, runner
 
-    def test_record_over_the_console_reboots_once_for_the_id(self):
+    def test_record_reads_the_id_off_the_console_without_a_reset(self):
+        """The banner cannot be caught on a board that has been up - the first RAK4630 on this
+        bench gave it neither on the first open nor after a `reboot` (p3.4-02) - so upstream's own
+        `get public.key` is asked, which is the same 32 bytes (CommonCLI.cpp:902 at d9296435)."""
         board, ports, runner = self.fakes()
+        code, out = self.run_cli(["record"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual(board.firmware.rebooted, 0)
+        self.assertIn("get public.key", board.firmware.received)
+        run = load_run(self.home, SERIAL)
+        self.assertEqual(run.repeater_id, REPEATER_ID)
+        self.assertEqual(run.how, "console (get public.key)")
+        self.assertIn("recorded repeater 0.0.0-dev, Repeater ID", out)
+
+    def test_record_falls_back_to_one_reboot_when_the_key_line_answers_nothing(self):
+        board, ports, runner = self.fakes(
+            self.board(FakeRepeaterFirmware(REPEATER_ID, answers={"get public.key": None})))
         code, out = self.run_cli(["record"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_OK, out)
         self.assertEqual(board.firmware.rebooted, 1)
         run = load_run(self.home, SERIAL)
-        self.assertEqual(run.repeater_id, REPEATER_ID)
+        self.assertEqual(run.repeater_id, REPEATER_ID)      # off the banner, after the reset
         self.assertEqual(run.how, "console")
-        self.assertIn("recorded repeater 0.0.0-dev, Repeater ID", out)
 
     def test_record_over_the_link_when_the_dongle_is_there(self):
         self.config(dongle="A50285BI")
