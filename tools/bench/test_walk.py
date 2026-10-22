@@ -509,6 +509,43 @@ class SectionNine(WalkCase):
         self.assertIn("Repeater ID matches", text)
         self.assertIsNone(load_run(self.home, SERIAL))
 
+    def test_the_watchdog_line_is_walked_with_hang(self):
+        """9.6 was a person's until p3.5-03 - *a session cannot cause one*. `hang` is the cause:
+        the loop stops, the loop watchdog resets the unit, and `boot` says `wdt` `loop`."""
+        board, code, out = self.walk_nine()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertIn("### 9.6 ", text)
+        self.assertNotIn("| needs a person | `hang`", text)
+        self.assertIn("**section 9 watchdog reset** -> wdt", text)
+        self.assertIn("**section 9 watchdog half** -> loop", text)
+        self.assertRegex(text, r"\*\*section 9 watchdog, time to the port\*\* -> \d+\.\d s")
+        self.assertIn("sent: `hang`", text)   # the line the step sent, in the transcript
+        # and the restore after it put the repeater back on a board that had just reset
+        self.assertEqual(board.flashes, [self.scanner_zip, self.repeater_zip])
+        self.assertIn("Repeater ID matches", text)
+
+    def test_an_image_with_no_hang_command_makes_the_watchdog_line_a_differs(self):
+        """A scanner image from before p3.5-03: the line cannot be walked, and the step says so
+        rather than pretending the watchdog was seen."""
+        def no_hang(path):
+            firmware = firmware_for(path)
+            if isinstance(firmware, FakeScannerFirmware):
+                firmware.hangs = False
+            return firmware
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=no_hang)
+        code, out = self.walk(["walk", "9", "--collect", "30", "--baseline", "5"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("is a person's again", text)
+        self.assertIn("| differs |", text)
+        # the walk still finished: the repeater is back on the board
+        self.assertEqual(board.flashes[-1], self.repeater_zip)
+        self.assertIn("restored: repeater back on the board", text)
+
     def test_a_rom_that_is_not_the_plugins_skips_the_fast_sweep_and_walks_on(self):
         def other_rom(path):
             firmware = firmware_for(path)

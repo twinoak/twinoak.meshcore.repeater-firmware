@@ -109,11 +109,29 @@ def nrfutil_argv(python, nrfutil, port_device, package):
 
 
 class FlashOutcome(object):
-    def __init__(self, bootloader_device, application_port, touched, nrfutil_output):
+    """What the flash did, and how long it took.
+
+    The three times are the measurement p3.5-03 derives the scanner's hardware watchdog timeout
+    from, so they are part of every flash record and not something a session times by hand:
+
+      * `dfu_s`      - what adafruit-nrfutil took, summed over its attempts (the bytes on the
+                       wire at 115200 baud, which is the update itself);
+      * `update_s`   - from the start of the first DFU to the application's port coming back,
+                       which is what a watchdog running under the bootloader has to outlast;
+      * `attempts`   - how many runs of adafruit-nrfutil it took. **One** is what a scanner
+                       replaced by this tool should need (p3.5-03, deliverable 4); two is the
+                       recovery an image with an 8 s watchdog still needs.
+    """
+
+    def __init__(self, bootloader_device, application_port, touched, nrfutil_output,
+                 dfu_s=None, update_s=None, attempts=1):
         self.bootloader_device = bootloader_device
         self.application_port = application_port
         self.touched = touched
         self.nrfutil_output = nrfutil_output
+        self.dfu_s = dfu_s
+        self.update_s = update_s
+        self.attempts = attempts
         self.board_says = {}
 
 
@@ -172,7 +190,13 @@ def flash_image(image, config, ports, runner, log, nrfutil, python=None, timeout
     else:
         log("1-2. the board is already in its bootloader on %s (no touch needed)" % boot.device)
 
+    # The clock starts where the update starts: the bootloader's port is open and the bytes are
+    # about to go down it. Everything before this is the touch and the re-enumeration, which a
+    # board already in its bootloader does not do at all.
+    began = ports.now()
+    attempts = 1
     wrong = _nrfutil(runner, log, python, nrfutil, boot, image, timeouts)
+    dfu_s = ports.now() - began
     if wrong:
         # The board is still in a bootloader after a DFU that did not take, and the next attempt
         # is what takes: the first RAK4630 on this bench answered nrfutil's first write with
@@ -200,7 +224,10 @@ def flash_image(image, config, ports, runner, log, nrfutil, python=None, timeout
         ports.open_ready(again.device, int(NRFUTIL_BAUD), timeouts.open_s).close()
         ports.sleep(timeouts.dfu_settle_s)
         boot = again
+        attempts = 2
+        second = ports.now()
         wrong = _nrfutil(runner, log, python, nrfutil, boot, image, timeouts)
+        dfu_s += ports.now() - second
         if wrong:
             raise FlashError("%s - twice: the image was not activated. The bootloader is untouched "
                              "and the board should still be in it - `bench flash` again. %s"
@@ -215,7 +242,12 @@ def flash_image(image, config, ports, runner, log, nrfutil, python=None, timeout
     if app is None:
         raise FlashError("the application did not enumerate within %.0f s of the flash. %s"
                          % (timeouts.application_port_s, DOUBLE_TAP))
-    return FlashOutcome(boot.device, app, touched, NRFUTIL_DONE)
+    update_s = ports.now() - began
+    log("   the update took %.1f s (%.1f s of adafruit-nrfutil, %d attempt%s) from the start of "
+        "the DFU to the application's port" % (update_s, dfu_s, attempts,
+                                               "" if attempts == 1 else "s"))
+    return FlashOutcome(boot.device, app, touched, NRFUTIL_DONE, dfu_s=dfu_s, update_s=update_s,
+                        attempts=attempts)
 
 
 # ----------------------------------------------------------------------------- what the board says
@@ -325,6 +357,12 @@ def read_board(ports, app_info, log, disposable, timeouts, expect_banner=True, r
 
 # ----------------------------------------------------------------------------- the log
 
+def _rounded(seconds):
+    """A time in the log is a tenth of a second: the measurement is of tens of seconds and a
+    float with seventeen digits in a JSON line reads as precision nobody measured."""
+    return None if seconds is None else round(float(seconds), 1)
+
+
 def log_flash(home, repo, config, image, outcome, result, extra=None):
     """One JSON line per flash, in two places."""
     record = {
@@ -334,6 +372,12 @@ def log_flash(home, repo, config, image, outcome, result, extra=None):
         "result": result,
         "bootloader_port": getattr(outcome, "bootloader_device", None),
         "touched": getattr(outcome, "touched", None),
+        # How long it took and how many DFUs it took (FlashOutcome): the measurement
+        # WDT_TIMEOUT_S is derived from, and the one line that says whether a scanner was
+        # replaced in one DFU or in two (p3.5-03).
+        "dfu_s": _rounded(getattr(outcome, "dfu_s", None)),
+        "update_s": _rounded(getattr(outcome, "update_s", None)),
+        "attempts": getattr(outcome, "attempts", None),
     }
     record.update(image.log_record())
     if extra:

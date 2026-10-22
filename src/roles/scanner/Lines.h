@@ -59,6 +59,11 @@ struct BootFields {
   const char* hw = "";
   const char* radio = "";
   const char* reset = "";  // por | pin | wdt | soft | lockup
+  // Which watchdog, when `reset` is `wdt`: "loop" for the 8 s software check and "hw" for the
+  // nRF52840's own. Empty for every other reset, never absent - the two are one `reset` word
+  // because both mean the loop stopped, and this is the field that tells them apart for a reader
+  // who wants to know (docs/noisescope.md sections 5 and 6).
+  const char* wdt = "";
   bool radio_ok = false;
   bool rtc = false;
   bool ina = false;
