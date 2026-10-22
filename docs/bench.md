@@ -811,7 +811,7 @@ not to erase.
   `get path.hash.mode` → `> 1`; `get radio` → `> 869.618,62.5,8,8`;
   `get name` → `> RAK4631 Repeater` (this build's `-D ADVERT_NAME` in `platformio.ini`;
   upstream's own default is `repeater`); `get guest.password` → `> ` (empty). (bench, 2026-10-22, 9fb721b)
-- [ ] **p3.5-05** **And the Danish standard reached it.** The four lines
+- [x] **p3.5-05** **And the Danish standard reached it.** The four lines
   `docs/provisioning.md` §1 added to the profile on 22 October 2026, read back on
   the same first boot: `get agc.reset.interval` → `> 4` (upstream's own is `> 0`);
   `get loop.detect` → `> moderate` (upstream's own is `> off`);
@@ -819,17 +819,17 @@ not to erase.
   `get flood.advert.interval` (→ ______) → **the hour this node's own key gives
   it**, which is `60 + (k mod 26)` for `k` the first byte of the `Repeater ID`
   above — 60 to 85, and upstream's own default is 47 for every unit. Compute it
-  from the key and compare; a `> 47` is a profile line that did not run.
+  from the key and compare; a `> 47` is a profile line that did not run. (bench, 2026-10-22, a019870)
 - [x] **p3-03, p3.3-01** **It runs once, and a reboot proves it.** `reboot`, and
   this time there is **no** `First boot:` line at all; `sensor get
   firstboot.state` → `> never`, `get path.hash.mode` is still `> 1` and
-  `get dutycycle` is still `> 10.0%` — the profile's work was saved, both lines
+  `get dutycycle` is still `> 10.0%` — the profile's work was saved, every line
   of it, and the profile did not run again. (bench, 2026-10-22, 9fb721b)
-- [ ] **p3.5-05** **And the Danish standard was saved with it.** After that same
+- [x] **p3.5-05** **And the Danish standard was saved with it.** After that same
   `reboot`: `get agc.reset.interval` → `> 4`, `get loop.detect` → `> moderate`,
   `get flood.max.unscoped` → `> 15`, and `get flood.advert.interval` the same
   hour as before the restart (→ ______) — all six lines of the profile in one
-  preferences write, and none of them run again.
+  preferences write, and none of them run again. (bench, 2026-10-22, a019870)
 - [ ] **p3-03** **A power cut in the middle leaves no half-provisioned node.**
   `erase`, reset, and pull the power **during** the first second (before the
   `First boot:` lines appear). On the next boot one of exactly two things is
