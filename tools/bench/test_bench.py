@@ -837,13 +837,92 @@ class AFlash(BenchCase):
             self.assertEqual(lines[0]["result"], "ok")
             self.assertEqual(lines[0]["serial"], SERIAL)
 
-    def test_a_board_found_in_its_bootloader_is_not_touched_again(self):
+    def test_a_board_with_no_application_is_not_touched(self):
+        """A board that shows only its bootloader has no application port to touch, so the tool
+        goes straight to the bootloader's port it can already see: no open at 1200 baud, which is
+        what the touch is (fakes.FakePort). p3.4-02 wrote this branch; this is the test that holds
+        it (p3.5-01, deliverable 2)."""
         board, ports, runner = self.fakes(self.board(mode="bootloader"))
         code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_OK, out)
         self.assertEqual(board.touches, 0)
+        self.assertEqual([pair for pair in self.ports.opened if pair[1] == 1200], [])
         self.assertIn("already in its bootloader", out)
+        self.assertNotIn("the 1200-baud touch", out)
         self.assertEqual(board.flashes, [self.repeater_zip])
+
+    def test_a_new_unit_records_the_image_it_is_about_to_be_given(self):
+        """The normal case for every new unit (spec/SYSTEM.md S-5a): the Walter wrote its base and
+        nothing else, so the board can say nothing of what it ran. What the run records is the
+        file about to be written - the one thing that can be known - and that is what makes the
+        run restorable (tasks/phase-3.4/FOLLOWUPS.md, p3.5-01)."""
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        run = load_run(self.home, SERIAL)
+        self.assertEqual((run.role, run.version), ("repeater", "0.0.0-dev"))
+        self.assertEqual(run.how, "bootloader")              # still not something a board said
+        self.assertEqual(run.found_image, os.path.abspath(self.repeater_zip))
+        self.assertEqual(run.found_descriptor["role"], "repeater")
+        self.assertEqual(run.found_descriptor["board"], BOARD)
+        self.assertIsNone(run.repeater_id)                   # there was no identity to read
+        self.assertIn("the board is in its bootloader", out)
+        self.assertIn("records the image it is about to be given", out)
+
+    def test_a_new_unit_is_flashed_and_then_restored(self):
+        """Deliverable 1 end to end: a fake board that enumerates only as the bootloader
+        (239A:0029), flashed, then restored - and no capitals in the last line."""
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        self.assertEqual(board.boot_pid, 0x0029)
+        code, out = self.run_cli(["flash", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.out = io.StringIO()
+        code, out = self.run_cli(["restore"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        last = out.strip().splitlines()[-1]
+        self.assertTrue(last.startswith("the board arrived with only its bootloader; restored: "
+                                        "the image the run began with"), last)
+        self.assertIn("repeater 0.0.0-dev", last)
+        self.assertIn("the image the run was given", last)
+        self.assertIn("no Repeater ID was recorded", last)
+        self.assertNotRegex(last, r"[A-Z]{4,}")              # nothing is said in capitals
+        self.assertEqual(board.flashes, [self.repeater_zip, self.repeater_zip])
+        self.assertIsNone(load_run(self.home, SERIAL))       # the run is closed
+
+    def test_a_new_unit_flashed_with_found_restores_the_found_image(self):
+        """`--found` still wins: a person who names the image that belongs on the board is saying
+        what must go back on it."""
+        given = self.package(name="given.zip", version="0.3.0+abc1234")
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.run_cli(["flash", self.scanner_zip, "--found", given], ports=ports,
+                                 runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        run = load_run(self.home, SERIAL)
+        self.assertEqual((run.role, run.version), ("repeater", "0.3.0+abc1234"))
+        self.assertEqual(run.found_image, os.path.abspath(given))
+        self.out = io.StringIO()
+        code, out = self.run_cli(["restore"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual(board.flashes[-1], given)
+
+    def test_record_of_a_bootloader_only_board_with_an_image_is_restorable(self):
+        """The same rule through `bench record --image`, which is what the first board needed by
+        hand (p3.4-02): the image named is the role recorded."""
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.run_cli(["record", "--image", self.repeater_zip], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertNotIn("RECORDED NOTHING RESTORABLE", out)
+        run = load_run(self.home, SERIAL)
+        self.assertEqual((run.role, run.how), ("repeater", "bootloader"))
+        self.assertEqual(run.found_image, os.path.abspath(self.repeater_zip))
+
+    def test_record_of_a_bootloader_only_board_with_no_image_records_nothing(self):
+        """And with no image named there is still nothing to record: a board in its bootloader is
+        a run that cannot be put back, and it says so."""
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.run_cli(["record"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        self.assertIn("RECORDED NOTHING RESTORABLE", out)
         run = load_run(self.home, SERIAL)
         self.assertIsNone(run.role)
         self.assertEqual(run.how, "bootloader")
@@ -1126,13 +1205,16 @@ class RecordAndRestore(BenchCase):
         code, out = self.run_cli(["restore"])
         self.assertEqual(code, cfg.EXIT_NO_BENCH)
 
-    def test_restore_after_a_board_found_in_its_bootloader(self):
+    def test_restore_with_no_role_recorded_still_says_so_in_capitals(self):
+        """The capitals have not gone: a record with no role - a board recorded in its bootloader
+        with no image named - is still a run that nothing can put back."""
         board, ports, runner = self.fakes(self.board(mode="bootloader"))
-        self.run_cli(["flash", self.scanner_zip], ports=ports, runner=runner)
+        self.run_cli(["record"], ports=ports, runner=runner)
         self.out = io.StringIO()
         code, out = self.run_cli(["restore"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_FAILED)
         self.assertIn("RESTORE NOT POSSIBLE: THE RUN RECORDED NO RECOGNISABLE ROLE", out)
+        self.assertEqual(board.flashes, [])
 
     def test_restore_without_a_build_of_that_role(self):
         board, ports, runner = self.fakes()

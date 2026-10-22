@@ -8,6 +8,11 @@ restore` reads it and puts that role back: the image the run was given (`bench r
 (out/build/<role>_<board>/firmware.zip, what tools/verify.ps1 leaves), and then checks the
 Repeater ID is the one it recorded. The last line says which image went on, or says in capitals
 that the board could not be put back.
+
+A board that shows only its bootloader - which is how every new unit arrives, with its base and
+no application of its own - has no console to read, so the run records the image that is about to
+be written instead (`bootloader_image` below): its role, its version and its descriptor, out of
+the file. The restore then puts that image back and says so.
 """
 
 import json
@@ -28,7 +33,7 @@ _HEX64 = re.compile(r"\b([0-9A-Fa-f]{64})\b")
 
 class RunRecord(object):
     FIELDS = ("serial", "started", "commit", "role", "version", "repeater_id", "name", "found_image",
-              "how", "board_said")
+              "how", "board_said", "found_descriptor")
 
     def __init__(self, **kw):
         for key in self.FIELDS:
@@ -45,6 +50,8 @@ class RunRecord(object):
         if self.role is None:
             return "nothing recognisable (role unknown)"
         text = "%s %s" % (self.role, self.version or "(version unknown)")
+        if self.how == "bootloader":
+            text += " (read from the image, not from the board: it arrived with only its bootloader)"
         if self.repeater_id:
             text += ", Repeater ID %s" % self.repeater_id
         if self.name:
@@ -143,8 +150,12 @@ def record_over_link(config, ports, runner, log, python=None, repo=REPO):
 
 
 def record_board(config, ports, runner, log, home, found_image=None, timeouts=None, python=None,
-                 repo=REPO):
-    """What is on the board now, saved as the run's record. Raises NoBench when it is not there."""
+                 repo=REPO, bootloader_image=None):
+    """What is on the board now, saved as the run's record. Raises NoBench when it is not there.
+
+    `bootloader_image` is the Image (images.py) the caller is about to write, and it is used only
+    when the board shows nothing but its bootloader: then it is the only thing that can be known
+    about the board, and recording it is what makes the run restorable."""
     from flash import Timeouts
     timeouts = timeouts or Timeouts()
     app, boot = ports.find_board(config.serial, config.bootloader_serial)
@@ -152,9 +163,28 @@ def record_board(config, ports, runner, log, home, found_image=None, timeouts=No
         raise NoBench("no port with serial number %s: the board is not on this machine (no bench)" % config.serial)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if app is None:
-        log("the board is in its bootloader: nothing of what it ran can be recorded")
-        record = RunRecord(serial=config.serial, started=started, commit=git_commit(repo), role=None,
-                           how="bootloader", found_image=found_image)
+        # Every new unit arrives like this: the Walter has written its base and nothing else
+        # (spec/SYSTEM.md S-5a), so there is no application port and no console, and the board can
+        # say nothing about what it ran. What *can* be known is the file that is about to be
+        # written, so that is what the run records - the image, with the role, the version and the
+        # descriptor read out of it. Without it `bench restore` had nothing to put back and said
+        # so in capitals, and the first board on this bench needed a `bench record --image ...`
+        # typed by hand after the first flash to get past it (p3.4-02's report, p3.5-01). `how`
+        # stays `bootloader`: this is still not something a board said.
+        image = bootloader_image
+        record = RunRecord(serial=config.serial, started=started, commit=git_commit(repo),
+                           role=image.role if image is not None else None,
+                           version=image.version if image is not None else None,
+                           how="bootloader",
+                           found_image=(os.path.abspath(image.path) if image is not None
+                                        else found_image),
+                           found_descriptor=dict(image.descriptor) if image is not None else None)
+        if image is None:
+            log("the board is in its bootloader and no image was named: nothing of what it ran "
+                "can be recorded")
+        else:
+            log("the board is in its bootloader: nothing of what it ran can be read, so the run "
+                "records the image it is about to be given - %s" % record.describe())
         save_run(home, record)
         return record
     found = record_over_link(config, ports, runner, log, python=python, repo=repo)

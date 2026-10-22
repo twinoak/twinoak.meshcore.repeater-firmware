@@ -201,9 +201,20 @@ class ThePage(unittest.TestCase):
         result = walk.WalkResult(walk.SECTIONS["1"], None, COMMIT, "2026-10-18T00:00:00Z")
         line = walk.SECTIONS["1"].line("1.1")
         result.add(walk.Step(line, "a step", walk.OK))
-        text, ticked, missing = walk.tick_page("# a page with no such line\n", result)
-        self.assertEqual((ticked, missing), ([], ["1.1"]))
+        text, ticked, already, missing = walk.tick_page("# a page with no such line\n", result)
+        self.assertEqual((ticked, already, missing), ([], [], ["1.1"]))
         self.assertEqual(text, "# a page with no such line\n")
+
+    def test_a_line_that_is_already_ticked_is_said_to_be_ticked_already(self):
+        """Not *not found in docs/bench.md*, which is what it used to say: the page did not
+        lose the line, it has it already (tasks/phase-3.4/FOLLOWUPS.md, p3.5-01)."""
+        result = walk.WalkResult(walk.SECTIONS["1"], None, COMMIT, "2026-10-18T00:00:00Z")
+        line = walk.SECTIONS["1"].line("1.1")
+        result.add(walk.Step(line, "a step", walk.OK))
+        page = "## 1\n\n- [x] %s (bench, 2026-10-22, 9fb721b)\n" % line.anchor
+        text, ticked, already, missing = walk.tick_page(page, result)
+        self.assertEqual((ticked, already, missing), ([], ["1.1"], []))
+        self.assertEqual(text, page)
 
     def test_the_head_table_says_which_sections_a_walk_covers(self):
         head = self.text.split("## 0.")[0]
@@ -362,6 +373,25 @@ class SectionEight(WalkCase):
         self.assertIn("restored: repeater back on the board", text)
         self.assertIsNone(load_run(self.home, SERIAL))
         self.assertNotIn("| differs |", text)
+
+    def test_a_new_unit_is_walked_and_restored_rather_than_left_differing(self):
+        """A board with its base and no application - how every new unit arrives - walked through
+        section 8: the run records the image the walk is about to write, so the restore at the end
+        is a step that passed and not the *differs* the first board gave (p3.4-02, p3.5-01)."""
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.walk(["walk", "8"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        # the walk's own flash found the bootloader and touched nothing; the one touch is the
+        # restore's, from the application the walk had just given the board
+        self.assertIn("the board is already in its bootloader", out)
+        self.assertEqual(board.touches, 1)
+        self.assertEqual(board.flashes, [self.repeater_zip, self.repeater_zip])
+        self.assertIn("the board arrived with only its bootloader; restored: the image the run "
+                      "began with", text)
+        self.assertNotIn("RESTORE NOT POSSIBLE", text)
+        self.assertNotIn("| differs |", text)
+        self.assertIsNone(load_run(self.home, SERIAL))
 
     def test_hello_is_skipped_without_a_dongle_and_walked_with_one(self):
         _board, ports, runner = self.fakes()
@@ -709,6 +739,32 @@ class Ticking(WalkCase):
         _board, ports, runner = self.fakes()
         self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
         self.assertEqual(self.page(), once)
+
+    def test_the_second_walk_says_already_ticked_and_not_not_found(self):
+        """The words the first board showed (p3.4-02): a second walk of a section said `not
+        found in docs/bench.md` of lines an earlier run had ticked."""
+        _board, ports, runner = self.fakes()
+        self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        self.out = io.StringIO()
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertIn("already ticked in docs/bench.md, so left as they are: 1.1", out)
+        self.assertNotIn("not found in docs/bench.md", out)
+        self.assertIn("ticked in docs/bench.md: nothing", out)
+
+    def test_a_line_the_page_lost_still_says_not_found(self):
+        """The other half: the message stays for a page that really did move."""
+        page = self.page()
+        bounds = walk.bullet_bounds(page, walk.SECTIONS["1"].line("1.1").anchor)
+        with open(os.path.join(self.repo, "docs", "bench.md"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write(page[:bounds[0]] + page[bounds[1]:].lstrip("\n"))
+        _board, ports, runner = self.fakes()
+        code, out = self.walk(["walk", "1", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertIn("not found in docs/bench.md, so not ticked: 1.1", out)
+        self.assertNotIn("already ticked", out)
 
     def test_without_the_flag_the_page_is_not_touched(self):
         before = self.page()

@@ -1286,13 +1286,31 @@ class Walker(object):
 
     # ---- the run, and the restore that closes it
 
+    def _repeater_image(self):
+        """This walk's repeater image, inspected, or None when it is not there or a guard refuses
+        it. It is what a walk leaves on the board - section 9's own last line included - so it is
+        what a board found with nothing but its bootloader records (runs.record_board)."""
+        path = self.image or own_image_of("repeater", self.config.board, self.repo)
+        if not os.path.isfile(path):
+            return None
+        try:
+            return self.bench.inspect(path)
+        except cfg.Refused:
+            return None
+
     def _open_a_run(self):
-        """What is on the board now, recorded before the first flash of this walk (runs.py)."""
+        """What is on the board now, recorded before the first flash of this walk (runs.py).
+
+        A board that shows only its bootloader - a new unit, with its base and no application -
+        can say nothing, so the run records the repeater image this walk puts back instead
+        (p3.5-01); without it the restore at the end has nothing to flash and the line differs,
+        which is what the first board on this bench did (p3.4-02)."""
         run = load_run(self.home, self.config.serial)
         if run is None:
             run = record_board(self.config, self.ports, self.runner, self.say, self.home,
                                found_image=self.image, timeouts=self.timeouts,
-                               python=self.bench.python, repo=self.repo)
+                               python=self.bench.python, repo=self.repo,
+                               bootloader_image=self._repeater_image())
             self.result.note("This walk opened the run: %s" % run.describe())
         else:
             self.result.note("A run was already open for this board: %s" % run.describe())
@@ -1456,8 +1474,9 @@ def write_result(result, out_dir):
 # ----------------------------------------------------------------------------- ticking the page
 
 def bullet_bounds(text, anchor):
-    """(start, end) of the `- [ ] ...` bullet of docs/bench.md that carries `anchor`, or None when
-    the anchor is not there or is not unique - a walk whose page has moved ticks nothing."""
+    """(start, end) of the `- [ ] ...` or `- [x] ...` bullet of docs/bench.md that carries
+    `anchor`, or None when the anchor is not there or is not unique - a walk whose page has moved
+    ticks nothing."""
     where = text.find(anchor)
     if where < 0 or text.find(anchor, where + 1) >= 0:
         return None
@@ -1474,8 +1493,13 @@ def bullet_bounds(text, anchor):
 
 def tick_page(text, result):
     """docs/bench.md with every line this walk confirmed ticked `[x] ... (bench, <date>,
-    <commit>)`. Returns (the page, the keys ticked, the keys it could not find)."""
-    ticked, missing = [], []
+    <commit>)`. Returns (the page, the keys ticked, the keys that were ticked already, the keys it
+    could not find).
+
+    A line that is already `- [x] ` is *already ticked* and not missing: walking a section twice
+    changes nothing (p3.3-03's decision 1), and the words should say that rather than that the
+    page lost a line it did not lose (tasks/phase-3.4/FOLLOWUPS.md, p3.5-01)."""
+    ticked, already, missing = [], [], []
     tag = " (bench, %s, %s)" % (result.date, result.short_commit)
     for line in result.confirmed_lines():
         bounds = bullet_bounds(text, line.anchor)
@@ -1484,6 +1508,9 @@ def tick_page(text, result):
             continue
         start, end = bounds
         bullet = text[start:end]
+        if bullet.startswith("- [x] "):
+            already.append(line.key)
+            continue
         if not bullet.startswith("- [ ] "):
             missing.append(line.key)
             continue
@@ -1492,7 +1519,7 @@ def tick_page(text, result):
             body = body.rstrip() + tag
         text = text[:start] + body + text[end:]
         ticked.append(line.key)
-    return text, ticked, missing
+    return text, ticked, already, missing
 
 
 def followups_for(result, repo=REPO):
@@ -1563,11 +1590,13 @@ def run_walk(bench, args):
         page = os.path.join(bench.repo, "docs", "bench.md")
         with open(page, "r", encoding="utf-8") as fh:
             text = fh.read()
-        new, ticked, missing = tick_page(text, result)
+        new, ticked, already, missing = tick_page(text, result)
         if new != text:
             with open(page, "w", encoding="utf-8") as fh:
                 fh.write(new)
         bench.say("ticked in docs/bench.md: %s" % (", ".join(ticked) or "nothing"))
+        if already:
+            bench.say("already ticked in docs/bench.md, so left as they are: %s" % ", ".join(already))
         if missing:
             bench.say("not found in docs/bench.md, so not ticked: %s" % ", ".join(missing))
         for written in write_followups(result, bench.repo):

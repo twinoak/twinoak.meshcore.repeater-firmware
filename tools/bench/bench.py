@@ -153,13 +153,15 @@ class Bench(object):
 
     def cmd_record(self, args):
         self.load()
-        if args.image:
-            self.inspect(args.image)  # the image said to be on the board must pass the guards too
+        # The image said to be on the board passes the guards too - and on a board that shows
+        # only its bootloader it is the only thing that can be recorded (runs.record_board).
+        named = self.inspect(args.image) if args.image else None
         self.require_board()
         with self.lock("record"):
             record = record_board(self.config, self.ports, self.runner, self.say, self.home,
                                   found_image=os.path.abspath(args.image) if args.image else None,
-                                  timeouts=self.timeouts, python=self.python, repo=self.repo)
+                                  timeouts=self.timeouts, python=self.python, repo=self.repo,
+                                  bootloader_image=named)
         if record.role is None:
             self.say("RECORDED NOTHING RESTORABLE: %s" % record.describe())
             return cfg.EXIT_FAILED
@@ -207,18 +209,21 @@ class Bench(object):
     def cmd_flash(self, args):
         self.load()
         image = self.inspect(args.image)              # every guard, before any port
-        found_image = None
+        found_image, found = None, None
         if args.found:
             found_image = os.path.abspath(args.found)
-            self.inspect(found_image)
+            found = self.inspect(found_image)
         self.require_board()
         with self.lock("flash %s" % os.path.basename(args.image)):
             run = load_run(self.home, self.config.serial)
             if run is None:
                 self.say("no run is open for %s: recording what is on the board first" % self.config.serial)
+                # A board that shows only its bootloader has no console to read, so what the run
+                # records is the file about to be written - or the one `--found` named, which is
+                # what will go back on (runs.record_board, p3.5-01).
                 run = record_board(self.config, self.ports, self.runner, self.say, self.home,
                                    found_image=found_image, timeouts=self.timeouts, python=self.python,
-                                   repo=self.repo)
+                                   repo=self.repo, bootloader_image=found or image)
             elif found_image and not run.found_image:
                 run.found_image = found_image
                 from runs import save_run
@@ -269,13 +274,20 @@ class Bench(object):
                                           % (said["name"], run.name))
                 self.say(self.last_restore_line)
                 return cfg.EXIT_FAILED
-        if run.found_image:
+        head = "restored: %s back on the board" % run.role
+        if run.how == "bootloader":
+            # The board arrived with its base and no application, so the run began with the image
+            # it wrote and that is what goes back on: there was no identity on the board to record
+            # and so none to check (p3.5-01).
+            head = ("the board arrived with only its bootloader; restored: the image the run "
+                    "began with")
+            which = "%s %s, from %s" % (run.role, image.version, how)
+        elif run.found_image:
             which = "the recorded version %s, from %s" % (image.version, how)
         else:
             which = "this run's own image of that role (%s %s, %s)" % (image.role, image.version, how.split(" (")[-1].rstrip(")"))
         clear_run(self.home, self.config.serial)
-        self.last_restore_line = ("restored: %s back on the board - %s; %s"
-                                  % (run.role, which, "; ".join(checks) or "ok"))
+        self.last_restore_line = ("%s - %s; %s" % (head, which, "; ".join(checks) or "ok"))
         self.say(self.last_restore_line)
         return cfg.EXIT_OK
 
