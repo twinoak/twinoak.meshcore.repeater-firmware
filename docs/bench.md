@@ -690,7 +690,7 @@ of the first.
   and left the hardware one at a timeout an update measurably fits in. The
   two-DFU recovery is still in `tools/bench` for a scanner image from before
   that, and it says which case it was (§0a). (bench, 2026-10-22, 9fb721b)
-- [ ] **p3-02, p3.5-03** **The watchdog is live.** With the scanner flashed,
+- [x] **p3-02, p3.5-03** **The watchdog is live.** With the scanner flashed,
   **`hang`** on either console: the unit acks, the main loop stops, and the 8 s
   loop check resets it about eight seconds later — the port goes and comes back
   — with `reset` → ______ (`wdt`) and `wdt` → ______ (`loop`, the software
@@ -700,7 +700,7 @@ of the first.
   the same demonstration: shorter than the deadline, so the loop comes back and
   the unit answers an `err` instead of resetting. The **hardware** watchdog
   behind it (60 s, `WDT_TIMEOUT_S`) is the backstop for a part whose interrupts
-  have stopped too, and provoking that is still nobody's.
+  have stopped too, and provoking that is still nobody's. (bench, 2026-10-22, 8ac514f)
 
 ### The fast sweep
 

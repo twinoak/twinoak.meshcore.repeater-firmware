@@ -1647,7 +1647,9 @@ def write_followups(result, repo=REPO):
         block = "\n## From a bench walk of section %s (%s)\n\n%s\n" % (result.section.number,
                                                                       result.date,
                                                                       "\n".join(items))
-        with open(path, "w", encoding="utf-8") as fh:
+        # newline="": the repository is LF everywhere, in the working tree too
+        # (.gitattributes), and a tool that writes a page on Windows must not leave it CRLF.
+        with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text.rstrip("\n") + "\n" + block)
         written.append(path)
     return written
@@ -1682,7 +1684,8 @@ def run_walk(bench, args):
             text = fh.read()
         new, ticked, already, missing = tick_page(text, result)
         if new != text:
-            with open(page, "w", encoding="utf-8") as fh:
+            # newline="", for the reason write_followups gives: LF on disk too.
+            with open(page, "w", encoding="utf-8", newline="") as fh:
                 fh.write(new)
         bench.say("ticked in docs/bench.md: %s" % (", ".join(ticked) or "nothing"))
         if already:
