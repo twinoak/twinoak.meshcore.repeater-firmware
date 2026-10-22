@@ -19,6 +19,12 @@ What is held:
     every bullet of a walked section is a step of its walk - a page that moves fails here;
   * section 1: the console's eight lines, the blanks filled, and the five lines that are a
     person's said to be;
+  * section 3: the clock on a board with no RTC - `unset` and upstream's 2024 date, a
+    `time <epoch>` set, `clock sync`, the `restored` after a `reboot`, the `clkreboot` that
+    cannot put the node behind itself, and `rtc` never said - with the seven lines that need the
+    link, the switch, the power, a companion or a part nobody has said to be a person's;
+  * section 5: `power.low_mv` set to 3600, listed, still 3600 after a restart, `3350`, `2400`
+    and `4400` refused with nothing changed, and both thresholds put back as they were found;
   * section 8: the descriptor, the flash, `hello` over the link (and skipped without a dongle),
     and the restore that closes the run;
   * section 9: the round trip - the `boot` line, `sweep` at 281 points, `hist`, `dwell`, `cad`,
@@ -57,6 +63,10 @@ from runs import RunRecord, load_run, save_run  # noqa: E402
 from test_bench import BenchCase, REPEATER_ID, SERIAL, firmware_for  # noqa: E402
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+# What `time.time()` is pretended to be while section 3 is walked: 14 October 2026, 17:46:40 UTC.
+# The walk sets the node's clock to this machine's time, so a fixed one makes what the board says
+# afterwards something a test can hold exactly (upstream prints the minute and not the second).
+WALK_NOW = 1792000000
 PASSWORD = "a-password-nobody-keeps"
 DONGLE = "A50285BI"
 
@@ -113,9 +123,11 @@ class WalkCase(BenchCase):
         runner = FakeRunner(boards=[board], new_firmware=firmware_for, **kw)
         return board, ports, runner
 
-    def walk(self, argv, ports=None, runner=None, probe=None, region=None, commit=COMMIT):
+    def walk(self, argv, ports=None, runner=None, probe=None, region=None, commit=COMMIT,
+             now_epoch=WALK_NOW):
         bench = self.bench(ports=ports, runner=runner, probe=probe, region=region)
         bench.commit = commit
+        bench.now_epoch = (lambda: now_epoch)
         code = benchcli.main(argv, bench=bench)
         return code, self.out.getvalue()
 
@@ -162,8 +174,10 @@ class ThePage(unittest.TestCase):
         with open(os.path.join(REPO, "docs", "bench.md"), "r", encoding="utf-8") as fh:
             cls.text = fh.read()
 
-    def test_the_walkable_sections_are_the_tasks_four(self):
-        self.assertEqual(walk.WALKABLE, ("1", "8", "9", "10"))
+    def test_the_walkable_sections_are_the_six_the_page_names(self):
+        """p3.3-03 wrote four of them; p3.5-04 added §3 and §5, the console's half of the clock
+        and of the thresholds."""
+        self.assertEqual(walk.WALKABLE, ("1", "3", "5", "8", "9", "10"))
 
     def test_every_anchor_is_a_bullet_of_the_page_exactly_once(self):
         for number in walk.WALKABLE:
@@ -242,9 +256,9 @@ class NoBench(WalkCase):
 
     def test_a_section_with_no_walk_is_refused(self):
         _board, ports, runner = self.fakes()
-        code, out = self.walk(["walk", "5"], ports=ports, runner=runner)
+        code, out = self.walk(["walk", "4"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_REFUSED)
-        self.assertIn("there is no walk for section 5", out)
+        self.assertIn("there is no walk for section 4", out)
         self.assertEqual(self.ports.opened, [])
 
     def test_a_board_held_by_another_process_is_exit_four(self):
@@ -351,6 +365,244 @@ class SectionOne(WalkCase):
         code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_REFUSED, out)
         self.assertIn("is in its bootloader", out)
+
+
+# ----------------------------------------------------------------------------- section 3
+
+class SectionThree(WalkCase):
+    """docs/bench.md section 3's console lines, on a fake board whose clock keeper is the
+    firmware's own rules (fakes.py: the file, the `clean` flag, the save interval)."""
+
+    def fresh(self, **kw):
+        """A node whose clock has never been set: `unset`, and upstream's 2024 date."""
+        return FakeRepeaterFirmware(REPEATER_ID, **kw)
+
+    def walk_three(self, firmware=None, **kw):
+        board, ports, runner = self.fakes(self.board(firmware or self.fresh()))
+        code, out = self.walk(["walk", "3"], ports=ports, runner=runner, **kw)
+        return board, code, out
+
+    def test_the_console_lines_of_the_clock(self):
+        """Every line of the section a console can read, with `clock sync` given a sender
+        timestamp - which is the only way upstream's own line can move a clock at all
+        (CommonCLI.cpp:199-207), and so the walk's own ok path."""
+        board, code, out = self.walk_three(self.fresh(clock_sync_sender=WALK_NOW + 5))
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        name, text = self.result_file()
+        self.assertTrue(name.startswith("walk-3-"), name)
+        self.assertEveryLineHasAStep("3", text)
+        self.assertNotIn("| differs |", text)
+        for sent in ("sensor get clock.state", "clock", "time %d" % WALK_NOW, "clock sync",
+                     "clkreboot"):
+            self.assertIn("sent: `%s`" % sent, text)
+        # the blanks: `unset` and 2024 before anything, `set` after the set, `restored` after
+        # each of the two resets - and the clkreboot's margin is the keeper's save interval
+        self.assertIn("**section 3 clock.state, before any set** -> unset", text)
+        self.assertIn("**section 3 clock, before any set** -> 10:52 - 15/5/2024 UTC", text)
+        self.assertIn("**section 3 clock.state, after the set** -> set", text)
+        self.assertIn("**section 3 after a reboot** -> restored, 17:46 - 14/10/2026 UTC "
+                      "(-40 s from the set)", text)
+        self.assertIn("**section 3 after a clkreboot** -> restored, 18:46 - 14/10/2026 UTC "
+                      "(+3600 s ahead of where the set left it)", text)
+        self.assertIn("**section 3 the clock.state words read** -> "
+                      "unset, set, set, restored, restored", text)
+        # two resets, both of them upstream's own console lines, and no flash and no run
+        self.assertEqual(board.firmware.rebooted, 2)
+        self.assertEqual(board.flashes, [])
+        self.assertIsNone(load_run(self.home, SERIAL))
+        self.assertNoPassword(text)
+
+    def test_clock_sync_at_the_usb_console_is_a_differs_for_p1_04(self):
+        """What the pinned firmware really does at this port: ours calls `handleCommand(0, ...)`
+        (src/roles/repeater/main.cpp), so `clock sync` has no sender timestamp to use and can
+        only refuse. The page's line is p1-04's, so that is a *differs* and a follow-up - and
+        every other line of the section is still walked and ticked."""
+        self.phase_followups("1")
+        _board, code, out = self.walk_three()
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("ERR: clock cannot go backwards", text)
+        self.assertIn("plus one and refuses when that is not ahead", text)
+        differs = text.split("## What differs")[1]
+        self.assertIn("3.9", differs)
+        self.assertNotIn("3.7", differs)
+        self.assertNotIn("3.10", differs)
+
+    def test_a_differs_is_a_follow_up_for_p1_04_and_the_rest_is_ticked(self):
+        self.phase_followups("1")
+        _board, code, out = self.walk_three(now_epoch=WALK_NOW)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        code, out = self.walk(["walk", "3", "--tick"],
+                              *self.fakes(self.board(self.fresh()))[1:])
+        with open(os.path.join(self.repo, "tasks", "phase-1", "FOLLOWUPS.md")) as fh:
+            followups = fh.read()
+        self.assertIn("**[04] `docs/bench.md` 3.9 differs from the board**", followups)
+        page = self.page()
+        for key in ("3.7", "3.8", "3.10", "3.11", "3.12"):
+            bounds = walk.bullet_bounds(page, walk.SECTIONS["3"].line(key).anchor)
+            self.assertTrue(page[bounds[0]:].startswith("- [x] "), key)
+        bounds = walk.bullet_bounds(page, walk.SECTIONS["3"].line("3.9").anchor)
+        self.assertTrue(page[bounds[0]:].startswith("- [ ] "))       # the differs is not ticked
+
+    def test_a_node_whose_clock_has_been_set_before_skips_rather_than_differs(self):
+        """A second walk of this section, an hour after the first one's `clkreboot`: the node is
+        no longer the node the first lines are about, and the walk says so rather than calling
+        the board wrong (p3.5-01's rule for a line already walked)."""
+        ahead = WALK_NOW + 7200
+        firmware = self.fresh(clock_state="restored", epoch=ahead, clock_file=(ahead, False))
+        board, code, out = self.walk_three(firmware)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNotIn("| differs |", text)
+        self.assertIn("this node's clock has been set before", text)
+        self.assertIn("already 7160 s ahead of this machine's", text)   # the minute is cut
+        # the clkreboot line is still walked, and the node is still not put behind itself
+        self.assertIn("(+3600 s ahead of where the set left it)", text)
+        self.assertEqual(board.firmware.rebooted, 1)          # the `reboot` line was skipped
+
+    def test_a_board_with_no_keeper_comes_back_in_2024_and_that_is_a_differs(self):
+        """The whole of why section 3 exists: a reset that lands on upstream's volatile clock
+        again is a node every companion that heard its earlier adverts would drop."""
+        board, code, out = self.walk_three(self.fresh(forgets_clock=True))
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        differs = text.split("## What differs")[1]
+        self.assertIn("3.10", differs)
+        self.assertIn("15/5/2024", differs)
+        self.assertEqual(board.firmware.clock_state, "unset")
+
+    def test_a_board_that_says_rtc_with_no_rtc_fitted_is_a_differs(self):
+        """U5 is DNP on this batch, so `rtc` is not an answer this board can honestly give."""
+        firmware = self.fresh(clock_state="rtc", epoch=WALK_NOW - 600, rtc_epoch=WALK_NOW - 600)
+        _board, code, out = self.walk_three(firmware)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        differs = text.split("## What differs")[1]
+        self.assertIn("3.12", differs)
+        self.assertIn("never said `rtc`", text)
+
+    def test_the_seven_lines_that_need_a_person_say_what_they_need(self):
+        self.walk_three(self.fresh(clock_sync_sender=WALK_NOW + 5))
+        _name, text = self.result_file()
+        still = text.split("## Still a person's")[1]
+        for owed in ("dongle on the link pins", "reset switch", "lab supply's switch",
+                     "cannot hear a radio", "part nobody on this bench has"):
+            self.assertIn(owed, still)
+        self.assertEqual(still.count("- **3."), 7)
+
+    def test_a_scanner_on_the_board_is_refused(self):
+        _board, code, out = self.walk_three(FakeScannerFirmware())
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("nothing a repeater says", out)
+
+    def test_a_board_in_its_bootloader_is_refused_with_the_reason(self):
+        board, ports, runner = self.fakes(self.board(mode="bootloader"))
+        code, out = self.walk(["walk", "3"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("there is no console to walk section 3 with", out)
+
+
+# ----------------------------------------------------------------------------- section 5
+
+class SectionFive(WalkCase):
+    """docs/bench.md section 5's two threshold lines, over the fake console. The fake refuses a
+    pair with fakes.thresholds_acceptable, which is src/common/power/BatteryWatch.cpp's own
+    rule."""
+
+    def walk_five(self, firmware=None, **kw):
+        board, ports, runner = self.fakes(self.board(firmware
+                                                     or FakeRepeaterFirmware(REPEATER_ID)))
+        code, out = self.walk(["walk", "5"], ports=ports, runner=runner, **kw)
+        return board, code, out
+
+    def test_the_thresholds_are_set_listed_and_still_there_after_a_restart(self):
+        board, code, out = self.walk_five()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        name, text = self.result_file()
+        self.assertTrue(name.startswith("walk-5-"), name)
+        self.assertEveryLineHasAStep("5", text)
+        self.assertNotIn("| differs |", text)
+        for sent in ("sensor set power.low_mv 3600", "sensor list 5", "reboot",
+                     "sensor get power.low_mv"):
+            self.assertIn("sent: `%s`" % sent, text)
+        self.assertIn("power.low_mv=3600", text)
+        self.assertIn("**section 5 power.low_mv after the restart** -> 3600", text)
+        self.assertEqual(board.firmware.rebooted, 1)
+        self.assertEqual(board.flashes, [])
+        self.assertIsNone(load_run(self.home, SERIAL))
+
+    def test_the_three_refusals_are_upstreams_one_word_and_change_nothing(self):
+        _board, code, out = self.walk_five()
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        for mv in (3350, 2400, 4400):
+            self.assertIn("**section 5 the refusal of %d** -> can't find custom var" % mv, text)
+            self.assertIn("`sensor set power.low_mv %d` is refused" % mv, text)
+        self.assertIn("(`power.low_mv` is still 3600)", text)
+
+    def test_the_thresholds_are_put_back_as_they_were_found(self):
+        """And a node whose `crit` is not the page's 3300 does not have the page's three
+        refusals: `3350` above a `crit` of 3200 is a pair this firmware accepts, so the line is
+        skipped with that reason rather than failed."""
+        firmware = FakeRepeaterFirmware(REPEATER_ID, low_mv=3400, crit_mv=3200)
+        board, code, out = self.walk_five(firmware)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        self.assertEqual((board.firmware.low_mv, board.firmware.crit_mv), (3400, 3200))
+        _name, text = self.result_file()
+        self.assertIn("this node's `power.crit_mv` is 3200 and the page's three values", text)
+        self.assertIn("Found `power.low_mv` 3400 and `power.crit_mv` 3200", text)
+        self.assertIn("**section 5 the thresholds this walk found, and left** -> "
+                      "power.low_mv 3400, power.crit_mv 3200", text)
+        # and the walk's last step on the console is that they are back (the task: "its last
+        # line says so")
+        steps = [line for line in out.splitlines()
+                 if re.match(r"^  (ok|differs|needs a person|skipped)\s", line)]
+        self.assertIn("back at the values this walk found", steps[-1])
+
+    def test_a_board_that_forgets_the_threshold_after_a_restart_is_a_differs(self):
+        self.phase_followups("1")
+        board, ports, runner = self.fakes(self.board(
+            FakeRepeaterFirmware(REPEATER_ID, forgets_thresholds=True)))
+        code, out = self.walk(["walk", "5", "--tick"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        differs = text.split("## What differs")[1]
+        self.assertIn("5.5", differs)
+        with open(os.path.join(self.repo, "tasks", "phase-1", "FOLLOWUPS.md")) as fh:
+            self.assertIn("**[06] `docs/bench.md` 5.5 differs from the board**", fh.read())
+
+    def test_a_board_that_takes_a_pair_it_should_refuse_is_a_differs(self):
+        firmware = FakeRepeaterFirmware(REPEATER_ID,
+                                        answers={"sensor set power.low_mv 3350": "ok"})
+        _board, code, out = self.walk_five(firmware)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        differs = text.split("## What differs")[1]
+        self.assertIn("5.6", differs)
+
+    def test_the_paging_line_is_skipped_because_walk_one_reads_it(self):
+        _board, code, out = self.walk_five()
+        _name, text = self.result_file()
+        self.assertIn("`bench walk 1` reads the same two pages at the same console", text)
+
+    def test_the_lines_that_need_a_person_say_what_they_need_and_the_blanks_are_filled(self):
+        _board, code, out = self.walk_five()
+        _name, text = self.result_file()
+        still = text.split("## Still a person's")[1]
+        for owed in ("DMM in series with the panel lead", "phone on the mesh",
+                     "thermometer in the enclosure", "lab supply's knob",
+                     "hand on the I2C connector"):
+            self.assertIn(owed, still)
+        self.assertEqual(still.count("- **5."), 6)
+        # the boot-voltage line is the lab supply's, but its three `get`s are read here
+        self.assertIn("**section 5 get pwrmgt.bootmv** -> 0 mV", text)
+        self.assertIn("**section 5 get pwrmgt.support** -> supported", text)
+        self.assertIn("**section 5 get pwrmgt.bootreason** -> Reset: SREQ; Shutdown: None", text)
+
+    def test_a_scanner_on_the_board_is_refused(self):
+        _board, code, out = self.walk_five(FakeScannerFirmware())
+        self.assertEqual(code, cfg.EXIT_REFUSED, out)
+        self.assertIn("nothing a repeater says", out)
 
 
 # ----------------------------------------------------------------------------- section 8

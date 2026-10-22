@@ -30,6 +30,39 @@ class FakeClock(object):
         self.t += max(seconds, 0.0)
 
 
+# ----------------------------------------------------------------------------- the firmware's
+#                                                                               own numbers
+
+# VolatileRTCClock's built-in date, which every boot of a board with no RTC starts at: 15 May
+# 2024 (MeshCore's src/helpers/ArduinoHelpers.h at the pin d9296435).
+UPSTREAM_CLOCK_EPOCH = 1715770351
+# The clock keeper's: how far ahead of the file a restored clock is put when the file's value was
+# not that restart's own second, and the floor below which no epoch is believed
+# (src/roles/repeater/clock/ClockKeeper.h, kSaveIntervalSeconds and kSaneEpochFloor).
+SAVE_INTERVAL_S = 3600
+SANE_EPOCH_FLOOR = 1767225600
+SANE_EPOCH_CEILING = 4102444800
+# The battery thresholds' window and the hysteresis between them
+# (src/common/power/BatteryWatch.h; thresholdsAcceptable is reproduced below).
+THRESHOLD_FLOOR_MV = 2500
+THRESHOLD_CEILING_MV = 4300
+HYSTERESIS_MV = 100
+
+
+def sane_epoch(epoch):
+    return SANE_EPOCH_FLOOR <= epoch < SANE_EPOCH_CEILING
+
+
+def thresholds_acceptable(low_mv, crit_mv):
+    """src/common/power/BatteryWatch.cpp, line for line: both inside the window, and low far
+    enough above critical that their hysteresis bands do not overlap."""
+    if crit_mv < THRESHOLD_FLOOR_MV or low_mv > THRESHOLD_CEILING_MV:
+        return False
+    if low_mv <= crit_mv:
+        return False
+    return (low_mv - crit_mv) > HYSTERESIS_MV
+
+
 # ----------------------------------------------------------------------------- the consoles
 
 
@@ -45,7 +78,9 @@ class FakeRepeaterFirmware(object):
 
     def __init__(self, repeater_id, version="0.0.0-dev", name="repeater",
                  upstream="repeater-v1.17.1 (d9296435)", answers=None, first_boot=False,
-                 settings=None, prints_banner=True):
+                 settings=None, prints_banner=True, epoch=None, clock_state="unset",
+                 clock_file=None, rtc_epoch=None, clock_sync_sender=0, low_mv=3500,
+                 crit_mv=3300, forgets_thresholds=False, forgets_clock=False):
         self.repeater_id = repeater_id
         # False: the boot lines went out before any host held the port, which is what a real
         # board does - the port is not back before 1.4 s (p3.4-02). The boot still happened.
@@ -63,8 +98,29 @@ class FakeRepeaterFirmware(object):
         self._first_boot_pending = bool(first_boot)
         self.settings = {"lat": "0.0000", "lon": "0.0000", "owner.info": "",
                          "path.hash.mode": "1", "dutycycle": "10.0%", "repeat": "on",
-                         "region.default": "dk"}
+                         "region.default": "dk", "pwrmgt.support": "supported",
+                         "pwrmgt.bootmv": "0 mV",
+                         "pwrmgt.bootreason": "Reset: SREQ; Shutdown: None"}
         self.settings.update(settings or {})
+        # The clock, as the keeper has it on a board with no RTC
+        # (src/roles/repeater/clock/ClockKeeper.h; docs/bench.md section 3 is the walk):
+        # upstream's own volatile clock, our file beside it, and the state word `clock.state`
+        # answers. `rtc_epoch` is a hardware RTC that answers - None on this batch, where U5 is
+        # DNP - and `clock_sync_sender` is the timestamp upstream's `clock sync` would use, which
+        # at the USB console is 0 because ours calls handleCommand(0, ...).
+        self.epoch = UPSTREAM_CLOCK_EPOCH if epoch is None else int(epoch)
+        self.clock_state = clock_state
+        self.clock_file = clock_file        # (epoch, clean) or None
+        self.rtc_epoch = rtc_epoch
+        self.clock_sync_sender = clock_sync_sender
+        # The two thresholds, and whether they survive a restart (our own preferences file,
+        # src/common/power/Prefs.h). False is a board that forgot them, which is a differs.
+        self.low_mv = int(low_mv)
+        self.crit_mv = int(crit_mv)
+        self.forgets_thresholds = forgets_thresholds
+        # True: a board with no clock keeper at all - every reset comes up at upstream's 2024
+        # default, which is the whole of what docs/bench.md section 3 exists to catch.
+        self.forgets_clock = forgets_clock
 
     def banner(self):
         out = "Repeater ID: %s\r\n" % self.repeater_id
@@ -82,13 +138,69 @@ class FakeRepeaterFirmware(object):
     def fw_version(self):
         return "twinoak-repeater %s on MeshCore %s" % (self.version, self.upstream)
 
+    # --- the clock (docs/bench.md section 3) ----------------------------------------------------
+
+    def clock_text(self):
+        """Upstream's own `clock` reply: `%02d:%02d - %d/%d/%d UTC`, the second not in it
+        (src/helpers/CommonCLI.cpp at the pin d9296435)."""
+        import time as _time
+        when = _time.gmtime(self.epoch)
+        return "%02d:%02d - %d/%d/%d UTC" % (when.tm_hour, when.tm_min, when.tm_mday,
+                                             when.tm_mon, when.tm_year)
+
+    def set_clock(self, epoch):
+        """Upstream's `time <epoch>` and `clock sync`, and what the keeper's poll makes of them:
+        the clock only goes forward, the state becomes `set`, and both memories are written."""
+        if epoch <= self.epoch:
+            return "(ERR: clock cannot go backwards)"
+        self.epoch = epoch
+        if self.clock_state != "rtc":
+            self.clock_state = "set"
+        if sane_epoch(epoch):
+            self.clock_file = (epoch, False)
+        return "OK - clock set: %s" % self.clock_text()
+
+    def restart(self):
+        """A reset: ClockKeeper::saveBeforeRestart on the way down - the file with `clean` set,
+        unless the clock is not a sane epoch, which is what `clkreboot` leaves behind - and
+        ClockKeeper::begin on the way up."""
+        if sane_epoch(self.epoch):
+            self.clock_file = (self.epoch, True)
+        if self.forgets_clock:
+            self.clock_file = None
+        if self.forgets_thresholds:
+            self.low_mv, self.crit_mv = 3500, 3300
+        self.boot()
+
+    def boot(self):
+        """ClockKeeper::begin's order: a hardware RTC that answers with a sane time, else the
+        file (its own second when the flag says this restart wrote it, else plus the save
+        interval), else upstream's default. The flag is good for exactly one boot."""
+        if self.rtc_epoch is not None and sane_epoch(self.rtc_epoch):
+            self.epoch = self.rtc_epoch
+            self.clock_state = "rtc"
+            return
+        if self.clock_file is not None:
+            epoch, clean = self.clock_file
+            self.epoch = epoch if clean else epoch + SAVE_INTERVAL_S
+            self.clock_state = "restored"
+            self.clock_file = (epoch, False)
+            return
+        self.epoch = UPSTREAM_CLOCK_EPOCH
+        self.clock_state = "unset"
+
     def sensor_value(self, key):
         if key == "fw.version":
             return self.fw_version()
         if key == "firstboot.state":
             return self.firstboot_state
+        if key == "clock.state":
+            return self.clock_state
+        if key == "power.low_mv":
+            return "%d" % self.low_mv
+        if key == "power.crit_mv":
+            return "%d" % self.crit_mv
         return {"walter.wake": "0", "link.errors": "0", "walter.seen": "never",
-                "clock.state": "unset", "power.low_mv": "3500", "power.crit_mv": "3300",
                 "obs.wake": "0", "client.refused": "0"}.get(key, "")
 
     def sensor_list(self, start=0):
@@ -138,8 +250,31 @@ class FakeRepeaterFirmware(object):
                 return "> %s" % self.sensor_value(key)
             return "can't find custom var"
         if line.startswith("sensor set "):
-            # Upstream's wording for a key that took no value, which is what fw.version is.
+            rest = line[len("sensor set "):]
+            key, _, value = rest.partition(" ")
+            if key in ("power.low_mv", "power.crit_mv") and value.isdigit():
+                mv = int(value)
+                low = mv if key == "power.low_mv" else self.low_mv
+                crit = mv if key == "power.crit_mv" else self.crit_mv
+                if mv <= 0xFFFF and thresholds_acceptable(low, crit):
+                    self.low_mv, self.crit_mv = low, crit
+                    return "ok"
+            # Upstream's one other word: a key it does not have, and a value this table refused.
             return "can't find custom var"
+        if line == "clock":
+            return self.clock_text()
+        if line == "clock sync":
+            # Upstream sets the clock to the *sender's* timestamp plus one and refuses when that
+            # is not ahead of the node's own (CommonCLI.cpp:199-207 at the pin). The USB console
+            # has no sender: src/roles/repeater/main.cpp calls handleCommand(0, ...).
+            if self.clock_sync_sender > self.epoch:
+                return self.set_clock(self.clock_sync_sender + 1)
+            return "ERR: clock cannot go backwards"
+        if line.startswith("time "):
+            try:
+                return self.set_clock(int(line[len("time "):].strip()))
+            except ValueError:
+                return "(ERR: clock cannot go backwards)"
         if line == "get public.key":
             return "> %s" % self.repeater_id.lower()
         if line.startswith("password "):
@@ -157,8 +292,12 @@ class FakeRepeaterFirmware(object):
             self.repeater_id = "%02X" % (self.erased % 256) + self.repeater_id[2:]
             self._first_boot_pending = True
             return "File system erase: OK"
-        if line == "reboot":
+        if line in ("reboot", "clkreboot"):
             self.rebooted += 1
+            if line == "clkreboot":
+                # Upstream sets its clock back to the 2024 default and then reboots
+                # (CommonCLI.cpp:187-190 at the pin); the keeper's file is what saves the node.
+                self.epoch = UPSTREAM_CLOCK_EPOCH
             return None
         if line == "region default":
             return "> %s" % self.settings.get("region.default", "")
@@ -461,7 +600,8 @@ class FakePort(object):
                 line, self._in = self._in.split(b"\r", 1)
                 text = line.decode("utf-8", errors="replace")
                 reply = fw.handle(text)
-                if text == "reboot":
+                if text in ("reboot", "clkreboot"):
+                    fw.restart()
                     self.board._fresh = True
                     self.board.app_port = None
                     self.board.reboot()

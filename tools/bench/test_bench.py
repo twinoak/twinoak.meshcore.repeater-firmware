@@ -495,8 +495,12 @@ class TheConsoleGuard(unittest.TestCase):
         self.refused("get\tname")
 
     def test_ordinary_lines_pass(self):
+        # The clock's and the thresholds' lines are among them: docs/bench.md sections 3 and 5
+        # are walks, and nothing of theirs is a line this file holds back (p3.5-04).
         for line in ("ver", "board", "get radio", "sensor list", "sensor get fw.version", "set name Bench",
-                     "get guest.password", "advert", "neighbors", "info", "sweep", "stop", "reboot"):
+                     "get guest.password", "advert", "neighbors", "info", "sweep", "stop", "reboot",
+                     "clock", "clock sync", "time 1792000000", "sensor set power.low_mv 3600",
+                     "sensor get clock.state", "get pwrmgt.bootmv"):
             self.assertEqual(console.console_guard(line), line)
 
     def test_redaction(self):

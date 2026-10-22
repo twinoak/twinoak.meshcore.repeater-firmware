@@ -10,6 +10,7 @@
     python tools/bench/bench.py console --scanner --collect 60
     python tools/bench/bench.py restore                    put back what was found
     python tools/bench/bench.py walk 1 [--tick]            docs/bench.md section 1, as steps
+    python tools/bench/bench.py walk 3 / 5                 the clock, and the thresholds
 
 The rig is bench.local.json at the repository root (bench.example.json is the shape, config.py
 says what each field means). The rails are in the tool, not in the caller's intentions:
@@ -378,7 +379,8 @@ def build_parser():
     console.add_argument("--timeout", type=float, default=2.5)
     console.set_defaults(run="cmd_console")
     walk = subs.add_parser("walk", help="docs/bench.md's checkable lines of a section, as steps")
-    walk.add_argument("section", help="1, 8, 9 or 10 - the sections a script can check")
+    walk.add_argument("section",
+                      help="1, 3, 5, 8, 9 or 10 - the sections a script can check")
     walk.add_argument("--image", default=None,
                       help="the repeater's DFU package (default: this checkout's own build)")
     walk.add_argument("--scanner-image", default=None, dest="scanner_image",
