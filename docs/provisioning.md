@@ -29,8 +29,9 @@ order:
 
 ### The profile, as shipped
 
-Two lines, because two is all this project has a document for — the
-specification for one, and the band's own regulation for the other:
+Six lines, because six is all this project has a document for — the
+specification for one, the band's own regulation for the second, and the
+**Danish standard** as Thomas settled it on 22 October 2026 for the last four:
 
 ```
 # flooded adverts carry two-byte path hashes (spec/SYSTEM.md S-12, meshmaster.dk D-33)
@@ -38,7 +39,42 @@ set path.hash.mode 1
 # the duty cycle the home channel's band allows, which upstream starts at 50 %
 # (ERC Recommendation 70-03, Annex 1, 869.400-869.650 MHz; platformio.ini's [band_868])
 set dutycycle 10
+# the receiver's AGC and noise floor re-sampled every 4 s, which upstream leaves off
+set agc.reset.interval 4
+# a flood packet is repeated once at two-byte hashes, where upstream repeats it without limit
+set loop.detect moderate
+# an un-scoped flood is dropped past 15 hops, where upstream allows 64
+set flood.max.unscoped 15
+# the flood advert's period, 60-85 h from this node's own key (the rule is below). The 83 is
+# the unit of the session in section 3, whose key begins 7f; another unit's is another number
+set flood.advert.interval 83
 ```
+
+| The line | Upstream's default | What it is for |
+|---|---|---|
+| `set path.hash.mode 1` | 0 — one byte | two-byte path hashes in the adverts this node floods (`spec/SYSTEM.md` S-12, meshmaster.dk D-33) |
+| `set dutycycle 10` | 50 % | the band's legal ceiling, built from `platformio.ini`'s `[band_868].duty_cycle` |
+| `set agc.reset.interval 4` | 0, which is off | the receiver's AGC and its noise-floor estimate re-sampled every four seconds, so that a repeater that has heard a strong neighbour recovers (`Dispatcher::loop` calls `resetAGC()` on that period; `RadioLibWrapper::resetAGC` throws the stuck floor away) |
+| `set loop.detect moderate` | `off` | a flood packet is let past this node at most twice at one-byte path hashes and **once** at two or three — and this firmware floods at two (`max_loop_moderate`, `MyMesh::allowPacketForward`) |
+| `set flood.max.unscoped 15` | 64 | an un-scoped flood (`ROUTE_TYPE_FLOOD`, no transport code) is not forwarded past 15 hops |
+| `set flood.advert.interval <h>` | 47 hours, on every unit in the world | the period of this node's own flood advert, **60–85 hours derived from its key** (below), so that units flashed in one evening do not advertise in step |
+
+**The advert interval is derived from the node's key**, and it is the one line
+of the table that is *built* at run time rather than written:
+
+> `h = 60 + (k mod 26)`, where **`k` is the first byte of the node's public
+> key** — the first two hex digits of the `Repeater ID:` line, which is also
+> the byte the mesh uses as this node's hash.
+
+So 60 to 85 hours inclusive, every hour of that range reachable, and the same
+key always giving the same number: a unit that is rebooted, or erased and given
+back the same identity, asks for the same interval. `7f3a…` is `0x7f` = 127,
+and 127 mod 26 = 23, so that unit floods an advert every **83 hours**. The
+range sits well inside upstream's own, which takes 0 or 3–168 hours and refuses
+everything else, and upstream re-arms the timer the moment the line is accepted,
+so the derived period is in force on the first boot itself. The 26 hours of
+spread are what keep a batch of units from flooding the mesh together for as
+long as they run; upstream's single 47 is the thing being avoided.
 
 Upstream floods this node's own adverts at `path_hash_mode + 1` bytes
 (`MyMesh::sendSelfAdvertisement`), and its default of 0 means one byte — which
@@ -89,7 +125,9 @@ settings".
   login therefore succeeds at guest permission. §2 is where that is decided
   on purpose rather than by default.
 - **It advertises itself.** A zero-hop advert goes out once the clock is
-  trustworthy (`docs/ARCHITECTURE.md` §5), and a flood advert every 47 hours.
+  trustworthy (`docs/ARCHITECTURE.md` §5), and a flood advert every 60 to 85
+  hours — the number its own key gives it, where upstream would have every unit
+  on 47.
   The *local* advert timer starts at two minutes and is turned off by the first
   preference save of any manual configuration — upstream does that itself
   (`CommonCLI::savePrefs` zeroes `advert_interval` below 60 minutes, "now that
@@ -137,15 +175,34 @@ legal `CLI` request (`docs/link.md` §2b). Define regions with `region def` or
 
 ### What this page deliberately does not set
 
-The Danish mesh has a best-practice profile beyond S-12's two bytes and the
-band's duty cycle — meshguide.dk's `lib/checks.js` is it, and it is the document
-to fill the table from. Most of its recommendations are **per site**:
-`rxdelay`, `txdelay` and `direct.txdelay` follow how many neighbours the unit
-can hear, and `loop.detect` and `flood.max.unscoped` are a judgement about the
-neighbourhood. A unit that has never been switched on cannot know any of them,
-so they are not in the profile and not in the table above. Read them off
-meshguide.dk when the unit has been on the air for a week, and
-`tasks/phase-3/reports/03.md` has every key with the value upstream starts it at.
+**The three delays, and nothing else.** `rxdelay`, `txdelay` and
+`direct.txdelay` follow how many neighbours the unit can hear, which a unit that
+has never been switched on cannot know, so they are not in the profile and not
+in the table above. Read them off meshguide.dk when the unit has been on the air
+for a week; `tasks/phase-3/reports/03.md` has every `set` key of the pinned CLI
+with the value upstream starts it at and the Danish standard's beside it.
+
+The rest of that standard — `agc.reset.interval`, `loop.detect`,
+`flood.max.unscoped` and the flood advert's interval — **is** in the profile
+since 22 October 2026 (§1). Each of them is a ceiling or a mode and not a count
+of neighbours, so a fresh unit can hold it without knowing anything about where
+it stands; and each is still a site's to change afterwards, exactly like the
+duty cycle below:
+
+```
+set flood.max.unscoped 20       -> OK                             a different hop ceiling
+set loop.detect strict          -> OK                             a tighter mode
+set agc.reset.interval 8        -> OK - interval rounded to 8      a longer AGC period
+set flood.advert.interval 72    -> OK                             a period of your own choosing
+```
+
+Mind two things about those replies. `agc.reset.interval` is kept as **seconds
+divided by four**, so upstream echoes back what it really stored —
+`set agc.reset.interval 6` answers `OK - interval rounded to 4` — and
+`get agc.reset.interval` reads the rounded number out again. And
+`flood.advert.interval` takes 0 or 3–168 and refuses everything between 1 and 2
+with `Error: interval range is 3-168 hours`; 0 turns the flood advert **off**,
+which is a unit the mesh stops hearing about.
 
 **The duty cycle is no longer one of them.** The 10 % of the 869.400–869.650 MHz
 sub-band is the band's ceiling, not a judgement, so it is in the band and the
@@ -154,12 +211,17 @@ is a judgement about the neighbourhood and is sent like any other setting:
 `set dutycycle <1..100>`, `OK - <n>.<n>%` — and §1 says what upstream does with
 one below 10 % on the next boot.
 
-> **A unit provisioned before this firmware keeps upstream's 50 %.** The profile
-> runs only on the boot that finds no saved settings, and a unit that has been
-> provisioned has them — `sensor get firstboot.state` says `never` on every boot
-> since. Send `set dutycycle 10` once, at the USB port or over the link (§3, §4);
-> it saves immediately and needs no reboot. `get dutycycle` → `> 10.0%` is how
-> you know, and `> 50.0%` is a unit that has not been told.
+> **A unit provisioned before this firmware keeps upstream's defaults.** The
+> profile runs only on the boot that finds no saved settings, and a unit that has
+> been provisioned has them — `sensor get firstboot.state` says `never` on every
+> boot since. Send the lines it missed once, at the USB port or over the link
+> (§3, §4); each saves immediately and needs no reboot. The duty cycle is the one
+> that matters most, because 50 % is five times what the band allows:
+> `get dutycycle` → `> 10.0%` is how you know, and `> 50.0%` is a unit that has
+> not been told. The four of the Danish standard are the same one-line fix —
+> `set agc.reset.interval 4`, `set loop.detect moderate`,
+> `set flood.max.unscoped 15` and `set flood.advert.interval <h>` with the hour
+> §1's rule gives that unit's key, which `get public.key` prints.
 
 ## 3. At the USB port
 
@@ -169,7 +231,7 @@ and prefixes a reply with `  -> `. A line ends with carriage return.
 ```
 Repeater ID: 7f3aa1b2...                      <- printed at boot
 First boot: a random admin password was set (not shown; set yours with 'password <new>')
-First boot: the profile ran 2 of 2 lines (sensor get firstboot.state says 'done'; docs/provisioning.md is the rest)
+First boot: the profile ran 6 of 6 lines (sensor get firstboot.state says 'done'; docs/provisioning.md is the rest)
 
 ver
   -> v1.17.1 (Build: 14 Aug 2026)
@@ -183,6 +245,14 @@ get path.hash.mode
   -> > 1
 get dutycycle
   -> > 10.0%                                 <- the band's; 50.0% is a unit flashed before this
+get agc.reset.interval
+  -> > 4                                     <- the Danish standard's; upstream's own is 0
+get loop.detect
+  -> > moderate                              <- upstream's own is off
+get flood.max.unscoped
+  -> > 15                                    <- upstream's own is 64
+get flood.advert.interval
+  -> > 83                                    <- 60 + (0x7f mod 26), from the key above
 
 set name TwinOak-Odense
   -> OK
@@ -222,8 +292,9 @@ sensor list 5
      firstboot.state=done
 ```
 
-An **older unit** — one provisioned before the duty cycle was the band's — has
-one more line to be given, once, and it is the same line the profile runs:
+An **older unit** — one provisioned before the duty cycle was the band's, or
+before the Danish standard was in the profile — has five more lines to be given,
+once, and they are the lines the profile itself runs:
 
 ```
 get dutycycle
@@ -232,6 +303,17 @@ set dutycycle 10
   -> OK - 10.0%
 get dutycycle
   -> > 10.0%
+
+set agc.reset.interval 4
+  -> OK - interval rounded to 4              <- upstream keeps seconds/4 and echoes it back
+set loop.detect moderate
+  -> OK
+set flood.max.unscoped 15
+  -> OK
+get public.key
+  -> > 7f3aa1b2...                            <- 0x7f = 127, 127 mod 26 = 23, so 60 + 23
+set flood.advert.interval 83
+  -> OK
 ```
 
 Four things worth knowing about that session:
@@ -362,6 +444,8 @@ from a phone logged in as admin:
 | did this boot provision me? | `sensor get firstboot.state` |
 | am I on the right channel? | `get radio` → `> 869.618,62.5,8,8` |
 | do my adverts carry two-byte hashes? | `get path.hash.mode` → `> 1` |
+| did the Danish standard reach me? | `get agc.reset.interval` → `> 4`, `get loop.detect` → `> moderate`, `get flood.max.unscoped` → `> 15` |
+| how often do I flood an advert? | `get flood.advert.interval` → `> <60-85>`, and §1's rule says which from `get public.key` |
 | who am I? | `get name`, `get lat`, `get lon`, `get owner.info`, `get public.key` |
 | what scope do I flood in? | `region default`, `region` (the whole tree) |
 | am I forwarding? | `get repeat` → `> on` |

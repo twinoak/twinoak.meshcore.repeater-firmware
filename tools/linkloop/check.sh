@@ -254,7 +254,21 @@ grep -q "> done" "$out/first-boot.log" || {
   echo "a line of the shipped profile was refused by the miniature of upstream's set" >&2
   exit 1
 }
-echo "   every line of the table taken, the duty-cycle line included"
+echo "   every line of the table taken, the duty-cycle line included - and the one built from the"
+echo "   node's key, which with the fixed key of linkloop.cpp is 'set flood.advert.interval 73'"
+echo
+echo "== and the Danish standard's own refusals, as the pinned CommonCLI.cpp writes them: the"
+echo "   profile's reply rule has to reject each of these, or a line that was refused would be"
+echo "   counted as done (p3.5-05)"
+for pair in "flood.advert.interval 1|Error: interval range is 3-168 hours"             "loop.detect sideways|Error, must be: off, minimal, moderate, or strict"             "flood.max.unscoped 65|Error, max 64"; do
+  line="${pair%%|*}"; want="${pair##*|}"
+  python3 tools/linkcli.py --pipe "$out/linkloop" cli "set $line" > "$out/refusal.log" 2>&1
+  cat "$out/refusal.log"
+  grep -qF "$want" "$out/refusal.log" || {
+    echo "set $line was not refused with: $want" >&2
+    exit 1
+  }
+done
 echo
 echo "== and a duty cycle the band could not have is refused, as upstream refuses it"
 python3 tools/linkcli.py --pipe "$out/linkloop" cli "set dutycycle 0" > "$out/dutycycle-bad.log" 2>&1

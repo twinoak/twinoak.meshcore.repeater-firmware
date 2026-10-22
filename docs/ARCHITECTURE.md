@@ -301,13 +301,26 @@ does before anybody has been to the site (`spec/SYSTEM.md` S-12, S-13; `docs/pro
   (`src/roles/repeater/firstboot/Profile.h`). It is text, not code, for three reasons - it touches
   no private member of upstream's, a pin bump that renames a key comes back as a reply that is not
   `OK` rather than as a corrupted preference, and it can be read and changed without reading C++.
-  As shipped it is **two** lines, because two are what a document of this project gives a value
+  As shipped it is **six** lines, because six are what a document of this project gives a value
   for: `set path.hash.mode 1` (S-12 and meshmaster.dk's D-33: upstream floods this node's adverts
-  at `path_hash_mode + 1` bytes), and `set dutycycle 10` — the duty cycle the home channel's band
+  at `path_hash_mode + 1` bytes); `set dutycycle 10` — the duty cycle the home channel's band
   allows, which is a regulation and not a judgement, so it lives in the band
   (`platformio.ini`'s `[band_868].duty_cycle`, `src/common/bands/Bands.h`) and the line is
-  **generated from it** rather than written. §7 has the arithmetic and why upstream's own 50 %
-  was the wrong place to start.
+  **generated from it** rather than written (§7 has the arithmetic and why upstream's own 50 %
+  was the wrong place to start); and the **Danish standard**'s four, which Thomas settled on
+  22 October 2026 — `set agc.reset.interval 4`, `set loop.detect moderate`,
+  `set flood.max.unscoped 15`, and `set flood.advert.interval <h>` with **`h` derived from the
+  node's own public key**, `60 + (k mod 26)` for `k` its first byte, so that units flashed
+  together do not flood their adverts in step (upstream gives every unit 47 hours).
+  `docs/provisioning.md` §1 is the table with each line's reason and states that rule.
+
+  Two of those six are therefore not *written*: one is built from the band at compile time and one
+  from the node at run time. The second is the only growth the runner has ever needed - a
+  `ProfileLine` may carry a `build` function instead of being text, and `runProfile` takes the
+  node's key (`firstboot::NodeFacts`) - and the table still reads as a table, because such a row
+  carries the line as `set flood.advert.interval <h>` for a person to read and for a refusal to
+  print. The key exists before the profile runs and no order had to move for it: `main.cpp` loads
+  or makes `the_mesh.self_id` a dozen lines above the `firstBoot()` call.
 
 **Once is exact, and it is one boolean.** The test is `hasSavedPrefs()`, taken before
 `the_mesh.begin()` runs upstream's `loadPrefs`; the password and the profile both happen inside one
@@ -326,9 +339,9 @@ RAM, because the question it answers is "what did *this* boot do".
 One consequence of running the profile at all is upstream's and worth recording: `CommonCLI::savePrefs()`
 zeroes `advert_interval` when it is below sixty minutes, "now that device has been manually
 configured". Upstream's default is two minutes, so the first line of the first-boot profile turns
-the *local* advert timer off for the life of the unit. The boot advert (§5) and the 47-hour flood
-advert are what announce it, which is what the Danish standard asks for anyway
-(meshguide.dk recommends `advert.interval 0`).
+the *local* advert timer off for the life of the unit. The boot advert (§5) and the flood advert
+— every 60 to 85 hours, the number this node's key gives it — are what announce it, which is what
+the Danish standard asks for anyway (meshguide.dk recommends `advert.interval 0`).
 
 `walter.wake` is the out-of-band way to reach a unit whose Walter is asleep: any exit node that
 reaches the repeater can ask it to wake its own uplink. Upstream's permission check is the whole
@@ -764,6 +777,18 @@ against the build, by the task that first compiled our application onto upstream
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/common/board/UpstreamHeaders.h` and `src/roles/repeater/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Additions made above by **p3.5-05**, the Danish standard: §4a (the profile is six lines and one
+of them is derived from the node's key; what that cost the runner's interface) and §5's flood
+advert, which is no longer "the 47-hour one". What that task read of upstream is cited where it is
+used - `src/roles/repeater/firstboot/Profile.cpp` names the branch of `CommonCLI::handleSetCmd`
+each of the four new lines goes through, upstream's default for each, and - for
+`agc.reset.interval` - that the preference is **seconds / 4** in a `uint8_t`
+(`CommonCLI.h:49`), which is why the reply is `OK - interval rounded to 4` and why the reply rule
+has to accept it. `docs/upstream.md` place 5 lists the four keys for the next bump; at
+`repeater-v1.18.0` the `agc.reset.interval` handler has moved out of `CommonCLI.cpp` into
+`CommonRadioPrefs.cpp` with the same arithmetic and an added `constrain(0, 1020)`, which is a
+`[06]` item of `tasks/phase-3.5/FOLLOWUPS.md` and not a change here.
 
 Corrections and additions made above by **p3-03**, the first-boot profile: §1
 (`src/roles/repeater/firstboot/`), §2 (one more row: `savePrefs()`, the **eleventh** override -

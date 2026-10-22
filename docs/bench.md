@@ -124,7 +124,7 @@ rest of this page is a person's, and so are the lines in the right-hand column:
 | §5 | the two thresholds on the USB console: `power.low_mv` set to 3600 and still 3600 after a `reboot`, and `3350`, `2400` and `4400` refused with nothing changed — **and both values put back as they were found**, which is the walk's last line | the DMM, the phone's telemetry, the thermometer, the simulator's steps, the unplugged I2C bus, and the boot-voltage question (its three `get`s are read and filled in here) |
 | §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the three agreeing | the Walter's half, which is another repository's |
 | §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
-| §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
+| §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the Danish standard's four (the advert interval computed from the key it read), the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
 | §0, §2, §4, §6, §7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
 
 A walk needs the board (§0a): with no `bench.local.json`, or no port with its
@@ -799,10 +799,10 @@ which takes the node's **identity** with it: the key the mesh knows it by, and
 the one MeshMaster would have been told. A unit that has been adopted is a unit
 not to erase.
 
-- [x] **p3-03, p3.3-01** **A first boot is a first boot.** `erase` on the USB
+- [x] **p3-03, p3.3-01, p3.5-05** **A first boot is a first boot.** `erase` on the USB
   console (`File system erase: OK`), then reset. The console prints
   `Repeater ID:` with a **new** key (→ ______), then `First boot: a random admin
-  password was set (not shown; …)` and `First boot: the profile ran 2 of 2 lines
+  password was set (not shown; …)` and `First boot: the profile ran 6 of 6 lines
   (sensor get firstboot.state says 'done'; …)`. Then, and **`get dutycycle`
   first** — it is the line this whole section exists to prove, because it is the
   one thing a fresh unit was getting wrong (`docs/ARCHITECTURE.md` §7):
@@ -811,11 +811,25 @@ not to erase.
   `get path.hash.mode` → `> 1`; `get radio` → `> 869.618,62.5,8,8`;
   `get name` → `> RAK4631 Repeater` (this build's `-D ADVERT_NAME` in `platformio.ini`;
   upstream's own default is `repeater`); `get guest.password` → `> ` (empty). (bench, 2026-10-22, 9fb721b)
+- [x] **p3.5-05** **And the Danish standard reached it.** The four lines
+  `docs/provisioning.md` §1 added to the profile on 22 October 2026, read back on
+  the same first boot: `get agc.reset.interval` → `> 4` (upstream's own is `> 0`);
+  `get loop.detect` → `> moderate` (upstream's own is `> off`);
+  `get flood.max.unscoped` → `> 15` (upstream's own is `> 64`); and
+  `get flood.advert.interval` (→ ______) → **the hour this node's own key gives
+  it**, which is `60 + (k mod 26)` for `k` the first byte of the `Repeater ID`
+  above — 60 to 85, and upstream's own default is 47 for every unit. Compute it
+  from the key and compare; a `> 47` is a profile line that did not run. (bench, 2026-10-22, a019870)
 - [x] **p3-03, p3.3-01** **It runs once, and a reboot proves it.** `reboot`, and
   this time there is **no** `First boot:` line at all; `sensor get
   firstboot.state` → `> never`, `get path.hash.mode` is still `> 1` and
-  `get dutycycle` is still `> 10.0%` — the profile's work was saved, both lines
+  `get dutycycle` is still `> 10.0%` — the profile's work was saved, every line
   of it, and the profile did not run again. (bench, 2026-10-22, 9fb721b)
+- [x] **p3.5-05** **And the Danish standard was saved with it.** After that same
+  `reboot`: `get agc.reset.interval` → `> 4`, `get loop.detect` → `> moderate`,
+  `get flood.max.unscoped` → `> 15`, and `get flood.advert.interval` the same
+  hour as before the restart (→ ______) — all six lines of the profile in one
+  preferences write, and none of them run again. (bench, 2026-10-22, a019870)
 - [ ] **p3-03** **A power cut in the middle leaves no half-provisioned node.**
   `erase`, reset, and pull the power **during** the first second (before the
   `First boot:` lines appear). On the next boot one of exactly two things is

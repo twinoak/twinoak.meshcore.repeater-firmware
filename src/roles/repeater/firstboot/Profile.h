@@ -24,27 +24,86 @@
 // be a build default - upstream keeps it in the preferences, as `airtime_factor` - so it is a
 // line of the table instead, and that line is *built* from the band rather than written
 // (TWINOAK_BAND_DUTY_CYCLE, held against src/common/bands/Bands.h's row where the table is).
+//
+// **One line is built from the node itself**, for the opposite reason: the flood advert's
+// interval must *not* be the same number on every unit, or a batch flashed in one evening floods
+// the mesh in step for as long as it runs. It is derived from the node's own public key
+// (`floodAdvertIntervalHours` below), which is the only thing a unit has at its first boot that
+// its neighbours do not share. Everything else in the table is text.
 
 #pragma once
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "common/link/session/Interfaces.h"  // CliAccess: one command line in, one reply out
 
 namespace twinoak {
 namespace firstboot {
 
+// What a line that cannot be *written* is built from: this node's own identity, and nothing
+// else. One line of the table needs it - the flood advert's interval, which is derived from the
+// key so that units flashed together do not advertise in step (docs/provisioning.md section 1).
+// The board passes the key upstream has already made or loaded by then
+// (src/roles/repeater/main.cpp creates `the_mesh.self_id` a dozen lines above the firstBoot()
+// call, which is why no order had to move); a host test passes any bytes, or none.
+struct NodeFacts {
+  const uint8_t* pub_key;
+  size_t pub_key_len;
+};
+
+// What builds such a line: it writes the whole command line into `out`, which holds `cap` bytes
+// including the NUL, and answers whether it could. A false is a line the runner refuses without
+// running - the same outcome as a line upstream does not take - so a unit whose key could not be
+// read keeps every other line of the table.
+typedef bool (*BuildLine)(const NodeFacts& facts, char* out, size_t cap);
+
 // One line of the profile: what is run, and why it is there. `why` is for a person reading the
 // table and for docs/provisioning.md; nothing of the firmware reads it.
+//
+// `build` is null for a line that is text, which is all but one of them. Where it is set,
+// `command` is how the table *shows* the line - `set flood.advert.interval <h>` - and is what a
+// refusal prints; the line really sent is the one `build` writes. So the table still reads as a
+// table of console lines, and the one value no document can state in advance is still a value
+// this file decides and nothing else does.
 struct ProfileLine {
   const char* command;
   const char* why;
+  BuildLine build;
 };
+
+// --- the one line that is derived from the node ------------------------------------------------
+
+// The flood advert interval a node's own key gives it, in hours: **60 + (the key's first byte
+// mod 26)**, so 60-85 inclusive, every hour of that range reachable, and the same key always
+// giving the same hour (docs/provisioning.md section 1; Thomas's decision of 22 October 2026,
+// tasks/phase-3/FOLLOWUPS.md). Upstream's own default is 47 hours for every unit, so a batch
+// flashed together floods its adverts in step; a byte of the key is the one thing a unit has at
+// first boot that its neighbours do not share.
+//
+// The first byte is the one upstream itself gives meaning to - it is the node's hash, the byte
+// main.cpp redraws an identity for when it is 0x00 or 0xFF - so it is the byte a reader can
+// check against a `Repeater ID` printed on a console. 0 when there is no key: no line is built
+// from a node that cannot say who it is.
+//
+// The two numbers of that rule, so that nothing has to repeat them: the lowest hour and how many
+// hours the range holds. 60 and 26, which is 60-85.
+const int kFloodAdvertHoursMin = 60;
+const int kFloodAdvertHoursSpan = 26;
+
+int floodAdvertIntervalHours(const NodeFacts& facts);
+
+// `set flood.advert.interval <h>` with the hours above, written into `out`. False, and nothing
+// written, when there is no key or `cap` cannot hold the line.
+bool buildFloodAdvertIntervalLine(const NodeFacts& facts, char* out, size_t cap);
 
 // The profile as shipped. Short on purpose: a line is here only where a document of this project
 // gives the value - spec/SYSTEM.md S-12 (with meshmaster.dk's D-33 behind it) for the path
-// hashes, and the band's own regulation for the duty cycle. Everything else a unit needs is
-// per-site and belongs to provisioning (docs/provisioning.md), or is already upstream's default.
+// hashes, the band's own regulation for the duty cycle, and the Danish standard as Thomas
+// settled it on 22 October 2026 for the last three and for the advert interval's 60-85 hours
+// (tasks/phase-3/FOLLOWUPS.md, tasks/phase-3.5/05-the-danish-standard.md). Everything else a
+// unit needs is per-site and belongs to provisioning (docs/provisioning.md), or is already
+// upstream's default.
 extern const ProfileLine kProfile[];
 extern const int kProfileCount;
 
@@ -91,8 +150,14 @@ bool replyAccepted(const char* reply);
 // interpreter, and anything beyond that is the guard behind it (src/common/link/session/Session.h
 // keeps the same shape for the link). Both buffers are the caller's, so that the board can lend
 // the console's own - they are idle while setup() runs - and a test can put them on the stack.
-ProfileResult runProfile(const ProfileLine* lines, int count, link::CliAccess& cli, char* line,
-                         size_t line_cap, char* reply, size_t reply_cap);
+//
+// `facts` is the whole of the interface's growth for a line built at run time: a line whose
+// `build` is set is written into the same `line` buffer the text lines are copied into, from
+// these facts and from nothing else, and is refused without being run when it cannot be
+// (`first_refused` is then the table's own text for it, which carries no value of this node).
+ProfileResult runProfile(const ProfileLine* lines, int count, const NodeFacts& facts,
+                         link::CliAccess& cli, char* line, size_t line_cap, char* reply,
+                         size_t reply_cap);
 
 // A whole boot's worth of the above: **runs once**. `saved_prefs_found` is the one test of
 // src/roles/repeater/app/FirstBoot.h, taken before upstream loaded the preferences; when it is
@@ -100,8 +165,8 @@ ProfileResult runProfile(const ProfileLine* lines, int count, link::CliAccess& c
 // and the state says `done` or `partial: <n> refused`. The state is set either way, so the
 // setting answers for every boot and not only for a first one.
 ProfileResult runFirstBootProfile(bool saved_prefs_found, const ProfileLine* lines, int count,
-                                  link::CliAccess& cli, char* line, size_t line_cap, char* reply,
-                                  size_t reply_cap);
+                                  const NodeFacts& facts, link::CliAccess& cli, char* line,
+                                  size_t line_cap, char* reply, size_t reply_cap);
 
 // --- what `sensor get firstboot.state` answers ------------------------------------------------
 //
