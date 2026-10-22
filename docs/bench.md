@@ -49,7 +49,22 @@ With no file, or no port with that serial number, every command exits **3,
 `bench restore`, and `bench walk <section>` (§0b). Before the first flash of a run the tool records what is on
 the board — role, version, `Repeater ID`, name — and `restore` puts that role
 back and checks the identity; a run that cannot be put back says so in its
-last line, in capitals. Every flash is logged with the image's descriptor and
+last line, in capitals.
+
+**A new unit, which shows only its bootloader.** A radio that arrives with its
+base and no application (`spec/SYSTEM.md` S-5a, what the Walter's
+`rak provision` leaves) has no application port and no console, so there is
+nothing of what it ran to record. `bench flash` records the image it is about
+to write instead — its role, its version and its descriptor, read out of the
+file — and the run file still says `how: bootloader`, because none of it is
+something a board said. `bench restore` then puts that same image back and its
+last line says which case this was: *the board arrived with only its
+bootloader; restored: the image the run began with*. Nothing is touched at
+1200 baud on the way: a board with no application has no port to touch, and
+the tool goes straight to the bootloader's port it can already see. A board
+recorded in its bootloader with **no** image named (`bench record` with no
+`--image`) is still a run nothing can put back, and that is still said in
+capitals. Every flash is logged with the image's descriptor and
 SHA-256 in `out/bench/flash.log` and under the user's local application data,
 where the lock per board also lives (one user at a time). SWD is never used by
 this tool: the `[boards]` SWD lines of this page stay a person's.
@@ -90,7 +105,9 @@ lines of four sections of this page as steps, in the page's order: it prints the
 line, what it sent, what it saw and *ok*, *differs* or *needs a person*, and
 leaves a result file under `out/bench/` with every `→ ______` of the lines it
 walked filled in. `--tick` then ticks what came back *ok* here and writes what
-came back *differs* into the follow-ups of the task that wrote the line. The
+came back *differs* into the follow-ups of the task that wrote the line; a
+line an earlier walk ticked is reported *already ticked* and left alone, and
+only a line the page really has lost is *not found*. The
 rest of this page is a person's, and so are the lines in the right-hand column:
 
 | | `bench walk` runs | Yours |
