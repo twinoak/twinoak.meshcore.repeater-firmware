@@ -34,7 +34,7 @@ class FakeClock(object):
 #                                                                               own numbers
 
 # VolatileRTCClock's built-in date, which every boot of a board with no RTC starts at: 15 May
-# 2024 (MeshCore's src/helpers/ArduinoHelpers.h at the pin d9296435).
+# 2024 (MeshCore's src/helpers/ArduinoHelpers.h at the pin 81dbae59).
 UPSTREAM_CLOCK_EPOCH = 1715770351
 # The clock keeper's: how far ahead of the file a restored clock is put when the file's value was
 # not that restart's own second, and the floor below which no epoch is believed
@@ -77,15 +77,16 @@ class FakeRepeaterFirmware(object):
                 "power.low_mv", "power.crit_mv", "obs.wake", "client.refused", "firstboot.state")
 
     # The six preferences the first-boot profile changes, as upstream's own `MyMesh` constructor
-    # leaves them (examples/simple_repeater/MyMesh.cpp:890-906 and the NodePrefs defaults of
-    # src/helpers/CommonCLI.h at the pin d9296435). An `erase` puts these back, so that the boot
+    # leaves them (examples/simple_repeater/MyMesh.cpp:891-911 and the NodePrefs defaults of
+    # src/helpers/CommonCLI.h at the pin 81dbae59; `loop.detect` is `minimal` since
+    # repeater-v1.18.0, where it was `off`). An `erase` puts these back, so that the boot
     # after it is really a first boot and the walk's `get`s mean something.
     UPSTREAM_DEFAULTS = {"path.hash.mode": "0", "dutycycle": "50.0%",
-                         "agc.reset.interval": "0", "loop.detect": "off",
+                         "agc.reset.interval": "0", "loop.detect": "minimal",
                          "flood.max.unscoped": "64", "flood.advert.interval": "47"}
 
     def __init__(self, repeater_id, version="0.0.0-dev", name="repeater",
-                 upstream="repeater-v1.17.1 (d9296435)", answers=None, first_boot=False,
+                 upstream="repeater-v1.18.0 (81dbae59)", answers=None, first_boot=False,
                  settings=None, prints_banner=True, epoch=None, clock_state="unset",
                  clock_file=None, rtc_epoch=None, clock_sync_sender=0, low_mv=3500,
                  crit_mv=3300, forgets_thresholds=False, forgets_clock=False,
@@ -177,7 +178,7 @@ class FakeRepeaterFirmware(object):
 
     def clock_text(self):
         """Upstream's own `clock` reply: `%02d:%02d - %d/%d/%d UTC`, the second not in it
-        (src/helpers/CommonCLI.cpp at the pin d9296435)."""
+        (src/helpers/CommonCLI.cpp:226 at the pin 81dbae59)."""
         import time as _time
         when = _time.gmtime(self.epoch)
         return "%02d:%02d - %d/%d/%d UTC" % (when.tm_hour, when.tm_min, when.tm_mday,
@@ -260,7 +261,7 @@ class FakeRepeaterFirmware(object):
         if line in self.answers:
             return self.answers[line]
         if line == "ver":
-            return "v1.17.1 (Build: 14 Aug 2026)"
+            return "v1.18.0 (Build: 15 Oct 2026)"
         if line == "board":
             return "RAK 4631"
         if line == "get radio":
@@ -300,7 +301,7 @@ class FakeRepeaterFirmware(object):
             return self.clock_text()
         if line == "clock sync":
             # Upstream sets the clock to the *sender's* timestamp plus one and refuses when that
-            # is not ahead of the node's own (CommonCLI.cpp:199-207 at the pin). The USB console
+            # is not ahead of the node's own (CommonCLI.cpp:210-218 at the pin). The USB console
             # has no sender: src/roles/repeater/main.cpp calls handleCommand(0, ...).
             if self.clock_sync_sender > self.epoch:
                 return self.set_clock(self.clock_sync_sender + 1)
@@ -334,7 +335,7 @@ class FakeRepeaterFirmware(object):
             self.rebooted += 1
             if line == "clkreboot":
                 # Upstream sets its clock back to the 2024 default and then reboots
-                # (CommonCLI.cpp:187-190 at the pin); the keeper's file is what saves the node.
+                # (CommonCLI.cpp:198-201 at the pin); the keeper's file is what saves the node.
                 self.epoch = UPSTREAM_CLOCK_EPOCH
             return None
         if line == "region default":

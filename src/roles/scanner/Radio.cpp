@@ -571,7 +571,7 @@ bool begin(Lines& lines) {
   g_lines = &lines;
   // The SX1262 inside the RAK4630 stamp is unpowered until this pin is driven high, and after a
   // reset the GPIO is an input: MeshCore's own board does exactly this before it talks to the
-  // radio (variants/rak4631/RAK4631Board.cpp:58-66 at the pin d9296435 - pinMode, then high,
+  // radio (variants/rak4631/RAK4631Board.cpp:58-66 at the pin 81dbae59 - pinMode, then high,
   // then 10 ms "give sx1262 some time to power up"). NoiseScope never drove it, which is the one
   // thing this port changes about its bring-up (tasks/phase-3/reports/02.md).
   pinMode(SX126X_POWER_EN, OUTPUT);

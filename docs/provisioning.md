@@ -9,8 +9,9 @@ protocol of ours: the first-boot profile, a person at the field port and the
 Walter over the link all speak the same command lines
 (`src/roles/repeater/firstboot/Profile.h`, `docs/link.md` §2b).
 
-Every reply quoted is MeshCore's at the pin `repeater-v1.17.1` (`d9296435`),
-read out of `src/helpers/CommonCLI.cpp` and
+Every reply quoted is MeshCore's at the pin `repeater-v1.18.0` (`81dbae59`),
+read out of `src/helpers/CommonCLI.cpp`, `src/helpers/CommonRadioPrefs.cpp` (the
+radio keys live there since that release) and
 `examples/simple_repeater/MyMesh.cpp` — not off a board, because no session that
 wrote this page had one. `docs/bench.md` §10 is the walk that confirms it.
 
@@ -41,7 +42,7 @@ set path.hash.mode 1
 set dutycycle 10
 # the receiver's AGC and noise floor re-sampled every 4 s, which upstream leaves off
 set agc.reset.interval 4
-# a flood packet is repeated once at two-byte hashes, where upstream repeats it without limit
+# a flood packet is repeated once at two-byte hashes, where upstream's own default repeats it twice
 set loop.detect moderate
 # an un-scoped flood is dropped past 15 hops, where upstream allows 64
 set flood.max.unscoped 15
@@ -55,7 +56,7 @@ set flood.advert.interval 83
 | `set path.hash.mode 1` | 0 — one byte | two-byte path hashes in the adverts this node floods (`spec/SYSTEM.md` S-12, meshmaster.dk D-33) |
 | `set dutycycle 10` | 50 % | the band's legal ceiling, built from `platformio.ini`'s `[band_868].duty_cycle` |
 | `set agc.reset.interval 4` | 0, which is off | the receiver's AGC and its noise-floor estimate re-sampled every four seconds, so that a repeater that has heard a strong neighbour recovers (`Dispatcher::loop` calls `resetAGC()` on that period; `RadioLibWrapper::resetAGC` throws the stuck floor away) |
-| `set loop.detect moderate` | `off` | a flood packet is let past this node at most twice at one-byte path hashes and **once** at two or three — and this firmware floods at two (`max_loop_moderate`, `MyMesh::allowPacketForward`) |
+| `set loop.detect moderate` | `minimal` since 1.18.0 (`off` before) | a flood packet is let past this node at most twice at one-byte path hashes and **once** at two or three — and this firmware floods at two (`max_loop_moderate`, `MyMesh::allowPacketForward`) |
 | `set flood.max.unscoped 15` | 64 | an un-scoped flood (`ROUTE_TYPE_FLOOD`, no transport code) is not forwarded past 15 hops |
 | `set flood.advert.interval <h>` | 47 hours, on every unit in the world | the period of this node's own flood advert, **60–85 hours derived from its key** (below), so that units flashed in one evening do not advertise in step |
 
@@ -202,7 +203,10 @@ divided by four**, so upstream echoes back what it really stored —
 `get agc.reset.interval` reads the rounded number out again. And
 `flood.advert.interval` takes 0 or 3–168 and refuses everything between 1 and 2
 with `Error: interval range is 3-168 hours`; 0 turns the flood advert **off**,
-which is a unit the mesh stops hearing about.
+which is a unit the mesh stops hearing about — and, since 1.18.0, a unit that
+answers no DISCOVER request either (`MyMesh::isHiddenNode()`: both advert
+intervals 0, and the local one *is* 0 on every unit of ours, because the first
+`set` turned it off).
 
 **The duty cycle is no longer one of them.** The 10 % of the 869.400–869.650 MHz
 sub-band is the band's ceiling, not a judgement, so it is in the band and the
@@ -234,7 +238,7 @@ First boot: a random admin password was set (not shown; set yours with 'password
 First boot: the profile ran 6 of 6 lines (sensor get firstboot.state says 'done'; docs/provisioning.md is the rest)
 
 ver
-  -> v1.17.1 (Build: 14 Aug 2026)
+  -> v1.18.0 (Build: 15 Oct 2026)
 board
   -> RAK 4631
 get radio
@@ -248,7 +252,7 @@ get dutycycle
 get agc.reset.interval
   -> > 4                                     <- the Danish standard's; upstream's own is 0
 get loop.detect
-  -> > moderate                              <- upstream's own is off
+  -> > moderate                              <- upstream's own is minimal (off before 1.18.0)
 get flood.max.unscoped
   -> > 15                                    <- upstream's own is 64
 get flood.advert.interval
@@ -277,7 +281,7 @@ get public.key
   -> > 7f3aa1b2...                            <- 64 hex digits; MeshMaster needs this
 sensor list
   -> 10 vars
-     fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)
+     fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.18.0 (81dbae59)
      walter.wake=0
      link.errors=0
      walter.seen=never

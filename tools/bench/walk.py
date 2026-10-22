@@ -78,7 +78,7 @@ PLUGIN_ROM = "SX1261 V2D 2D02"
 # What the page quotes for upstream's own `ver` line and for `board`. A MeshCore bump moves the
 # first, and a walk says so as a note rather than as a finding: what it holds the board to is the
 # tag our own `fw.version` names.
-PAGE_VER = "v1.17.1 (Build: 14 Aug 2026)"
+PAGE_VER = "v1.18.0 (Build: 15 Oct 2026)"
 PAGE_BOARD = "RAK 4631"
 
 # What `power.crit_mv` is on a node whose thresholds nobody has moved, and what docs/bench.md
@@ -438,7 +438,7 @@ def advert_name(repo=REPO):
     build's and not upstream's.
 
     Upstream's own default is `repeater` (examples/simple_repeater/MyMesh.cpp:22-23 at the pin
-    d9296435, `StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, ...)` at :894); this repository
+    81dbae59, `StrHelper::strncpy(_prefs.node_name, ADVERT_NAME, ...)` at :895); this repository
     builds with `RAK4631 Repeater`, which is what the first real board answered to `get name`
     (p3.4-02). Read from the file, so the walk cannot drift from the build; upstream's default
     when there is no such line."""
@@ -511,7 +511,8 @@ def same_radio(saw, expected):
     """`get radio`'s four fields against `[band_868]`'s, the frequency as a number.
 
     Upstream keeps the frequency as a `float` and prints every digit it has
-    (`StrHelper::ftoa(_prefs->freq)`, src/helpers/CommonCLI.cpp at the pin d9296435), so the first
+    (`StrHelper::ftoa(getFreq())`, src/helpers/CommonRadioPrefs.cpp:32-37 at the pin 81dbae59 -
+    CommonCLI.cpp before repeater-v1.18.0), so the first
     real board answered `869.6179809,62.5,8,8` for the `869.618` of the band - the same frequency
     to 19 Hz, which is what a float32 can hold at 869 MHz (p3.4-02). The frequency and the
     bandwidth are compared to 1 kHz, the spreading factor and the coding rate exactly."""
@@ -530,7 +531,7 @@ def same_radio(saw, expected):
 
 # Upstream's own `clock` line, which is the only time readout the USB console has:
 # `sprintf(reply, "%02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(),
-# dt.year())` (src/helpers/CommonCLI.cpp at the pin d9296435). The seconds are not in it.
+# dt.year())` (src/helpers/CommonCLI.cpp:226 at the pin 81dbae59). The seconds are not in it.
 _CLOCK_LINE = re.compile(r"^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*UTC$")
 
 # What that costs a comparison: a reading is its own minute, so it sits between the true second
@@ -760,7 +761,7 @@ class Walker(object):
         self.result.note("The identity is read as `bench record` reads it: the banner's "
                          "`Repeater ID:` when it can be caught, else upstream's own "
                          "`get public.key`, which is the same 32 bytes "
-                         "(src/helpers/CommonCLI.cpp:902 at the pin d9296435). On a board that "
+                         "(src/helpers/CommonCLI.cpp:750 at the pin 81dbae59). On a board that "
                          "has been up the banner is long gone - it is printed a second after boot "
                          "and only while a host holds the port - and only a board whose console "
                          "does not answer that line is reset once for it (p3.4-02).")
@@ -949,7 +950,7 @@ class Walker(object):
                 ahead = before_epoch - target
                 why = ("the node's clock is already %d s ahead of this machine's, so upstream's "
                        "`time` refuses to move it (`ERR: clock cannot go backwards`, "
-                       "src/helpers/CommonCLI.cpp at the pin d9296435). That is what a second "
+                       "src/helpers/CommonCLI.cpp:228-238 at the pin 81dbae59). That is what a second "
                        "walk of this section meets, an hour after the first one's `clkreboot`: "
                        "the three lines below need a node whose clock is behind the walker's"
                        % ahead)
@@ -995,7 +996,7 @@ class Walker(object):
                           note=None if moved else
                           "upstream's `clock sync` sets the clock to the *sender's* timestamp "
                           "plus one and refuses when that is not ahead of the node's own clock "
-                          "(src/helpers/CommonCLI.cpp:199-207 at the pin d9296435). The USB "
+                          "(src/helpers/CommonCLI.cpp:210-218 at the pin 81dbae59). The USB "
                           "console has no sender and ours calls `handleCommand(0, ...)` "
                           "(src/roles/repeater/main.cpp:176), so at this port the line can only "
                           "answer what it answered; over the mesh, where an admin's message "
@@ -1113,7 +1114,7 @@ class Walker(object):
                       ok=reply.strip() == "ok", sent=["sensor set power.low_mv 3600"], saw=reply,
                       expected="ok",
                       note="upstream's own word for a `sensor set` the table took "
-                           "(src/helpers/CommonCLI.cpp at the pin d9296435)")
+                           "(src/helpers/CommonCLI.cpp:308-318 at the pin 81dbae59)")
             page2 = self.ask(repeater, "sensor list 5")
             self.step("5.5", "`sensor list 5` shows `power.low_mv=3600`",
                       ok="power.low_mv=3600" in page2, sent=["sensor list 5"], saw=page2,

@@ -89,7 +89,7 @@ namespace {
 
 const char* const kVersion = "0.0.0-dev";
 const char* const kBoard = "rak4630-single";
-const char* const kUpstream = "repeater-v1.17.1+d9296435";
+const char* const kUpstream = "repeater-v1.18.0+81dbae59";
 const char* const kNodeName = "TwinOak linkloop";
 
 uint32_t nowMs() {
@@ -197,7 +197,7 @@ twinoak::clock::LinkClock g_clock(g_keeper);
 class LoopSettingsHost : public twinoak::SettingsHost {
  public:
   const char* fwVersion() const override {
-    return "twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)";
+    return "twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.18.0 (81dbae59)";
   }
   uint16_t linkErrors() const override { return 0; }
   bool walterEverSeen() const override { return true; }
@@ -245,7 +245,7 @@ LoopSettingsHost g_settings_host;
 twinoak::Settings g_settings(g_settings_host);
 
 // A stand-in for upstream's command interpreter, which no host build can have: upstream's own
-// `sensor list/get/set` branch (src/helpers/CommonCLI.cpp at the pin d9296435, including its
+// `sensor list/get/set` branch (src/helpers/CommonCLI.cpp:300-340 at the pin 81dbae59, including its
 // 134-byte cut-off) over the firmware's real settings table, a few canned lines, and the four
 // commands that restart the node and never answer - which here really do end the process, so
 // that `cli "reboot"` through the pipe behaves as it does on a board.
@@ -281,7 +281,7 @@ class LoopCli : public CliAccess {
     } else if (in == "get radio") {
       out = "> 869.618,62.5,8,8";
     } else if (in == "ver") {
-      out = "v1.17.1 (Build: 14 Aug 2026)";
+      out = "v1.18.0 (Build: 15 Oct 2026)";
     } else if (in == "neighbors") {
       out = "-none-";
     } else if (in == "get acl") {
@@ -316,7 +316,8 @@ class LoopCli : public CliAccess {
       // The first-boot profile's second line, so this one is upstream's arithmetic and not an
       // "OK": `set dutycycle <dc>` writes airtime_factor = (100 / dc) - 1 and answers with the
       // percentage that factor reads back as, to one decimal - "OK - 10.0%" for the 10 the band
-      // allows (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461 at the pin d9296435).
+      // allows (CommonRadioPrefs::handleCommand, src/helpers/CommonRadioPrefs.cpp:88-100 at the
+      // pin 81dbae59; CommonCLI::handleSetCmd before repeater-v1.18.0).
       // That reply is the shape the profile's reply rule has to accept, and the refusal below is
       // the one it has to reject.
       const float dc = static_cast<float>(atof(value.c_str()));
@@ -333,8 +334,9 @@ class LoopCli : public CliAccess {
     // watched: a plain `OK` would hide the one of them whose reply is not `OK`.
     if (key == "agc.reset.interval") {
       // Stored as seconds/4 in a uint8_t and echoed back times four, so the reply names the
-      // value that was really kept (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:474-477
-      // at the pin d9296435). `set agc.reset.interval 6` would answer `rounded to 4`.
+      // value that was really kept (CommonRadioPrefs::handleCommand,
+      // src/helpers/CommonRadioPrefs.cpp:167-173 at the pin 81dbae59, which also constrains the
+      // seconds to 0-1020). `set agc.reset.interval 6` would answer `rounded to 4`.
       char out[48];
       snprintf(out, sizeof(out), "OK - interval rounded to %d", (atoi(value.c_str()) / 4) * 4);
       return out;
@@ -362,7 +364,7 @@ class LoopCli : public CliAccess {
 
   // And a miniature of its `region` branch, for the same reason: upstream answers these with a
   // sentence and not with `OK`, and `provision` judges them by the absence of `Err`
-  // (CommonCLI::handleRegionCmd at the pin d9296435).
+  // (CommonCLI::handleRegionCmd, src/helpers/CommonCLI.cpp:889 at the pin 81dbae59).
   static std::string regionCmd(const std::string& rest) {
     const size_t sp = rest.find(' ');
     const std::string verb = rest.substr(0, sp);

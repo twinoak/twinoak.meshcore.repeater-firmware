@@ -31,7 +31,7 @@
 // second as its timestamp or tag (spec/LINK-PROTOCOL.md 6.2), so the MeshPort below tells the
 // keeper before it hands the packet to upstream's sendDirect/sendFlood.
 //
-// Upstream's *periodic* adverts are upstream's own (MyMesh::loop, MyMesh.cpp:1294-1305) and are
+// Upstream's *periodic* adverts are upstream's own (MyMesh::loop, MyMesh.cpp:1296-1307) and are
 // not hooked: the first of them cannot fire before two minutes (updateAdvertTimer at the default
 // advert_interval of 1, which is 2 minutes, and 47 hours for the flood one), by which time the
 // advert hold has lifted and the boot advert has already said so.
@@ -64,7 +64,7 @@
 // Every override below carries `override`, so a pin bump that makes one of these private, renames
 // it or changes its signature is a compile error on the bump's own pull request and not a method
 // that silently stops being called (docs/upstream.md). Above each, the upstream declaration it
-// matches and the upstream definition it interposes on, at the pin d9296435 (repeater-v1.17.1).
+// matches and the upstream definition it interposes on, at the pin 81dbae59 (repeater-v1.18.0).
 
 #pragma once
 
@@ -80,7 +80,7 @@
 class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
  public:
   // The same six arguments as MyMesh's (examples/simple_repeater/MyMesh.h, under `public:`;
-  // defined at MyMesh.cpp:861).
+  // defined at MyMesh.cpp:862).
   using MyMesh::MyMesh;
 
   // The mesh client's state - the job, its path, what is awaited, the shared secret, the reply -
@@ -194,14 +194,14 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
 
  public:
   // Declared `void sendSelfAdvertisement(int delay_millis, bool flood) override;` under
-  // `public:` in MyMesh.h; pure virtual in CommonCLICallbacks (src/helpers/CommonCLI.h:204).
+  // `public:` in MyMesh.h; pure virtual in CommonCLICallbacks (src/helpers/CommonCLI.h:245).
   // Upstream
-  // (MyMesh.cpp:1031) builds the advert with createSelfAdvert() - which stamps it with the
+  // (MyMesh.cpp:1033) builds the advert with createSelfAdvert() - which stamps it with the
   // clock - and sends it zero-hop or flooded.
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
 
   // Declared `void savePrefs() override { _cli.savePrefs(_fs); }` under `public:` in MyMesh.h
-  // (line 195 at the pin); pure virtual in CommonCLICallbacks (src/helpers/CommonCLI.h). Every
+  // (line 194 at the pin); pure virtual in CommonCLICallbacks (src/helpers/CommonCLI.h:245). Every
   // `set` branch of upstream's CLI calls it, and so does our first boot.
   //
   // Ours exists for one reason: **the first boot must write the preferences file once, at the

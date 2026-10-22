@@ -14,7 +14,8 @@ namespace {
 // tasks/phase-1/reports/05.md).
 //
 // That order was chosen for one quirk of upstream's: `sensor list` stops adding lines once it has
-// written **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp at the pin d9296435),
+// written **134 bytes** into a 160-byte reply (src/helpers/CommonCLI.cpp:319-340 at the pin
+// 81dbae59),
 // and the `fw.version` line alone is 78 of them. With five keys everything fitted on one page.
 // With ten it does not, and what the order buys is that **the key pushed off is pushed by a
 // width and the pair of thresholds stays together**:

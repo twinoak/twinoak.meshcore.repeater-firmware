@@ -3,7 +3,7 @@
 //
 // Why any of this exists: MeshCore judges replays by timestamps. Upstream's volatile clock starts
 // every boot at a fixed date in 2024 (VolatileRTCClock's constructor,
-// src/helpers/ArduinoHelpers.h at the pin d9296435, base_time = 1715770351), so a repeater that
+// src/helpers/ArduinoHelpers.h at the pin 81dbae59, base_time = 1715770351), so a repeater that
 // restarts and carries on would send adverts and replies that everyone who heard its earlier ones
 // drops. The Walter sets the time after every restart - and this firmware has to behave before it
 // does, and when there is no Walter at all.

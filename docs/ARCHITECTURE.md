@@ -2,7 +2,8 @@
 
 The design the task piles build. It was written from MeshCore's source at the pin
 (`d92964352441e53b93e8667b802e04f6e072b39e`, `repeater-v1.17.1`) and from the agent firmware's,
-before a line of this repository compiled. Where it says *upstream does X*, a file and a function
+before a line of this repository compiled, and re-read at `81dbae592ffad40b4212bc0b37e82b38da08f4bc`
+(`repeater-v1.18.0`) by p3.5-06, the first real bump: the line numbers below are that pin's. Where it says *upstream does X*, a file and a function
 are named so that the claim can be checked; phase 1's first task checks the ones everything rests
 on, and this file is corrected by whichever task finds it wrong.
 
@@ -486,8 +487,9 @@ which is set when a reply was awaited and clear when it was the ceiling.
 
 ### Repeating comes first
 
-Two questions about upstream, read out of the pinned checkout (`d9296435`), because this is the
-one place where our traffic could cost the mesh something.
+Two questions about upstream, read out of the pinned checkout (`d9296435`, and re-read at
+`81dbae59` by p3.5-06, whose line numbers these are), because this is the one place where our
+traffic could cost the mesh something.
 
 **The duty cycle covers our packets too.** There is one outbound queue and one budget.
 `Dispatcher::sendPacket` puts every packet - ours and every one being forwarded - into the same
@@ -497,15 +499,18 @@ thing that takes one out (`:275-354`), and before it does it refuses to transmit
 completes, the budget is decremented by its **measured** airtime (`:88-98`), whoever originated it.
 So our 6 sends a minute are inside upstream's accounting and not beside it. The budget is
 **this repeater's own setting**: `MyMesh` overrides `getAirtimeBudgetFactor()` to return
-`_prefs.airtime_factor` (`examples/simple_repeater/MyMesh.h:134-137`), its constructor sets that to
-`1.0` (`MyMesh.cpp:890`), and a console `set dutycycle <1..100>` or `set af <x>` changes it and
-saves it (`src/helpers/CommonCLI.cpp:450-461`, `:809-814`). `1.0` is a duty cycle of 1/2 and a
+`_prefs.airtime_factor` (`examples/simple_repeater/MyMesh.h:130-133`), its constructor sets that to
+`1.0` (`MyMesh.cpp:891`), and a console `set dutycycle <1..100>` or `set af <x>` changes it and
+saves it (`src/helpers/CommonRadioPrefs.cpp:88-100` and `:65-79` - since 1.18.0 every radio key is
+that class's, reached from `CommonCLI::handleCommand` before anything else; `set af` also refuses
+a factor outside 0-9 there, where 1.17.1 took it and `loadPrefs` clamped it on the next boot). `1.0` is a duty cycle of 1/2 and a
 budget of 1 800 000 ms in a 3 600 000 ms window - **which is not what the band allows**, so a unit
 of ours does not start there: the first-boot profile's second line is `set dutycycle 10`, built
 from `[band_868].duty_cycle` (`src/common/bands/Bands.h`, `src/roles/repeater/firstboot/Profile.cpp`;
 869.618 MHz is in the 869.400-869.650 MHz sub-band of ERC Recommendation 70-03, Annex 1, row h1.7
 - 500 mW e.r.p. and 10 %, or LBT+AFA instead, which this firmware does not claim). 10 % is also
-the lowest this upstream can keep: `loadPrefs` clamps `airtime_factor` to 9.0 (`:111`), and 9.0 is
+the lowest this upstream can keep: `loadPrefs` clamps `airtime_factor` to 9.0
+(`src/helpers/CommonCLI.cpp:111`), and 9.0 is
 exactly `100/10 - 1`.
 
 > The regulation itself is the one thing on this page that was not read out of a file on this
@@ -571,7 +576,7 @@ needed, and none is proposed.** What would need one: a client that could queue s
 once, which the ceiling's 2-second gap also forbids.
 
 One shared resource is worth naming, because it is not the queue: the **packet pool** is 32
-packets (`new StaticPoolPacketManager(32)`, `examples/simple_repeater/MyMesh.cpp:863`) and a
+packets (`new StaticPoolPacketManager(32)`, `examples/simple_repeater/MyMesh.cpp:864`) and a
 client send holds one from the moment it is built until the radio has sent it. A received packet
 that finds the pool empty is dropped (`Dispatcher::checkRecv`, `src/Dispatcher.cpp:201-203`). With
 at least 2 seconds between our sends and about 1.7 s of airtime for the longest of them, ours
@@ -754,29 +759,54 @@ and the base never touches it.
 
 What §2 and §3 rest on, checked against the pinned checkout (`d9296435`, `repeater-v1.17.1`) and
 against the build, by the task that first compiled our application onto upstream's repeater
-(`tasks/phase-1/reports/01.md`). Line numbers are the pin's.
+(`tasks/phase-1/reports/01.md`), and **re-read at `81dbae59` (`repeater-v1.18.0`) by p3.5-06**:
+every claim held, and the line numbers are that pin's now.
 
 | Claim | Evidence |
 |---|---|
-| `build_as_lib.py` compiles `examples/<name>/*.cpp` for `BUILD_EXAMPLE` and leaves one file out for `EXCLUDE_FROM_EXAMPLE` | `build_as_lib.py` lines 42–53: `+<../examples/{example_name}/*.cpp>` then `-<../examples/{example_name}/{exclude_name}>`; the exclude needs `example_name` already set, so the define order matters. The linker map (`out/build/<env>/firmware.map`) has `libMeshCore.a(MyMesh.cpp.o)` and no `main.cpp.o` member of that archive; `setup` and `loop` are in `src/roles/repeater/main.cpp.o` |
-| `MC_VARIANT` compiles the whole variant directory, `target.cpp` included | `build_as_lib.py` lines 37–40: `+<../variants/{variant_name}>`. Without the define the map has exactly one `target.cpp.o`, ours, and `RAK4631Board.cpp.o` / `variant.cpp.o` in `libmeshcore_variant.a` |
+| `build_as_lib.py` compiles `examples/<name>/*.cpp` for `BUILD_EXAMPLE` and leaves one file out for `EXCLUDE_FROM_EXAMPLE` | `build_as_lib.py` lines 44–55: `+<../examples/{example_name}/*.cpp>` then `-<../examples/{example_name}/{exclude_name}>`; the exclude needs `example_name` already set, so the define order matters. The linker map (`out/build/<env>/firmware.map`) has `libMeshCore.a(MyMesh.cpp.o)` and no `main.cpp.o` member of that archive; `setup` and `loop` are in `src/roles/repeater/main.cpp.o` |
+| `MC_VARIANT` compiles the whole variant directory, `target.cpp` included | `build_as_lib.py` lines 39–42: `+<../variants/{variant_name}>`. Without the define the map has exactly one `target.cpp.o`, ours, and `RAK4631Board.cpp.o` / `variant.cpp.o` in `libmeshcore_variant.a` |
 | `MyMesh : public mesh::Mesh, public CommonCLICallbacks`, most state private | `MyMesh.h`: the members from `FILESYSTEM* _fs` to `matching_peer_indexes[MAX_CLIENTS]` precede the first access specifier |
-| `handleCommand(0, command, reply)` is public | `MyMesh.h`, under `public:`: `void handleCommand(uint32_t sender_timestamp, char* command, char* reply);`. `sender_timestamp == 0` is the console's privilege (`MyMesh.cpp:1262`, `get acl`) |
+| `handleCommand(0, command, reply)` is public | `MyMesh.h`, under `public:`: `void handleCommand(uint32_t sender_timestamp, char* command, char* reply);`. `sender_timestamp == 0` is the console's privilege (`MyMesh.cpp:1264`, `get acl`) |
 | `getNodePrefs()`, `savePrefs()` are public | `MyMesh.h`, under `public:`; `savePrefs()` calls `_cli.savePrefs(_fs)`, which rewrites `/prefs.json` (`CommonCLI.cpp:143`) |
-| the settings seam is virtual and the CLI uses it | `SensorManager.h:21–24`: `getNumSettings`, `getSettingName`, `getSettingValue`, `setSettingValue`, all `virtual`; `CommonCLI.cpp:276–316`: `sensor get` (`getSettingByKey`), `sensor set` (`setSettingValue`), `sensor list` (the three by index). `TwinOakSensors` overrides the four with `override` and the build accepts it |
+| the settings seam is virtual and the CLI uses it | `SensorManager.h:21–24`: `getNumSettings`, `getSettingName`, `getSettingValue`, `setSettingValue`, all `virtual`; `CommonCLI.cpp:300–340`: `sensor get` (`getSettingByKey`), `sensor set` (`setSettingValue`), `sensor list` (the three by index). `TwinOakSensors` overrides the four with `override` and the build accepts it |
 | telemetry goes through `sensors.querySensors(perm, lpp)` | `MyMesh.cpp:250`, in `handleRequest` for `REQ_TYPE_GET_TELEMETRY_DATA`; `querySensors` is `virtual` (`SensorManager.h:19`) |
 | `getBattMilliVolts()` is virtual on the board | `MeshCore.h:47`: `virtual uint16_t getBattMilliVolts() = 0;` on `mesh::MainBoard`; `RAK4631Board.h` overrides it with the ADC reading; `MyMesh.cpp:218` and `:244` call it for `status` and the telemetry base channel |
 | the eight overrides are virtual and reachable | `MyMesh.h`, under `protected:`: `searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, `onPeerPathRecv` (`override`), `onAdvertRecv` (no keyword; virtual via `Mesh.h:122`), `logRx`, `logTx` (`override`); `onTraceRecv` is not in `MyMesh.h` at all — the base is `Mesh.h:107`'s empty virtual. `src/roles/repeater/app/TwinOakMesh.h` declares all eight with `override` and the build is green; `nm` shows all eight `TwinOakMesh::` symbols beside the `MyMesh::` ones |
-| `Mesh::onRecvPacket` tries matched peers in index order and the first MAC that verifies wins | `Mesh.cpp:147–186`: `searchPeersByHash(&src_hash)`, then `for (int j = 0; j < num; j++) { getPeerSharedSecret(secret, j); … MACThenDecrypt … if (len > 0) { … onPeerPathRecv(pkt, j, …) or onPeerDataRecv(pkt, type, j, …); found = true; break; } }`. Upstream's match array is `matching_peer_indexes[MAX_CLIENTS]` (32), filled at `MyMesh.cpp:623` |
+| `Mesh::onRecvPacket` tries matched peers in index order and the first MAC that verifies wins | `Mesh.cpp:147–186`: `searchPeersByHash(&src_hash)`, then `for (int j = 0; j < num; j++) { getPeerSharedSecret(secret, j); … MACThenDecrypt … if (len > 0) { … onPeerPathRecv(pkt, j, …) or onPeerDataRecv(pkt, type, j, …); found = true; break; } }`. Upstream's match array is `matching_peer_indexes[MAX_CLIENTS]` (32 since 1.18.0, when the duplicate
+define left `MyMesh.h` and `ClientACL.h:45` became the one definition; 20 at 1.17.1), filled at
+`MyMesh.cpp:623` |
 | `onTraceRecv` is called for a direct TRACE at the end of its path | `Mesh.cpp:56–57`: `if (offset >= len) onTraceRecv(pkt, trace_tag, auth_code, flags, pkt->path, &pkt->payload[i], len)` |
 | `logRx` sees the packet while its RSSI is still the radio's last | `Dispatcher.cpp:238`: `logRx(pkt, pkt->getRawLength(), score)` in the receive path, after `_radio->getLastSNR()`/`getLastRSSI()` were read for the score and before the packet is queued inbound; `logTx` at `Dispatcher.cpp:109`, when the outbound packet has been handed to the radio |
 | `createAnonDatagram`, `createDatagram`, `createTrace`, `sendDirect`, `sendFlood` are public on `Mesh` | `Mesh.h:185–224`, under `public:` |
 | "no saved preferences" is readable | `CommonCLI.cpp:30–47`, `loadPrefs`: `/prefs.json` is loaded if it exists, else `/com_prefs` is converted if it exists, else nothing is loaded and the constructor's defaults stand. `src/roles/repeater/app/FirstBoot.cpp` tests exactly those two files, before `begin()` runs `loadPrefs` |
-| the admin password's field is 16 bytes | `CommonCLI.h:29`: `char password[16];` — fifteen characters and the NUL, which is what `StrHelper::strncpy` leaves (`TxtDataHelpers.cpp:3`) and what the login compares with `strcmp` (`MyMesh.cpp:102`). A sixteen-character password cannot exist at this pin; ours is fifteen |
-| upstream's default password is the constructor's and only the constructor's | `MyMesh.cpp:32–34` defaults `ADMIN_PASSWORD` to the word every stock repeater ships with when the define is absent; `MyMesh.cpp:897` copies the define into `_prefs.password`. Our build defines it as `not-a-password` and `FirstBoot.cpp` overwrites it in `setup()`, before `loop()` runs |
+| the admin password's field is 16 bytes | `CommonCLI.h:31`: `char password[16];` — fifteen characters and the NUL, which is what `StrHelper::strncpy` leaves (`TxtDataHelpers.cpp:3`) and what the login compares with `strcmp` (`MyMesh.cpp:102`). A sixteen-character password cannot exist at this pin; ours is fifteen |
+| upstream's default password is the constructor's and only the constructor's | `MyMesh.cpp:32–34` defaults `ADMIN_PASSWORD` to the word every stock repeater ships with when the define is absent; `MyMesh.cpp:898` copies the define into `_prefs.password`. Our build defines it as `not-a-password` and `FirstBoot.cpp` overwrites it in `setup()`, before `loop()` runs |
 | the radio's RNG | `RadioLibWrappers.h:88`: `RadioNoiseListener : mesh::RNG`, radio noise xor the CC310's generator under `USE_CC310_HW_CRYPTO`; `radio_new_identity()` draws the node's key from it and `radio_random()` the first-boot password |
 | `-Werror` on `src/` survives upstream's headers | not by itself: under `-Wextra`, `MeshCore.h`, `Dispatcher.h`, the SoftDevice's `nrf_soc.h` and `RAK4631Board.h` warn (unused parameters, a reordered initialiser, a literal as `char*`), and RadioLib's `#warning` for GODMODE is an error under `-Werror=cpp`. `src/common/board/UpstreamHeaders.h` and `src/roles/repeater/app/UpstreamMyMesh.h` include upstream as system headers (`#pragma GCC system_header`, the agent firmware's `MeshCoreHeaders.h`), and `-Wno-error=cpp` keeps the `#warning` a warning. An `-isystem` flag was tried first and made the core's `WString.h` conflict with itself on this toolchain |
 | upstream's tree is not written by the build | `git status --porcelain` in `.pio/libdeps/repeater_rak4630_single/MeshCore` is empty after the build, `HEAD` is the pin |
+
+Re-read by **p3.5-06**, the first real MeshCore bump (`repeater-v1.17.1` → `repeater-v1.18.0`,
+`d9296435` → `81dbae59`, 266 commits of upstream's). Every claim of this file held; what moved
+under the citations, and is re-cited where it is used: the radio keys of the CLI (`get radio`,
+`dutycycle`, `af`, `path.hash.mode`, `agc.reset.interval`, `tx`, the three delays, `int.thresh`,
+`cad`, `radio.rxgain`, `multi.acks`) are `CommonRadioPrefs::handleCommand`
+(`src/helpers/CommonRadioPrefs.cpp`), reached from `CommonCLI::handleCommand` before anything
+else, with every reply text unchanged; `MAX_CLIENTS` is 32 (one definition, `ClientACL.h:45`);
+`loop.detect` defaults to `minimal` on a new install (`MyMesh.cpp:911`), which the profile's
+`moderate` overrides as before; a repeater whose local *and* flood advert intervals are 0 is a
+hidden node and answers no DISCOVER (`MyMesh::isHiddenNode`, `MyMesh.cpp:793`) - never a unit of
+ours, whose flood advert is 60-85 hours; `TXT_TYPE_CLI_COMMAND` (3) is accepted as a CLI line
+beside `PLAIN` and `CLI_DATA` (`MyMesh.cpp:707`), replies still `CLI_DATA`; a transport code of 0
+matches the wildcard region (`RegionMap.cpp:191`) and is forwarded under `flood.max`, not
+`flood.max.unscoped`; `Utils::MACThenDecrypt` refuses a ciphertext that is not block-aligned
+(`Utils.cpp:150-151`), which our sends - upstream's `encryptThenMAC` - always are; a forwarded
+direct ACK is delayed like routed traffic (`Mesh.cpp:90-98`), and §7's priorities stand;
+`mesh::MainBoard` gained `loop()` and `handleCommand()` (`MeshCore.h:88-92`), both no-ops on this
+board, and upstream's `main.cpp` calls the first, so ours does too and carries its new
+NUL-termination clamp. Two lines of upstream's own `platformio.ini` were deliberately not brought
+across: the GCC 14 toolchain pin and the removal of `NRF52_POWER_MANAGEMENT` (`platformio.ini`
+says why beside each). The application region did not move.
 
 Additions made above by **p3.5-05**, the Danish standard: §4a (the profile is six lines and one
 of them is derived from the node's key; what that cost the runner's interface) and §5's flood
@@ -784,11 +814,11 @@ advert, which is no longer "the 47-hour one". What that task read of upstream is
 used - `src/roles/repeater/firstboot/Profile.cpp` names the branch of `CommonCLI::handleSetCmd`
 each of the four new lines goes through, upstream's default for each, and - for
 `agc.reset.interval` - that the preference is **seconds / 4** in a `uint8_t`
-(`CommonCLI.h:49`), which is why the reply is `OK - interval rounded to 4` and why the reply rule
+(`CommonCLI.h:51`), which is why the reply is `OK - interval rounded to 4` and why the reply rule
 has to accept it. `docs/upstream.md` place 5 lists the four keys for the next bump; at
-`repeater-v1.18.0` the `agc.reset.interval` handler has moved out of `CommonCLI.cpp` into
-`CommonRadioPrefs.cpp` with the same arithmetic and an added `constrain(0, 1020)`, which is a
-`[06]` item of `tasks/phase-3.5/FOLLOWUPS.md` and not a change here.
+`repeater-v1.18.0` the `agc.reset.interval` handler moved out of `CommonCLI.cpp` into
+`CommonRadioPrefs.cpp` with the same arithmetic and an added `constrain(0, 1020)`, and p3.5-06
+re-pointed the citations when it moved the pin (below).
 
 Corrections and additions made above by **p3-03**, the first-boot profile: §1
 (`src/roles/repeater/firstboot/`), §2 (one more row: `savePrefs()`, the **eleventh** override -

@@ -155,7 +155,7 @@ void ClockKeeper::loop(uint32_t now_ms) {
   const uint32_t t = p_.upstream->now();
 
   // A clock somebody else set: upstream's own console does it (`time <epoch>` and `clock sync`,
-  // src/helpers/CommonCLI.cpp at the pin d9296435, both of which refuse to go backwards
+  // src/helpers/CommonCLI.cpp:210-238 at the pin 81dbae59, both of which refuse to go backwards
   // themselves). Polling for the jump is what keeps upstream's CLI unpatched. A *backwards* jump
   // - which only `clkreboot` can make, and it reboots straight afterwards - is deliberately not
   // noticed: this keeper's memories are a high-water mark and never come down except for a

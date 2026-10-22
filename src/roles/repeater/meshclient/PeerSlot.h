@@ -2,7 +2,7 @@
 // functions - four lines, separate, so that the part which must never be wrong can be tested
 // exhaustively (test/test_meshclient) and read in one glance.
 //
-// Mesh::onRecvPacket (src/Mesh.cpp:149-186 at the pin d9296435) asks searchPeersByHash() how many
+// Mesh::onRecvPacket (src/Mesh.cpp:149-186 at the pin 81dbae59) asks searchPeersByHash() how many
 // known peers match a packet's source hash, then tries index 0, 1, ... in that order and the
 // first shared secret whose MAC verifies wins. Upstream's MyMesh answers from its ACL and keeps
 // its matches in a private array indexed by that number. The mesh client's one peer is added

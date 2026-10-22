@@ -3,7 +3,7 @@
 // (tasks/phase-1/06-power-and-environment.md).
 //
 // Why not upstream's: /prefs.json is a fixed C struct that upstream's CommonCLI writes whole
-// (src/helpers/CommonCLI.cpp, savePrefs, at the pin d9296435). Adding a field of ours to it would
+// (src/helpers/CommonCLI.cpp:143-158, savePrefs, at the pin 81dbae59). Adding a field of ours to it would
 // either mean editing a file of upstream's - which this repository never does - or writing a
 // record upstream would overwrite the next time anybody typed `set name`. A file of our own is
 // one page of littlefs and nobody else's business, which is also how the clock keeps its lower

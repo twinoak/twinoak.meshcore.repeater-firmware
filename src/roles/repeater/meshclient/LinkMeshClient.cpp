@@ -112,13 +112,13 @@ uint8_t LinkMeshClient::sendLogin(const link::SendLogin& m, link::SendResponse& 
   // for the one caller that is not the codec.
   if (m.password.len > link::kLoginPasswordMax) return link::kErrRange;
 
-  // The plaintext BaseChatMesh::sendLogin builds (src/helpers/BaseChatMesh.cpp:572-600 at the
+  // The plaintext BaseChatMesh::sendLogin builds (src/helpers/BaseChatMesh.cpp:603-625 at the
   // pin): the timestamp, then the password's bytes and nothing after them. With no password it is
   // the four bytes of the timestamp alone, which is the ACL login: the datagram's plaintext is
   // zero-padded to a cipher block, so the repeater's handleLoginReq reads data[0] == 0 and
   // answers from its ACL (MyMesh.cpp:92-99). With one, it compares the bytes with its admin and
   // guest passwords by strcmp (MyMesh.cpp:101-104), which is why fifteen is the most that can
-  // ever match: the field is sixteen with its NUL (src/helpers/CommonCLI.h:29).
+  // ever match: the field is sixteen with its NUL (src/helpers/CommonCLI.h:31).
   //
   // The tag is 0. handleLoginReq writes the **repeater's** getCurrentTimeUnique() into the
   // reply's first four bytes (MyMesh.cpp:133-134), not ours, so the reply is "the next response
@@ -170,7 +170,7 @@ uint8_t LinkMeshClient::sendCli(const link::SendCli& m, link::SendResponse& out,
   if (m.text.len < 1 || m.text.len > link::kSendCliTextMax) return link::kErrRange;
 
   // The shape BaseChatMesh::sendCommandData gives a CLI line (src/helpers/BaseChatMesh.cpp:
-  // 462-470 at the pin): the sender timestamp, a flags byte of attempt 0 with TXT_TYPE_CLI_DATA
+  // 492-501 at the pin): the sender timestamp, a flags byte of attempt 0 with TXT_TYPE_CLI_DATA
   // in its upper six bits, then the text. The receiving repeater (MyMesh::onPeerDataRecv,
   // MyMesh.cpp:701-756) runs it through its CLI for an admin client when the timestamp is at or
   // above the last it saw - an equal one is a retry and is answered with an empty reply, so

@@ -74,7 +74,7 @@ void TwinOakSensors::loop() {
 
 // The telemetry a mesh client is answered with. Upstream's MyMesh::handleRequest has already put
 // the battery voltage on channel 1 and will add the MCU's temperature after this returns
-// (examples/simple_repeater/MyMesh.cpp:241-259 at the pin d9296435); upstream's manager goes
+// (examples/simple_repeater/MyMesh.cpp:241-259 at the pin 81dbae59); upstream's manager goes
 // first here for the same reason the settings do, and ours follow on the fixed channels of
 // src/common/power/Telemetry.h. LPP_GET on the box link answers with the same field list and the same
 // cap, which is what makes the two the same bytes (src/common/power/LinkPower.cpp).
@@ -87,8 +87,8 @@ bool TwinOakSensors::querySensors(uint8_t requester_permissions, CayenneLPP& tel
 // --- the settings -------------------------------------------------------------------------------
 
 // The role's follow upstream's own, which on this board are none - EnvironmentSensorManager lists a
-// setting only for a detected GPS (src/helpers/sensors/EnvironmentSensorManager.cpp:685 at the
-// pin d9296435) and this adapter has none. They are added and not substituted all the same: every
+// setting only for a detected GPS (src/helpers/sensors/EnvironmentSensorManager.cpp:702 at the
+// pin 81dbae59) and this adapter has none. They are added and not substituted all the same: every
 // call below asks upstream first, so a board or a bump that gives the manager settings of its own
 // keeps them, at the indices it chose, with ours after them.
 int TwinOakSensors::getNumSettings() const {

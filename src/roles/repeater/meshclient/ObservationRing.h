@@ -60,7 +60,7 @@ constexpr uint8_t kObsPubKeyLen = kPeerKeyLen;       // 32, MeshCore's PUB_KEY_S
 constexpr uint8_t kObsPathBytesMax = kPathBytesMax;  // 64, MeshCore's MAX_PATH_SIZE
 // MeshCore's MAX_ADVERT_DATA_SIZE, which is also section 7's cap on app_len: Mesh::onRecvPacket
 // clamps an advert's app_data to it before onAdvertRecv sees it (src/Mesh.cpp:269 at the pin
-// d9296435), so on this build the two agree exactly and nothing is ever truncated here.
+// 81dbae59), so on this build the two agree exactly and nothing is ever truncated here.
 // src/roles/repeater/app/TwinOakMesh.cpp static_asserts it against upstream's macro and against the link's own.
 constexpr uint8_t kObsAppDataMax = 32;
 

@@ -293,8 +293,8 @@ def read_repeater(ports, app_info, log, disposable, timeouts, expect_banner=True
             # board that has been up it cannot be caught at all: the first RAK4630 on this bench
             # gave it neither on the first open nor after a `reboot` (p3.4-02). Upstream's own
             # console prints the same 32 bytes - `get public.key` is
-            # mesh::Utils::toHex(getSelfId().pub_key) at the pin d9296435
-            # (src/helpers/CommonCLI.cpp:902), and `Repeater ID:` is that key - so it is asked
+            # mesh::Utils::toHex(getSelfId().pub_key) at the pin 81dbae59
+            # (src/helpers/CommonCLI.cpp:750-752), and `Repeater ID:` is that key - so it is asked
             # first and the reset is only the fallback.
             got = console.send("get public.key")
             key = _KEY.search(got.text or "")

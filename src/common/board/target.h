@@ -39,8 +39,8 @@ class TwinOakBoard : public RAK4631Board {
   // a floating pin. This returns channel 2's bus voltage, or **0 when that channel is not
   // valid**, which is what spec/LINK-PROTOCOL.md section 5.8 means by a channel whose bit is
   // clear - and 0 is also what keeps upstream's boot-voltage protection out of the way, because
-  // it only acts on a reading above 1000 mV (src/helpers/NRF52Board.cpp:128 at the pin
-  // d9296435). tasks/phase-1/reports/06.md is the whole reading of that path and what it means
+  // it only acts on a reading above 1000 mV (src/helpers/NRF52Board.cpp:131 at the pin
+  // 81dbae59). tasks/phase-1/reports/06.md is the whole reading of that path and what it means
   // for this board.
   //
   // Three things of upstream's read it: `status` over the mesh and the console
@@ -51,9 +51,9 @@ class TwinOakBoard : public RAK4631Board {
 
 
   // mesh::MainBoard::reboot() and powerOff() are both virtual (src/MeshCore.h:54 and :55 at the
-  // pin d9296435; NRF52Board.h implements them as NVIC_SystemReset and SYSTEMOFF). Every restart
+  // pin 81dbae59; NRF52Board.h implements them as NVIC_SystemReset and SYSTEMOFF). Every restart
   // this firmware performs goes through one of them - the console's `poweroff`/`shutdown`,
-  // `reboot` and `clkreboot` (src/helpers/CommonCLI.cpp:184, :186 and :190) as well as the box
+  // `reboot` and `clkreboot` (src/helpers/CommonCLI.cpp:195, :197 and :201) as well as the box
   // link's REBOOT - so overriding them is how "the file is written on a restart the firmware
   // itself asks for" is kept without touching a line of upstream's (spec/LINK-PROTOCOL.md 5.4).
   void reboot() override;

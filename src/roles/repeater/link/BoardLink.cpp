@@ -36,9 +36,14 @@ class BoardSystem : public SystemAccess {
   uint8_t resetReason() const override {
     // MeshCore captures POWER->RESETREAS in a constructor of priority 101, before anything
     // clears it, and RAK4631Board::begin() -> checkBootVoltage() -> initPowerMgr() copies it into
-    // the board object (src/helpers/NRF52Board.cpp and variants/rak4631/RAK4631Board.cpp at the
-    // pin d9296435). NRF52_POWER_MANAGEMENT is defined for this environment, which is what makes
-    // getResetReason() the register and not zero.
+    // the board object (src/helpers/NRF52Board.cpp:45 and :111, variants/rak4631/
+    // RAK4631Board.cpp:60-63 at the pin 81dbae59). NRF52_POWER_MANAGEMENT is defined for this
+    // environment, which is what makes getResetReason() the register and not zero - and it is
+    // defined on purpose: upstream dropped it from its own rak4631 block at repeater-v1.18.0 (the
+    // undervoltage boot lock behind it breaks other cell chemistries), but on this board the
+    // reading that lock checks is 0 at boot (tasks/phase-1/reports/06.md), so the lock never
+    // fires here and the define's one effect is this capture. platformio.ini says the same
+    // beside the define.
     return resetReasonFromNrf52(board.getResetReason());
   }
 
@@ -110,8 +115,8 @@ class BoardIdentity : public IdentityAccess {
 // CLI (section 5.7): the line run by **upstream's own** interpreter, with a sender timestamp of
 // 0, which is what makes it a command typed on the serial console rather than one that arrived
 // over the mesh. Upstream's MyMesh::handleCommand(0, command, reply) is public and is the same
-// call src/roles/repeater/main.cpp's USB console makes (examples/simple_repeater/MyMesh.h:230 and
-// src/helpers/CommonCLI.cpp:182 at the pin d9296435); nothing of upstream's is touched to put it
+// call src/roles/repeater/main.cpp's USB console makes (examples/simple_repeater/MyMesh.h:229 and
+// src/helpers/CommonCLI.cpp:183 at the pin 81dbae59); nothing of upstream's is touched to put it
 // on this link.
 //
 // Three things about that call, each read out of the source at the pin:
@@ -123,7 +128,7 @@ class BoardIdentity : public IdentityAccess {
 //     `_region_map->exportTo(reply, 160)`, `StrHelper::strncpy(&reply[14], ..., 160-15)`), which
 //     is why the session's window is 160 and not 161;
 //   - four lines never come back at all - `poweroff`, `shutdown`, `reboot` and `clkreboot` call
-//     the board's powerOff()/reboot() (CommonCLI.cpp:183-188) - so the response to those is not
+//     the board's powerOff()/reboot() (CommonCLI.cpp:194-201) - so the response to those is not
 //     owed and this handler does not try to out-run the restart. Our board writes the clock's
 //     file on the way down (src/common/board/target.cpp), as it does for the link's own REBOOT.
 class BoardCli : public CliAccess {

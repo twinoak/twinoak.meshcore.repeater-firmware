@@ -65,3 +65,41 @@ to settle at the new pin. The review of 01–06 goes below them when it is writt
   held to `flood_max`, which is 64. Nothing of this task is wrong at either pin; what the bump
   owes is the decision whether the profile should also lower `flood.max` (upstream's own 64), and
   Thomas's, since it is the Danish standard and not a reading of upstream.
+
+## From 06 (23 October)
+
+- [ ] **[Thomas] Does the Danish standard lower `flood.max` too?** At `repeater-v1.18.0` a flood
+  whose transport code is 0 is forwarded (it matches the wildcard region, `RegionMap.cpp:191`)
+  and is held to `flood.max` - upstream's 64 - and not to the profile's `flood.max.unscoped 15`,
+  because its route type is `ROUTE_TYPE_TRANSPORT_FLOOD` (`RoutingPolicy.h:19`). 06 left the
+  profile as 05 wrote it (six lines, `flood.max` untouched) and wrote the fact beside the
+  `flood.max.unscoped` line in `src/roles/repeater/firstboot/Profile.cpp`; whether a seventh line
+  `set flood.max <n>` belongs in the standard is a decision about the standard, not a reading of
+  upstream, and no document of this project gives a value for it.
+- [ ] **[reviewer] The nRF52 toolchain upstream builds with is GCC 14 now, and ours is GCC 7.2.1.**
+  `repeater-v1.18.0`'s `[nrf52_base]` adds `platformio/toolchain-gccarmnoneeabi@^1.140201.0` to
+  `platform_packages` (its `612b217b`, with `src/armstubs.cpp` for the seven libc stubs that
+  toolchain wants); this firmware pins `platformio/nordicnrf52@11.0.0`, whose toolchain is
+  `1.70201.0`. 06 did **not** bring it across: a compiler change touches every byte of both
+  images, the scanner's `.noinit` linker fragment and its two `ASSERT`s (p3.5-03) and `-Werror`
+  over `src/` under a compiler seven major versions newer are each a thing to show, and
+  `platformio.ini`'s own comment says the toolchain is a deliberate line in a pull request. A
+  task of its own: bump, both builds, the native tests, the sizes, walks 1, 8 and 9, and whether
+  `armstubs.cpp` (already compiled into `libMeshCore.a` here, weak and unused) changes anything.
+- [ ] **[reviewer] MeshMaster's `af` row has no upper bound, and `repeater-v1.18.0` refuses one.**
+  `set af <x>` is `CommonRadioPrefs::handleCommand` now and answers `ERROR: af must be 0-9` for a
+  factor over 9 (`src/helpers/CommonRadioPrefs.cpp:69-79`), where `repeater-v1.17.1` answered `OK`
+  and `loadPrefs` clamped the value to 9.0 on the next boot. `meshmaster.dk`'s
+  `ConfigKeys.cs` (`AirtimeFactor`, read at its `HEAD` on 23 October) has `Min = 0` and no `Max`,
+  so its editor would let a plan carry `set af 12`; its reply rule (`ConfigApplyHandler`,
+  *starts with `OK`*) reads the new text as the refusal it is and stops the sequence, so nothing
+  is misread - but the row wants `Max = 9`, and the same file's comments on `agc.reset.interval`
+  and `dutycycle` cite `CommonCLI.cpp` lines of `d9296435` that are `CommonRadioPrefs.cpp`'s now.
+  Not tier three (no reply a reader of ours depends on changed its text; `tasks/phase-3.5/reports/06.md`),
+  but a note for the MeshMaster repository, which is read-only to every task here.
+- [ ] **[reviewer] The weekly bump's CI waits for a click nobody made.** PR #26 opened on
+  19 October at 07:03 UTC and its CI run (`39213525960`) sat at *action_required* for four days,
+  so the first real bump had neither a green nor a red when 06 picked it up. `docs/upstream.md`
+  says why (GitHub holds workflows a workflow's own token opened) and leaves the fix - a personal
+  access token in a repository secret - to Thomas; the Monday routine should at least include
+  the click, or the bump's verdict is never seen.

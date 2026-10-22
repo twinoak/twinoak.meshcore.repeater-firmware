@@ -13,11 +13,11 @@
 //   - the awaited tag 0 means "the next reply from the peer whatever its tag": a login reply
 //     carries the *repeater's* timestamp, not ours (MyMesh::handleLoginReq writes its own
 //     getCurrentTimeUnique() into the reply, examples/simple_repeater/MyMesh.cpp:133-134 at the
-//     pin d9296435), and a CLI reply carries no tag at all;
+//     pin 81dbae59), and a CLI reply carries no tag at all;
 //   - a response while a text is awaited is dropped: it is an old reply that took another route
 //     home. A response with another tag is dropped for the same reason;
 //   - a text that is not CLI data is dropped (what a repeater answers a CLI line with is a TXT_MSG
-//     whose flags byte says TXT_TYPE_CLI_DATA, MyMesh.cpp:743; a repeater from before v1.17
+//     whose flags byte says TXT_TYPE_CLI_DATA, MyMesh.cpp:749; a repeater from before v1.17
 //     said TXT_TYPE_PLAIN, and the agent firmware's parseCliReply reads both);
 //   - the first reply wins; a second is dropped, because the record is no longer pending;
 //   - the timeout is the deadline the send armed, and reaching it is an outcome reported once.
@@ -54,7 +54,10 @@ enum ReplyState : uint8_t {
 };
 
 // A text datagram's flags byte carries the text type in its upper six bits
-// (src/helpers/TxtDataHelpers.h at the pin; MyMesh.cpp:704 reads `data[4] >> 2`).
+// (src/helpers/TxtDataHelpers.h:6-9 at the pin; MyMesh.cpp:705 reads `data[4] >> 2`). Since
+// repeater-v1.18.0 that header also has TXT_TYPE_CLI_COMMAND (3), which a repeater *accepts* as a
+// CLI line beside the two below (MyMesh.cpp:707); its replies are still TXT_TYPE_CLI_DATA (:749),
+// so nothing here reads the new value.
 constexpr uint8_t kTxtTypePlain = 0;
 constexpr uint8_t kTxtTypeCliData = 1;
 // The plaintext of a text datagram: a four-byte timestamp, the flags byte, then the text.

@@ -26,7 +26,7 @@ What this file refuses to send, whatever a caller asks (console_guard):
 What it does **not** refuse, and why (docs/bench.md section 3, walked by p3.5-04): upstream's own
 `reboot` and `clkreboot`. Neither hands the board to a bootloader - `clkreboot` sets upstream's
 clock back to its 2024 default and then calls the same `_board->reboot()` as `reboot`
-(src/helpers/CommonCLI.cpp:187-190 at the pin d9296435) - neither touches the node's identity,
+(src/helpers/CommonCLI.cpp:196-201 at the pin 81dbae59) - neither touches the node's identity,
 and the clock keeper restores the saved time on the boot that follows either, so a `clkreboot` of
 ours cannot put the node behind its own last advert (src/roles/repeater/clock/ClockKeeper.h).
 That is what makes the line checkable by a session rather than a person's: it is the way to see
@@ -34,7 +34,7 @@ the keeper work, and it is the whole of docs/bench.md section 3's `clkreboot` li
 `2` and `3` stay refused, because those three *are* the bootloader.
 
 And what it never prints: a reply line that begins `password now:` - upstream's `password`
-command echoes the new password back (CommonCLI.cpp:260 at the pin) - is replaced before it
+command echoes the new password back (CommonCLI.cpp:267-271 at the pin) - is replaced before it
 reaches the log or the caller, so nothing downstream of this file can see a password.
 """
 

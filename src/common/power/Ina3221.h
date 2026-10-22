@@ -5,7 +5,7 @@
 //
 // Why this file exists at all: stock MeshCore applies **one** shunt value to all three channels
 // (TELEM_INA3221_SHUNT_VALUE 0.100 through setShuntResistance(i, ...),
-// src/helpers/sensors/EnvironmentSensorManager.cpp:345-350 at the pin d9296435) and ours are
+// src/helpers/sensors/EnvironmentSensorManager.cpp:345-350 at the pin 81dbae59) and ours are
 // 100, 20 and 50 milliohm. With upstream's value channel 2 reads five times low and channel 3
 // twice low - which is the finding of CURRENT-SENSE.md section 4 and the reason this unit runs
 // custom firmware.

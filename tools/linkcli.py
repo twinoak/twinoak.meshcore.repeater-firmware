@@ -812,7 +812,7 @@ def accepted(line, text):
     each gets its own rule read off upstream's own branch:
 
       - `password <new>` is answered `password now: <the new password>` (CommonCLI.cpp's
-        `password` branch at the pin d9296435) - a success that does not begin with `OK`, and the
+        `password` branch, :267-271 at the pin 81dbae59) - a success that does not begin with `OK`, and the
         one reply this tool must never print. The firmware's own first-boot profile judges that
         same reply a **refusal**, on purpose: no line of a table compiled into an image may carry
         a password at all (spec/SYSTEM.md S-13, src/roles/repeater/firstboot/Profile.h). Here a
@@ -828,7 +828,7 @@ def accepted(line, text):
     if head == "region":
         # Upstream's `region` branch answers with the region tree, ` home is <x>` or ` default
         # scope is now <x>` - never `OK` - and every one of its failures begins with `Err`
-        # (CommonCLI::handleRegionCmd, src/helpers/CommonCLI.cpp at the pin d9296435). So for
+        # (CommonCLI::handleRegionCmd, src/helpers/CommonCLI.cpp:889 at the pin 81dbae59). So for
         # these lines the rule is the absence of that word.
         return not text.strip().startswith("Err")
     return reply_accepted(text)

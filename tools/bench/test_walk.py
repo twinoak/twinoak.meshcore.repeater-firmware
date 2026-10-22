@@ -78,7 +78,7 @@ caps 0x61
 boot_id 7
 fw_version 0.0.0-dev
 board rak4630-single
-upstream repeater-v1.17.1+d9296435
+upstream repeater-v1.18.0+81dbae59
 """
 
 PROVISIONED = """provision unit.txt: 8 line(s)
@@ -393,7 +393,7 @@ class SectionThree(WalkCase):
     def test_the_console_lines_of_the_clock(self):
         """Every line of the section a console can read, with `clock sync` given a sender
         timestamp - which is the only way upstream's own line can move a clock at all
-        (CommonCLI.cpp:199-207), and so the walk's own ok path."""
+        (CommonCLI.cpp:210-218), and so the walk's own ok path."""
         board, code, out = self.walk_three(self.fresh(clock_sync_sender=WALK_NOW + 5))
         self.assertEqual(code, cfg.EXIT_OK, out)
         name, text = self.result_file()
@@ -1198,9 +1198,9 @@ class ThePieces(unittest.TestCase):
 
     def test_the_fw_version_line(self):
         parsed = walk.parse_fw_version_line(
-            "> twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)")
+            "> twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.18.0 (81dbae59)")
         self.assertEqual(parsed, {"role": "repeater", "version": "0.0.0-dev",
-                                  "tag": "repeater-v1.17.1", "pin": "d9296435"})
+                                  "tag": "repeater-v1.18.0", "pin": "81dbae59"})
         self.assertIsNone(walk.parse_fw_version_line("> something else"))
         self.assertIsNone(walk.parse_fw_version_line(""))
 

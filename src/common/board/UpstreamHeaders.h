@@ -43,7 +43,7 @@
 #include <helpers/radiolib/RadioLibWrappers.h>
 #include <helpers/sensors/EnvironmentSensorManager.h>
 // FILESYSTEM - Adafruit_LittleFS on this platform (helpers/IdentityStore.h:5-8 at the pin
-// d9296435). src/common/power/ takes one to keep its preferences file, and before the tree was
+// 81dbae59). src/common/power/ takes one to keep its preferences file, and before the tree was
 // split by role it reached the macro through upstream's MyMesh.h; nothing of common/ includes a
 // role's header now, so it is named here, where the rest of upstream's headers are.
 #include <helpers/IdentityStore.h>

@@ -90,8 +90,8 @@ bool buildFloodAdvertIntervalLine(const NodeFacts& facts, char* out, size_t cap)
 const ProfileLine kProfile[] = {
     // spec/SYSTEM.md S-12: "Path hashes this firmware chooses are two bytes or more
     // (meshmaster.dk D-33)". Upstream floods this node's own adverts at `path_hash_mode + 1`
-    // bytes (MyMesh::sendSelfAdvertisement, examples/simple_repeater/MyMesh.cpp:1035 at the pin
-    // d9296435, and the periodic flood advert at :1297), so the default of 0 is one byte - and
+    // bytes (MyMesh::sendSelfAdvertisement, examples/simple_repeater/MyMesh.cpp:1037 at the pin
+    // 81dbae59, and the periodic flood advert at :1299), so the default of 0 is one byte - and
     // one byte makes two repeaters that share a first hash byte both match a packet's next hop.
     // D-33 names this key for repeaters in so many words: `path.hash.mode` "at least 1". The
     // mesh client's own floods already pass 2 in code (meshclient::kFloodPathHashSize); this is
@@ -103,17 +103,20 @@ const ProfileLine kProfile[] = {
     // held against src/common/bands/Bands.h's row by the static_assert above. 869.618 MHz is in
     // the 869.400-869.650 MHz sub-band of ERC Recommendation 70-03, Annex 1, row h1.7 - 500 mW
     // e.r.p. and a duty cycle of 10 % - and upstream starts a repeater at 50 %
-    // (MyMesh's constructor sets `airtime_factor` to 1.0, examples/simple_repeater/MyMesh.cpp:890
-    // at the pin d9296435, and `Dispatcher::begin` makes the budget 1/(1+1) of a one-hour window,
+    // (MyMesh's constructor sets `airtime_factor` to 1.0, examples/simple_repeater/MyMesh.cpp:891
+    // at the pin 81dbae59, and `Dispatcher::begin` makes the budget 1/(1+1) of a one-hour window,
     // src/Dispatcher.cpp:25-27). `set dutycycle <dc>` is upstream's own way to say it: it writes
     // `airtime_factor = (100 / dc) - 1` and answers `OK - 10.0%`
-    // (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461), which the reply rule below
-    // accepts, and `get dutycycle` reads the same number back out of the factor (`:809-814`).
+    // (CommonRadioPrefs::handleCommand, src/helpers/CommonRadioPrefs.cpp:88-100 - since
+    // repeater-v1.18.0 every radio key lives in that class, reached from CommonCLI::handleCommand
+    // before anything else; at repeater-v1.17.1 it was CommonCLI::handleSetCmd), which the reply
+    // rule below accepts, and `get dutycycle` reads the same number back out of the factor
+    // (`:81-87` of the same file).
     //
-    // 10 % is also the lowest duty cycle this upstream can keep: `loadPrefs` clamps
-    // `airtime_factor` to 9.0 (`:111`), which is exactly 100/10 - 1, so a site that wants less
-    // than the band allows cannot have it from this preference. A line here asking for less would
-    // be accepted, saved and then loaded back as 10 %.
+    // 10 % is also the lowest duty cycle this upstream can keep: `CommonCLI::loadPrefs` clamps
+    // `airtime_factor` to 9.0 (src/helpers/CommonCLI.cpp:111), which is exactly 100/10 - 1, so a
+    // site that wants less than the band allows cannot have it from this preference. A line here
+    // asking for less would be accepted, saved and then loaded back as 10 %.
     {"set dutycycle " TWINOAK_PROFILE_TEXT(TWINOAK_BAND_DUTY_CYCLE),
      "the duty cycle the home channel's band allows, which upstream starts at 50 % "
      "(ERC Recommendation 70-03, Annex 1, 869.400-869.650 MHz; platformio.ini's [band_868])",
@@ -126,48 +129,68 @@ const ProfileLine kProfile[] = {
     //
     // The receiver's automatic gain control and its noise floor, re-sampled every four seconds.
     // Upstream's default is 0, which is off (Dispatcher::getAGCResetInterval() returns 0,
-    // src/Dispatcher.h:172 at the pin d9296435, and MyMesh overrides it with
-    // `agc_reset_interval * 4000` ms, examples/simple_repeater/MyMesh.h:157-159); with it on,
+    // src/Dispatcher.h:172 at the pin 81dbae59, and MyMesh overrides it with
+    // `agc_reset_interval * 4000` ms, examples/simple_repeater/MyMesh.h:153-155); with it on,
     // `Dispatcher::loop` calls `_radio->resetAGC()` on that period whenever it is not mid-packet
     // (src/Dispatcher.cpp:133-136), and the SX1262 wrapper throws away the noise floor it had
     // sampled so that a stuck floor reconverges (RadioLibWrapper::resetAGC,
-    // src/helpers/radiolib/RadioLibWrappers.cpp:71-83, whose own comment is about exactly that
+    // src/helpers/radiolib/RadioLibWrappers.cpp:74-86, whose own comment is about exactly that
     // stuck -120 dBm). A repeater that has heard a strong neighbour is the node that needs it.
     //
     // Upstream keeps the value as **seconds / 4** in a uint8_t (`agc_reset_interval`,
-    // src/helpers/CommonCLI.h:49), so `set agc.reset.interval 4` stores 1 and the reply is
-    // `OK - interval rounded to 4`, which the reply rule below accepts; `get` answers `> 4`.
+    // src/helpers/CommonCLI.h:51), so `set agc.reset.interval 4` stores 1 and the reply is
+    // `OK - interval rounded to 4`, which the reply rule below accepts; `get` answers `> 4`. The
+    // set/get pair is CommonRadioPrefs::handleCommand (src/helpers/CommonRadioPrefs.cpp:163-173)
+    // since repeater-v1.18.0, which also constrains the seconds to 0-1020 where repeater-v1.17.1
+    // let `atoi(x) / 4` wrap in the uint8_t (p3.5-05's follow-up, settled by p3.5-06); 4 is the
+    // same line and the same reply at both pins.
     {"set agc.reset.interval 4",
      "the receiver's AGC and noise floor re-sampled every 4 s, which upstream leaves off "
      "(the Danish standard; Thomas, 22 October 2026)", nullptr},
-    // Loop detection. Upstream's default is off; `moderate` lets a flood packet past this node
-    // at most twice when its path hashes are one byte and once when they are two or three
-    // (`max_loop_moderate`, examples/simple_repeater/MyMesh.cpp:397 and the branch at :440-460 of
-    // allowPacketForward at the pin). Ours flood at two bytes (the first line of this table), so
-    // `moderate` is "once" for this firmware's own packets.
+    // Loop detection. Upstream's default is `minimal` since repeater-v1.18.0 (the constructor,
+    // examples/simple_repeater/MyMesh.cpp:911 at the pin 81dbae59; it was off at repeater-v1.17.1):
+    // `minimal` lets a flood packet past this node four times at one-byte path hashes and twice
+    // at two (`max_loop_minimal`, :396); `moderate` at most twice at one byte and once at two or
+    // three (`max_loop_moderate`, :397, and the branch at :440-460 of allowPacketForward). Ours
+    // flood at two bytes (the first line of this table), so `moderate` is "once" for this
+    // firmware's own packets where upstream's own default would be "twice".
     {"set loop.detect moderate",
-     "a flood packet is repeated once at two-byte hashes, where upstream repeats it without "
-     "limit (the Danish standard; Thomas, 22 October 2026)", nullptr},
+     "a flood packet is repeated once at two-byte hashes, where upstream's own default repeats "
+     "it twice (the Danish standard; Thomas, 22 October 2026)", nullptr},
     // The hop ceiling for an **un-scoped** flood - `ROUTE_TYPE_FLOOD`, a packet with no
     // transport code - which upstream leaves at its own maximum of 64
-    // (`_prefs.flood_max_unscoped = 64`, MyMesh.cpp:906; the test is
+    // (`_prefs.flood_max_unscoped = 64`, MyMesh.cpp:907; the test is
     // mesh::isFloodHopLimitExceeded, src/helpers/RoutingPolicy.h:19). 15 is the Danish standard's
     // ceiling for a mesh whose scoped traffic is what matters. A site may raise or lower it at
     // provisioning; this is the default it starts from, which it did not have before.
+    //
+    // What this line does **not** hold, since repeater-v1.18.0: a flood whose transport code is 0.
+    // RegionMap::findMatch answers the wildcard region for it now (src/helpers/RegionMap.cpp:191,
+    // upstream's "treat transport code 0 the same as un-scoped"), so a repeater forwards it where
+    // repeater-v1.17.1 dropped it - but its route type is still ROUTE_TYPE_TRANSPORT_FLOOD, and
+    // RoutingPolicy.h:19 applies flood_max_unscoped to ROUTE_TYPE_FLOOD alone, so such a packet
+    // is held to `flood.max` (upstream's 64) and not to this 15. Whether the standard wants
+    // `flood.max` lowered too is Thomas's (tasks/phase-3.5/FOLLOWUPS.md, from 06).
     {"set flood.max.unscoped 15",
      "an un-scoped flood is dropped past 15 hops, where upstream allows 64 "
      "(the Danish standard; Thomas, 22 October 2026)", nullptr},
     // And the one line **built from the node**: its flood advert's interval, 60-85 hours from the
     // node's own key (floodAdvertIntervalHours, and docs/provisioning.md section 1 states the
     // rule). Upstream's default is 47 hours for every unit in the world
-    // (`_prefs.flood_advert_interval = 47`, MyMesh.cpp:904), so a batch flashed in one evening
+    // (`_prefs.flood_advert_interval = 47`, MyMesh.cpp:905), so a batch flashed in one evening
     // floods the mesh in step for as long as it runs; two units of ours differ by up to a day.
     //
     // The range is inside upstream's own: `set flood.advert.interval <h>` refuses a value that is
-    // neither 0 nor 3-168 (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:486-495 at the pin),
+    // neither 0 nor 3-168 (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:493-502 at the pin),
     // stores the hours in a uint8_t and re-arms the timer at once
-    // (MyMesh::updateFloodAdvertTimer, MyMesh.cpp:1052-1057), which is what the profile wants:
-    // this boot's own first flood advert is already on the derived period.
+    // (MyMesh::updateFloodAdvertTimer, MyMesh.cpp:1054-1059), which is what the profile wants:
+    // this boot's own first flood advert is already on the derived period. And since
+    // repeater-v1.18.0 this line is also what keeps a unit *discoverable*: a repeater whose local
+    // and flood advert intervals are both 0 is a hidden node and answers no DISCOVER request
+    // (MyMesh::isHiddenNode, MyMesh.h:190-192, read at MyMesh.cpp:793) - and the local one *is* 0
+    // on every unit of ours, because CommonCLI::savePrefs zeroes it on the first `set`
+    // (src/helpers/CommonCLI.cpp:162-166). A site that later sets `flood.advert.interval 0`
+    // turns its unit invisible to DISCOVER as well.
     {"set flood.advert.interval <h>",
      "the flood advert's period, 60-85 h from this node's own key, so that units flashed "
      "together do not advertise in step (upstream: 47 h for every unit; the Danish standard; "
