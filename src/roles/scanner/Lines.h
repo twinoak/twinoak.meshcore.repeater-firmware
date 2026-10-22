@@ -172,6 +172,11 @@ class Lines {
   void done(const char* command, const Meta& meta);
   void ack(const char* command, bool ok, const char* message);
   void err(const char* message);
+  // The same line with the call that returned `code` named beside the message - additive:
+  // `{"t":"err","msg":…,"call":"calibrateImage","code":-707}` - for a scan step that failed in
+  // one of several calls to the radio (docs/noisescope.md section 5). An empty `call` is the
+  // plain line.
+  void err(const char* message, const char* call, int code);
 
   // The command list, as `# ` chatter: any line that does not begin with '{' is for a person and
   // a machine parser skips it (docs/noisescope.md).

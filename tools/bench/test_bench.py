@@ -662,6 +662,21 @@ class TheScannerConsole(BenchCase):
         self.assertIn('"t": "boot"', out)
         self.assertIn("0 not JSON", out)
 
+    def test_the_cli_sends_a_line_and_then_collects_on_the_same_port(self):
+        # A `scope`'s frames - or its `err` - follow the ack, and a port opened for a second
+        # command has already missed them (p3.5-02): the line and the collect share one open.
+        self.config()
+        board = self.board(FakeScannerFirmware(scope_frames=2, extra_lines=['{"t":"err","msg":"late"}']))
+        ports = FakePorts(boards=[board], clock=self.clock)
+        code, out = self.run_cli(["console", "--scanner", "scope 863 870", "--collect", "1"], ports=ports)
+        self.assertEqual(code, cfg.EXIT_OK)
+        self.assertEqual(board.firmware.received, ["scope 863 870"])
+        self.assertIn('"cmd": "scope"', out)
+        self.assertEqual(out.count('"t": "scope"'), 2)
+        self.assertIn('"msg": "late"', out)
+        self.assertIn("not JSON", out)
+        self.assertEqual(len(ports.opened), 1)
+
 
 # ----------------------------------------------------------------------------- a flash
 

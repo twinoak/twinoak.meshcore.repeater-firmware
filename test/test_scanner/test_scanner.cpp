@@ -30,6 +30,8 @@
 #include <ArduinoJson.h>
 
 #include <cmath>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -1311,6 +1313,315 @@ TEST(Scope, InfoCarriesTheRadiosRom) {
   EXPECT_STREQ("info", doc["t"].as<const char*>());
   EXPECT_STREQ("scanner", doc["role"].as<const char*>());
   EXPECT_FLOAT_EQ(869.618, doc["home"]["f"].as<double>());
+}
+
+// ----------------------------------------------------------------- arming a segment
+
+// A radio that records what it was asked, in order, and answers what the test tells it to.
+struct FakeArmRadio : ScopeArmRadio {
+  char log[512];
+  int standby_code = 0;
+  int frequency_code = 0;
+  int calibrate_code = 0;
+  int sweep_code = 0;
+  int reload_code = 0;
+  unsigned device_errors = 0;
+  int refusals = 0;  // how many calibrations in a row the chip refuses (IMG_CALIB_ERR), then none
+
+  FakeArmRadio() { log[0] = '\0'; }
+
+  void note(const char* fmt, ...) {
+    char piece[96];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(piece, sizeof(piece), fmt, ap);
+    va_end(ap);
+    strncat(log, piece, sizeof(log) - strlen(log) - 1);
+  }
+  int standby() override {
+    note("standby;");
+    return standby_code;
+  }
+  int setFrequency(double mhz) override {
+    note("setFrequency(%.3f);", mhz);
+    return frequency_code;
+  }
+  int calibrateImage(double lo, double hi) override {
+    note("calibrateImage(%.3f,%.3f);", lo, hi);
+    return calibrate_code;
+  }
+  unsigned deviceErrors() override {
+    note("deviceErrors;");
+    if (refusals > 0) {
+      refusals--;
+      return device_errors | kScopeImageCalibrationError;
+    }
+    return device_errors;
+  }
+  int reload() override {
+    note("reload;");
+    return reload_code;
+  }
+  int setSweep(double first, double step, uint16_t points, double rbw) override {
+    note("setSweep(%.3f,%.3f,%u,%.1f);", first, step, unsigned(points), rbw);
+    return sweep_code;
+  }
+};
+
+static ScopePlan planOf(double f0, double f1, uint32_t points) {
+  ScopeRequest r;
+  r.f0 = f0;
+  r.f1 = f1;
+  r.points = points;
+  ScopePlan plan;
+  EXPECT_TRUE(planScope(r, plan));
+  return plan;
+}
+
+TEST(Scope, ASegmentIsArmedInTheOneOrderTheBoardAccepts) {
+  // `scope 150 250`: four segments of 63 points, 400 kHz apart, through the 467 kHz filter - the
+  // span of p3.5-02's probe table, whose third segment the first board refused until the order
+  // below. The frequency is set *before* anything is calibrated, exactly one calibration is
+  // made and it is the segment's own range, the chip is asked whether it took, and only then
+  // are the plugin's parameters loaded.
+  const ScopePlan plan = planOf(150.0, 250.0, 250);
+  ASSERT_EQ(4u, plan.segments);
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 2, seg));
+  EXPECT_NEAR(200.6, seg.first_mhz, 1e-9);
+
+  EXPECT_EQ(62u, seg.points);  // 250 points over 4 segments: 63, 63, 62, 62
+  EXPECT_NEAR(200.6 - 0.2335, seg.cal_lo_mhz, 1e-6);
+  EXPECT_NEAR(200.6 + 61 * 0.4 + 0.2335, seg.cal_hi_mhz, 1e-6);
+
+  FakeArmRadio radio;
+  ScopeArmResult out;
+  EXPECT_TRUE(armScopeSegment(radio, plan, seg, out));
+  EXPECT_EQ(kScopeArmNone, out.failed);
+  EXPECT_EQ(0, out.code);
+  char expected[160];
+  snprintf(expected, sizeof(expected),
+           "standby;setFrequency(213.000);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "setSweep(200.600,0.400,62,467.0);",
+           seg.cal_lo_mhz, seg.cal_hi_mhz);
+  EXPECT_STREQ(expected, radio.log);
+  EXPECT_FALSE(out.reloaded);
+
+  // The centre is the plugin's own formula (first + step * points / 2, in float), so that
+  // setSweep()'s setFrequency() of the same number is a move of zero and calibrates nothing.
+  EXPECT_FLOAT_EQ(float(200.6) + float(0.4) * 62.0f / 2.0f, scopeSegmentCentreMhz(plan, seg));
+}
+
+TEST(Scope, AnArmThatFailsNamesTheCallAndStopsThere) {
+  const ScopePlan plan = planOf(150.0, 250.0, 250);
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 2, seg));
+  char calibrated[160];  // the log up to and including the calibration
+  snprintf(calibrated, sizeof(calibrated),
+           "standby;setFrequency(213.000);calibrateImage(%.3f,%.3f);", seg.cal_lo_mhz,
+           seg.cal_hi_mhz);
+  char asked[200];  // and with the chip asked
+  snprintf(asked, sizeof(asked), "%sdeviceErrors;", calibrated);
+
+  {
+    FakeArmRadio radio;
+    radio.standby_code = -707;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(kScopeArmStandby, out.failed);
+    EXPECT_EQ(-707, out.code);
+    EXPECT_STREQ("standby;", radio.log);
+  }
+  {
+    FakeArmRadio radio;
+    radio.frequency_code = -705;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(kScopeArmSetFrequency, out.failed);
+    EXPECT_EQ(-705, out.code);
+    EXPECT_STREQ("standby;setFrequency(213.000);", radio.log);
+  }
+  {
+    // A calibration call that returns a code is a refused calibration too: one reload, the
+    // same arm again, and the err when that is refused as well.
+    FakeArmRadio radio;
+    radio.calibrate_code = -707;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
+    EXPECT_EQ(-707, out.code);
+    EXPECT_TRUE(out.reloaded);
+    char expected[400];
+    snprintf(expected, sizeof(expected), "%sreload;%s", calibrated, calibrated);
+    EXPECT_STREQ(expected, radio.log);
+  }
+  {
+    // The case the board showed: the command's own status says nothing (the driver reads the
+    // status of the command before it) and only the device errors carry IMG_CALIB_ERR. That is
+    // a calibration that failed, named as one, with the driver's own code for a chip's failure
+    // to execute - and no sweep is loaded through a bad image.
+    FakeArmRadio radio;
+    radio.device_errors = kScopeImageCalibrationError | 0x0040;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
+    EXPECT_EQ(kScopeArmCalibrationFailed, out.code);
+    EXPECT_EQ(-707, out.code);
+    EXPECT_EQ(0x0050u, out.device_errors);
+    EXPECT_TRUE(out.reloaded);  // refused, reloaded, refused again: then the err
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%sreload;%s", asked, asked);
+    EXPECT_STREQ(expected, radio.log);
+  }
+  {
+    // Any other device error alone is not a calibration failure.
+    FakeArmRadio radio;
+    radio.device_errors = 0x0040;
+    ScopeArmResult out;
+    EXPECT_TRUE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(0x0040u, out.device_errors);
+    EXPECT_FALSE(out.reloaded);
+  }
+  {
+    FakeArmRadio radio;
+    radio.sweep_code = -14;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(kScopeArmSetSweep, out.failed);
+    EXPECT_EQ(-14, out.code);
+  }
+}
+
+TEST(Scope, ACalibrationTheChipRefusesIsAskedForOnceMoreAfterAReload) {
+  // What the first board does at the second segment of every pass over 150-960 MHz (p3.5-02):
+  // the calibration is refused with IMG_CALIB_ERR, and nothing but a reset of the chip and the
+  // plugin uploaded again clears it. So: refused once, reload, the same arm again - and the
+  // sweep loaded only after the chip accepted it.
+  const ScopePlan plan = planOf(150.0, 960.0, 2048);
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 1, seg));
+  char arm[160];
+  snprintf(arm, sizeof(arm), "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;",
+           double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz);
+  char sweep[96];
+  snprintf(sweep, sizeof(sweep), "setSweep(%.3f,%.3f,%u,%.1f);", seg.first_mhz,
+           plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+  {
+    FakeArmRadio radio;
+    radio.refusals = 1;
+    ScopeArmResult out;
+    EXPECT_TRUE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_TRUE(out.reloaded);
+    EXPECT_EQ(kScopeArmNone, out.failed);
+    EXPECT_EQ(0u, out.device_errors & kScopeImageCalibrationError);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%sreload;%s%s", arm, arm, sweep);
+    EXPECT_STREQ(expected, radio.log);
+  }
+  {
+    // Refused twice: one reload, no third try, and the err names the calibration.
+    FakeArmRadio radio;
+    radio.refusals = 2;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_TRUE(out.reloaded);
+    EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
+    EXPECT_EQ(kScopeArmCalibrationFailed, out.code);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%sreload;%s", arm, arm);
+    EXPECT_STREQ(expected, radio.log);
+  }
+  {
+    // A reload that fails is its own call in the err line.
+    FakeArmRadio radio;
+    radio.refusals = 1;
+    radio.reload_code = -2;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_TRUE(out.reloaded);
+    EXPECT_EQ(kScopeArmReload, out.failed);
+    EXPECT_EQ(-2, out.code);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%sreload;", arm);
+    EXPECT_STREQ(expected, radio.log);
+  }
+  {
+    // A call that is not the calibration is not retried: a standby that fails is an err at
+    // once, with no reload.
+    FakeArmRadio radio;
+    radio.standby_code = -707;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_FALSE(out.reloaded);
+    EXPECT_STREQ("standby;", radio.log);
+  }
+}
+
+TEST(Scope, EverySegmentOfTheWholeRangeIsCalibratedForWhereItsSweepRuns) {
+  // The baseline, `scope 150 960 2048`: 26 segments, and each one's calibration begins at the
+  // frequency its own first point is at - the frequency the sweep before it ended next to - and
+  // never 20 MHz or more above it, which is what the chip refused.
+  const ScopePlan plan = planOf(150.0, 960.0, 2048);
+  ASSERT_EQ(26u, plan.segments);
+  for (uint16_t i = 0; i < plan.segments; i++) {
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(plan, i, seg));
+    FakeArmRadio radio;
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(radio, plan, seg, out)) << "segment " << i;
+    char expected[160];
+    snprintf(expected, sizeof(expected),
+             "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+             "setSweep(%.3f,%.3f,%u,%.1f);",
+             double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz,
+             seg.first_mhz, plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+    EXPECT_STREQ(expected, radio.log) << "segment " << i;
+    EXPECT_LT(seg.cal_lo_mhz, seg.first_mhz) << "segment " << i;
+    if (i > 0) {
+      ScopeSegment before;
+      ASSERT_TRUE(scopeSegment(plan, i - 1, before));
+      const double last_mhz = before.first_mhz + double(before.points - 1) * plan.step_khz / 1000.0;
+      EXPECT_NEAR(last_mhz + plan.step_khz / 1000.0, seg.first_mhz, 1e-6) << "segment " << i;
+    }
+  }
+}
+
+// ----------------------------------------------------------------- the err line of a segment
+
+TEST(Scope, ASegmentThatWouldNotArmNamesTheCallAndItsCode) {
+  // The four calls of armSegment (src/roles/scanner/Radio.cpp), in the order they are made, and
+  // the sweep itself: the frequency alone could not tell them apart on the first board
+  // (tasks/phase-3.1/FOLLOWUPS.md, 22 October 2026), and a report from the field needs to.
+  EXPECT_STREQ("standby", scopeArmCallName(kScopeArmStandby));
+  EXPECT_STREQ("setFrequency", scopeArmCallName(kScopeArmSetFrequency));
+  EXPECT_STREQ("calibrateImage", scopeArmCallName(kScopeArmCalibrateImage));
+  EXPECT_STREQ("setSweep", scopeArmCallName(kScopeArmSetSweep));
+  EXPECT_STREQ("sweep", scopeArmCallName(kScopeArmSweep));
+  EXPECT_STREQ("reload", scopeArmCallName(kScopeArmReload));
+  EXPECT_STREQ("", scopeArmCallName(kScopeArmNone));
+
+  StringSink sink;
+  Lines lines(sink);
+  lines.err("scope setup failed (-707) in calibrateImage at 200.6000; device errors 0x0010",
+            scopeArmCallName(kScopeArmCalibrateImage), -707);
+  {
+    const JsonDocument doc = parseOne(sink);
+    EXPECT_STREQ("err", doc["t"].as<const char*>());
+    EXPECT_STREQ("scope setup failed (-707) in calibrateImage at 200.6000; device errors 0x0010",
+                 doc["msg"].as<const char*>());
+    EXPECT_STREQ("calibrateImage", doc["call"].as<const char*>());
+    EXPECT_EQ(-707, doc["code"].as<int>());
+  }
+
+  // Additive (docs/noisescope.md section 5): a reader that knows only `msg` reads the same line
+  // as before, and an err with no call to name is the plain line with neither field.
+  sink.clear();
+  lines.err("scan timeout at 869.618", scopeArmCallName(kScopeArmNone), 0);
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_STREQ("err", doc["t"].as<const char*>());
+  EXPECT_STREQ("scan timeout at 869.618", doc["msg"].as<const char*>());
+  EXPECT_TRUE(doc["call"].isNull());
+  EXPECT_TRUE(doc["code"].isNull());
 }
 
 // ----------------------------------------------------------------- the aggregates

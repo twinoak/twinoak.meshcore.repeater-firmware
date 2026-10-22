@@ -156,6 +156,89 @@ bool scopeAggOf(const char* word, ScopeAgg& out) {
   return false;
 }
 
+const char* scopeArmCallName(ScopeArmCall call) {
+  switch (call) {
+    case kScopeArmStandby: return "standby";
+    case kScopeArmSetFrequency: return "setFrequency";
+    case kScopeArmCalibrateImage: return "calibrateImage";
+    case kScopeArmSetSweep: return "setSweep";
+    case kScopeArmSweep: return "sweep";
+    case kScopeArmReload: return "reload";
+    default: return "";
+  }
+}
+
+float scopeSegmentCentreMhz(const ScopePlan& plan, const ScopeSegment& seg) {
+  return float(seg.first_mhz) + float(plan.step_khz / 1000.0) * float(seg.points) / 2.0f;
+}
+
+namespace {
+
+// Standby, the frequency, the calibration, the chip's verdict: the part of an arm that a
+// reload may be followed by once more.
+bool calibrateScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                           ScopeArmResult& out) {
+  int st = radio.standby();
+  if (st != 0) {
+    out.failed = kScopeArmStandby;
+    out.code = st;
+    return false;
+  }
+  // The frequency first, calibrated for nothing: RadioLib's own calibration, made before the
+  // move and for a range around the new centre, is the one the first board refused.
+  st = radio.setFrequency(double(scopeSegmentCentreMhz(plan, seg)));
+  if (st != 0) {
+    out.failed = kScopeArmSetFrequency;
+    out.code = st;
+    return false;
+  }
+  // Then our range - what the segment measures - and the chip asked whether it took, because
+  // the driver cannot see this command's status (the header says why).
+  st = radio.calibrateImage(seg.cal_lo_mhz, seg.cal_hi_mhz);
+  if (st != 0) {
+    out.failed = kScopeArmCalibrateImage;
+    out.code = st;
+    return false;
+  }
+  out.device_errors = radio.deviceErrors();
+  if ((out.device_errors & kScopeImageCalibrationError) != 0) {
+    out.failed = kScopeArmCalibrateImage;
+    out.code = kScopeArmCalibrationFailed;
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                     ScopeArmResult& out) {
+  out = ScopeArmResult();
+  if (!calibrateScopeSegment(radio, plan, seg, out)) {
+    if (out.failed != kScopeArmCalibrateImage) return false;
+    // The chip refused the calibration: the one thing known to clear that is a reload, and the
+    // same arm is then asked for once more. Refused again, the `err` says which call and that
+    // the reload was made.
+    out.reloaded = true;
+    const int st = radio.reload();
+    if (st != 0) {
+      out.failed = kScopeArmReload;
+      out.code = st;
+      return false;
+    }
+    out.failed = kScopeArmNone;  // the refusal is history if the chip accepts the arm now
+    out.code = 0;
+    if (!calibrateScopeSegment(radio, plan, seg, out)) return false;
+  }
+  const int st = radio.setSweep(seg.first_mhz, plan.step_khz / 1000.0, seg.points, plan.rbw_khz);
+  if (st != 0) {
+    out.failed = kScopeArmSetSweep;
+    out.code = st;
+    return false;
+  }
+  return true;
+}
+
 uint32_t scopeBase64Length(uint16_t bytes) { return 4u * ((uint32_t(bytes) + 2u) / 3u); }
 
 uint32_t scopeFrameBytes(uint16_t points) {

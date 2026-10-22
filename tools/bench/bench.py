@@ -293,7 +293,7 @@ class Bench(object):
 
     def cmd_console(self, args):
         self.load()
-        if not args.collect:
+        if args.line:
             console_guard(args.line, self.config.disposable)  # refused before any port is opened
         app, boot = self.require_board()
         if app is None:
@@ -305,7 +305,7 @@ class Bench(object):
                 if args.scanner:
                     console = ScannerConsole(port, log=(lambda s: None), disposable=self.config.disposable,
                                              now=self.ports.now, sleep=self.ports.sleep)
-                    if args.collect:
+                    if args.collect and not args.line:
                         batch = console.collect(float(args.collect))
                         for obj in batch.objects:
                             self.say(_json(obj))
@@ -318,7 +318,19 @@ class Bench(object):
                         self.say(_json(obj))
                     for text in batch.unparsed:
                         self.say("# not JSON: %s" % text)
-                    return cfg.EXIT_OK if (ack is None or ack.get("ok", True)) else cfg.EXIT_FAILED
+                    ok = ack is None or ack.get("ok", True)
+                    if args.collect:
+                        # The line, then what follows it on the *same* open port: a `scope`'s
+                        # frames or its `err` arrive after the ack, and a port opened again for a
+                        # second command has already missed them (p3.5-02's probes).
+                        more = console.collect(float(args.collect))
+                        for obj in more.objects:
+                            self.say(_json(obj))
+                        for text in more.unparsed:
+                            self.say("# not JSON: %s" % text)
+                        self.say("# %d JSON lines, %d not JSON" % (len(more.objects), more.unparsed_count))
+                        ok = ok and more.unparsed_count == 0
+                    return cfg.EXIT_OK if ok else cfg.EXIT_FAILED
                 console = RepeaterConsole(port, log=(lambda s: None), disposable=self.config.disposable,
                                           now=self.ports.now, sleep=self.ports.sleep)
                 console.drain(0.2)

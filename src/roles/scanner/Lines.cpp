@@ -276,6 +276,16 @@ void Lines::err(const char* message) {
   end();
 }
 
+void Lines::err(const char* message, const char* call, int code) {
+  if (call == nullptr || call[0] == '\0') {
+    err(message);
+    return;
+  }
+  text("{\"t\":\"err\",\"msg\":\"%s\",\"call\":\"%s\",\"code\":%d}",
+       message == nullptr ? "" : message, call, code);
+  end();
+}
+
 void Lines::help(const char* version) {
   text("# NoiseScope %s - commands (NDJSON out, '#' lines are chatter)\n", version);
   raw("#   sweep [f0 f1 [step_khz [dwell_ms [passes]]]]   RSSI sweep; passes 0 = until stop\n"

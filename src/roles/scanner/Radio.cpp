@@ -345,29 +345,95 @@ void serviceHist() {
 
 // --- the scope ----------------------------------------------------------------------------------
 
-// Everything a segment needs before its sweep: the image rejection calibrated for *its* range
-// and not for the whole span's centre, and the plugin's parameters for its own points.
+// The chip's own account: the GetDeviceErrors word (0x17), which says whether an image
+// calibration or a PLL lock failed - something no status code of RadioLib's tells apart. Read
+// through the Module's public stream because RadioLib keeps getDeviceErrors() protected (7.8.0,
+// SX126x.h:896). It answers in standby only (the comment in SX126x::calibrateImage: "unless mode
+// is forced to standby, device errors will be 0"), which the arm is in when it asks.
+unsigned readDeviceErrors() {
+  uint8_t data[2] = {0, 0};
+  g_radio.module()->SPIreadStream(RADIOLIB_SX126X_CMD_GET_DEVICE_ERRORS, data, 2);
+  return (unsigned(data[0]) << 8) | unsigned(data[1]);
+}
+
+void clearDeviceErrors() {
+  const uint8_t none[2] = {0, 0};
+  g_radio.module()->SPIwriteStream(RADIOLIB_SX126X_CMD_CLEAR_DEVICE_ERRORS, none, 2);
+}
+
+// Arming a segment - everything it needs before its sweep: the image rejection calibrated for
+// *its* range and not for the whole span's centre, and the plugin's parameters for its own
+// points. The order of the calls is armScopeSegment()'s (src/roles/scanner/Sweep.cpp, host-
+// tested) and this is only the chip half of it: each member is one call and nothing else.
 //
-// The order matters and is the one place this differs from the fork, which has one segment and
-// lets setSweep() calibrate. `setFrequency()` recalibrates by itself when the frequency moves by
-// 20 MHz or more (RadioLib 7.8.0, SX1262::setFrequency / RADIOLIB_SX126X_CAL_IMG_FREQ_TRIG_MHZ),
-// and it would then calibrate for one of Semtech's five bands or +-4 MHz around the centre. So
-// the centre is set first - which is what setSweep() computes too, so its own call is then a
-// move of zero and calibrates nothing - and our range is calibrated for last, in standby, where
-// the CalibrateImage command belongs.
-int armSegment(const ScopeSegment& seg) {
-  const float centre = float(seg.first_mhz) +
-                       float(g_scope.plan.step_khz / 1000.0) * float(seg.points) / 2.0f;
-  int st = g_radio.standby();
-  if (st == RADIOLIB_ERR_NONE) st = g_radio.setFrequency(centre);
-  if (st == RADIOLIB_ERR_NONE) {
-    st = g_radio.calibrateImageRejection(float(seg.cal_lo_mhz), float(seg.cal_hi_mhz));
+// Why the order is the fix (p3.5-02, the probe table in tasks/phase-3.5/reports/02.md): after a
+// plugin sweep the first RAK4630 refuses an image calibration that starts more than about
+// 15 MHz above where the sweep left the synthesizer, with IMG_CALIB_ERR in its device errors
+// and "failure to execute" in its status - and once refused, every calibration after it fails
+// too until the chip is hardware-reset. RadioLib's SX1262::setFrequency() makes exactly such a
+// calibration by itself, +-4 MHz around the *new* centre and before the frequency has moved,
+// whenever the move is 20 MHz or more (7.8.0, SX1262.cpp:178-189, SX126x::calibrateImage), which
+// every segment after the first is. So the frequency is set with that calibration skipped, and
+// the one calibration made is ours, for the range the segment measures - which begins where the
+// last sweep ended. Twenty-six segments across 150-960 MHz arm that way on the board.
+// The chip reset and the plugin uploaded again - what a `scope` starts with, and what a refused
+// calibration is answered with (armScopeSegment). Back in standby, the RX path the repeater's,
+// the device errors cleared: nothing of the last sweep is left in the chip.
+int beginPlugin(double f0_mhz) {
+  #ifdef SX126X_USE_REGULATOR_LDO
+  const bool ldo = (SX126X_USE_REGULATOR_LDO != 0);
+  #else
+  const bool ldo = false;
+  #endif
+  g_scanner.end();
+  g_radio.reset();
+  const int st = g_scanner.begin(float(f0_mhz), SX126X_DIO3_TCXO_VOLTAGE, ldo, g_boost);
+  if (st != RADIOLIB_ERR_NONE) return st;
+  // The current limit, which the vendored begin() does not set: the RX path of a reading is the
+  // repeater's, setting for setting (src/roles/scanner/config.h). The RF switch and the boosted
+  // gain it does set, to the same values this would.
+  applyRxPath();
+  // The device errors are sticky until cleared (SX1261/2 datasheet 13.5.5, 13.5.6), and every
+  // arm reads IMG_CALIB_ERR as its own calibration's verdict: cleared here, so that it is.
+  clearDeviceErrors();
+  return RADIOLIB_ERR_NONE;
+}
+
+class ChipArmRadio : public ScopeArmRadio {
+ public:
+  int standby() override { return g_radio.standby(); }
+  // skipCalibration = true: SetRfFrequency alone (RadioLib 7.8.0, SX1262::setFrequency(float,
+  // bool), SX1262.cpp:178).
+  int setFrequency(double mhz) override { return g_radio.setFrequency(float(mhz), true); }
+  int calibrateImage(double lo_mhz, double hi_mhz) override {
+    return g_radio.calibrateImageRejection(float(lo_mhz), float(hi_mhz));
   }
-  if (st == RADIOLIB_ERR_NONE) {
-    st = g_scanner.setSweep(float(seg.first_mhz), float(g_scope.plan.step_khz / 1000.0),
-                            uint8_t(seg.points), float(g_scope.plan.rbw_khz));
+  unsigned deviceErrors() override { return readDeviceErrors(); }
+  int setSweep(double first_mhz, double step_mhz, uint16_t points, double rbw_khz) override {
+    return g_scanner.setSweep(float(first_mhz), float(step_mhz), uint8_t(points), float(rbw_khz));
   }
-  return st;
+  int reload() override { return beginPlugin(g_scope.plan.f0); }
+};
+ChipArmRadio g_arm;
+
+// The two numbers the host-portable half carries for RadioLib's are RadioLib's.
+static_assert(RADIOLIB_ERR_NONE == 0, "armScopeSegment() takes 0 for a call that succeeded");
+static_assert(kScopeArmCalibrationFailed == RADIOLIB_ERR_SPI_CMD_FAILED,
+              "src/roles/scanner/Sweep.h's kScopeArmCalibrationFailed is RadioLib's "
+              "RADIOLIB_ERR_SPI_CMD_FAILED, the code the driver returns for the chip's failure "
+              "to execute");
+
+// An `err` line that names the call as well as the frequency (docs/noisescope.md section 5),
+// with the device errors after it - read now, in standby, because they are sticky until cleared
+// and the chip's account of what went wrong is what a report from the field needs - and whether
+// the plugin was reloaded on the way.
+void scopeError(const char* what, ScopeArmCall call, int code, double at_mhz, bool reloaded) {
+  g_radio.standby();
+  const unsigned dev = readDeviceErrors();
+  char buf[160];
+  snprintf(buf, sizeof(buf), "scope %s failed (%d) in %s at %.4f; device errors 0x%04x%s", what,
+           code, scopeArmCallName(call), at_mhz, dev, reloaded ? "; after a reload" : "");
+  if (g_lines != nullptr) g_lines->err(buf, scopeArmCallName(call), code);
 }
 
 void emitScopeFrame(uint32_t now) {
@@ -400,9 +466,9 @@ void serviceScope() {
     return;
   }
   if (g_scope.armed != g_scope.segment) {
-    const int st = armSegment(seg);
-    if (st != RADIOLIB_ERR_NONE) {
-      error("scope setup failed (%d) at %.4f", st, seg.first_mhz);
+    ScopeArmResult arm;
+    if (!armScopeSegment(g_arm, g_scope.plan, seg, arm)) {
+      scopeError("setup", arm.failed, arm.code, seg.first_mhz, arm.reloaded);
       stop();
       return;
     }
@@ -415,7 +481,7 @@ void serviceScope() {
     if (st == RADIOLIB_ERR_CHIP_NOT_FOUND) {
       error("scope: the sweep plugin is gone (the chip was reset); scope ended");
     } else {
-      error("scope sweep failed (%d) at %.4f", st, seg.first_mhz);
+      scopeError("sweep", kScopeArmSweep, st, seg.first_mhz, false);
     }
     stop();
     return;
@@ -564,12 +630,7 @@ bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
   ScopePlan planned;
   if (!planScope(request, planned)) return false;
 
-  #ifdef SX126X_USE_REGULATOR_LDO
-  const bool ldo = (SX126X_USE_REGULATOR_LDO != 0);
-  #else
-  const bool ldo = false;
-  #endif
-  int st = g_scanner.begin(float(planned.f0), SX126X_DIO3_TCXO_VOLTAGE, ldo, g_boost);
+  const int st = beginPlugin(planned.f0);
   if (st != RADIOLIB_ERR_NONE) {
     error("scope init failed (%d)", st);
     g_scanner.end();
@@ -577,10 +638,6 @@ bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
     toHomeRx();
     return false;
   }
-  // The current limit, which the vendored begin() does not set: the RX path of a reading is the
-  // repeater's, setting for setting (src/roles/scanner/config.h). The RF switch and the boosted
-  // gain it does set, to the same values this would.
-  applyRxPath();
 
   g_scope.plan = planned;
   g_scope.out = &out;
