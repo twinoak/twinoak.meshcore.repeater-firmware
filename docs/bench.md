@@ -170,6 +170,21 @@ verified here*, as before the tool existed.
   `software/FIRST-UNIT.md` step 8 says to stop and decide → ______; **(4)**
   the first application after it is an ordinary first install (`rak update
   --first-install`) and this pile's 02 walks §1 from there.
+- [ ] **p3.5-01** **The first new unit flashed and restored by the tool.** A
+  radio that has just had its base written shows only the bootloader's port,
+  and that is the one state this bench cannot make for itself: the tool never
+  erases and the base is the Walter's to write, so the path is a host test here
+  (`tools/bench/test_bench.py`, *a new unit*). On the next radio that comes out
+  of `rak provision` (the Walter's phase 6, task 03), with the dummy load on
+  the antenna port and the serial number in `bench.local.json`:
+  `bench status` says `bootloader on COM…` → ______; then
+  `bench flash out/build/repeater_rak4630_single/firmware.zip`, whose log says
+  *the board is in its bootloader* and *records the image it is about to be
+  given* and which must **not** say *the 1200-baud touch* → ______; then
+  `bench restore`, whose last line must be *the board arrived with only its
+  bootloader; restored: the image the run began with* → ______. What is being
+  checked is that no hand is needed between the two: the first board on this
+  bench needed a `bench record --image …` typed in between (p3.4-02).
 - [ ] **p0-03** **The first Monday, and the first real bump.** The upstream
   watch was rehearsed, not fired: what no session can check is that
   `cron: "29 6 * * 1"` is a minute GitHub actually runs
