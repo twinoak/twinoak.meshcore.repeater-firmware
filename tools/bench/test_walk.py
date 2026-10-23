@@ -341,6 +341,33 @@ class SectionOne(WalkCase):
         self.assertIn("**section 1 sensor list 5** -> power.low_mv,power.crit_mv,obs.wake,"
                       "client.refused,firstboot.state", text)
 
+    def test_a_restored_clock_cuts_more_of_the_marker_and_is_still_ok(self):
+        """`clock.state=restored` is three characters longer than `unset`, so the 159-character
+        window leaves `... ne` of the marker and not `... next:` - what the first walk of
+        section 1 on a node whose clock had been set met (p3.5-06). The page is right about the
+        cut; the walk must not call the longer cut a differs."""
+        board, ports, runner = self.fakes(self.board(FakeRepeaterFirmware(
+            REPEATER_ID, clock_state="restored", epoch=WALK_NOW, clock_file=(WALK_NOW, False))))
+        self.assertTrue(board.firmware.sensor_list().endswith("\n... ne"),
+                        board.firmware.sensor_list())
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_OK, out)
+        _name, text = self.result_file()
+        self.assertNotIn("| differs |", text)
+        self.assertIn("clock.state, `... ne` with the digit cut", text)
+
+    def test_a_marker_that_is_not_upstreams_is_a_differs(self):
+        """A first page that ends in something other than a prefix of `... next:5` - here a
+        sixth key where the cut should be - is still a differs."""
+        page = ("10 vars\nfw.version=x\nwalter.wake=0\nlink.errors=0\nwalter.seen=never\n"
+                "clock.state=unset\npower.low_mv=3500")
+        board, ports, runner = self.fakes(self.board(
+            FakeRepeaterFirmware(REPEATER_ID, answers={"sensor list": page})))
+        code, out = self.walk(["walk", "1"], ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("| differs |", text)
+
     def test_the_five_lines_that_need_a_person_say_what_they_need(self):
         _board, ports, runner = self.fakes()
         self.walk(["walk", "1"], ports=ports, runner=runner)

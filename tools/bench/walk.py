@@ -861,17 +861,27 @@ class Walker(object):
     def _sensor_list(self, repeater):
         page1 = self.ask(repeater, "sensor list")
         keys = re.findall(r"^\s*([a-z._]+)=", page1, re.M)
-        cut = "... next:" in page1 and not re.search(r"\.\.\. next:\d", page1)
+        # Upstream writes `... next:5` after the fifth key and the reply is then cut to the 159
+        # characters of its window (docs/bench.md 5.8; src/roles/repeater/app/Settings.cpp has
+        # the arithmetic), so how much of the marker survives depends on the lines before it:
+        # `clock.state=unset` leaves `... next:`, and `clock.state=restored` - three characters
+        # longer - leaves `... ne`, which is what this walk met the first time it ran on a node
+        # whose clock had been set (p3.5-06). The marker is therefore held to be a prefix of the
+        # whole word, cut anywhere, and the page is told how much of it was left.
+        marker_full = "... next:%d" % len(FIRST_PAGE_KEYS)
+        tail = page1.rstrip("\n").split("\n")[-1] if page1 else ""
+        marker = tail.startswith("...") and marker_full.startswith(tail)
+        cut = marker and tail != marker_full
         self.step("1.1", "`sensor list` says `%d vars`, prints the first five and ends in "
                          "`... next:` with the digit cut" % SETTING_COUNT,
                   ok=(page1.startswith("%d vars" % SETTING_COUNT) and keys == list(FIRST_PAGE_KEYS)
-                      and "... next:" in page1),
+                      and marker),
                   sent=["sensor list"], saw=page1,
-                  expected="%d vars, then %s, then `... next:`"
+                  expected="%d vars, then %s, then `... next:5` cut at 159 characters"
                            % (SETTING_COUNT, ", ".join(FIRST_PAGE_KEYS)),
                   blanks={"section 1 sensor list, first page":
-                          "%d characters, keys %s, `... next:`%s"
-                          % (len(page1), ",".join(keys),
+                          "%d characters, keys %s, `%s`%s"
+                          % (len(page1), ",".join(keys), tail,
                              " with the digit cut" if cut else " with its digit")},
                   note=None if cut else "the digit of `... next:5` is there, where the page says "
                                         "it is cut - a `fw.version` shorter than the one the page "

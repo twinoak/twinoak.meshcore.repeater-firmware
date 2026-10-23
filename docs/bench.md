@@ -238,7 +238,9 @@ verified here*, as before the tool existed.
   `link.errors`, `walter.seen` and `clock.state` - and then `... next:` with
   **the digit cut**, because upstream stops a listing at 134 bytes and the
   tenth key made its header one byte longer (§5's paging line walks it, and
-  `tasks/phase-3/reports/03.md` has the arithmetic); `sensor list 5` is the
+  `tasks/phase-3/reports/03.md` has the arithmetic); on a node whose
+  `clock.state` reads `restored` the cut is three characters deeper, `... ne`,
+  which is the same arithmetic and not a fault (p3.5-06 met it); `sensor list 5` is the
   other five. `sensor get fw.version` is the same string; `sensor set
   fw.version x` is refused (`can't find custom var`, upstream's wording for a
   key that took no value). (bench, 2026-10-22, 9fb721b)
