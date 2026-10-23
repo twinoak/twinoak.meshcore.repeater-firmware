@@ -86,7 +86,7 @@ HELLO
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
-  upstream      repeater-v1.17.1+d9296435
+  upstream      repeater-v1.18.0+81dbae59
 ```
 
 - `boot_id` is random and drawn once per boot, from the radio's noise listener.
@@ -208,7 +208,7 @@ CLI get radio
 $ python3 tools/linkcli.py --port COM7 cli "sensor list"
 CLI sensor list
   10 vars
-  fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1 (d9296435)
+  fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.18.0 (81dbae59)
   walter.wake=0
   link.errors=0
   walter.seen=0

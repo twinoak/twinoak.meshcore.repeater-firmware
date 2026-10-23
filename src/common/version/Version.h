@@ -42,7 +42,7 @@ const char* versionString();
 
 // Writes "<tag>+<pin8>" into buf, always NUL-terminated, and returns the length the full string
 // would have had: the box link's `upstream` field (spec/LINK-PROTOCOL.md 5.1, whose example is
-// `repeater-v1.17.1+d9296435`).
+// `repeater-v1.18.0+81dbae59`).
 size_t formatUpstream(char* buf, size_t len, const char* tag, const char* pin);
 
 // That string for this build, from TWINOAK_MESHCORE_TAG and TWINOAK_MESHCORE_PIN.

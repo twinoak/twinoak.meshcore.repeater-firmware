@@ -23,7 +23,7 @@ class BoardUpstreamClock : public UpstreamClock {
 // --- "did a hardware RTC answer?" ---------------------------------------------------------------
 
 // There is no way to ask AutoDiscoverRTCClock whether it found an RTC: its four `*_success`
-// flags are file-static in src/helpers/AutoDiscoverRTCClock.cpp at the pin d9296435, and
+// flags are file-static in src/helpers/AutoDiscoverRTCClock.cpp at the pin 81dbae59, and
 // getCurrentTime() simply falls back to the volatile clock when none of them is set. So the
 // question is answered by the *answer*: VolatileRTCClock starts every boot at 1715770351 (15 May
 // 2024, src/helpers/ArduinoHelpers.h), which is years before kSaneEpochFloor, while an RV-3028

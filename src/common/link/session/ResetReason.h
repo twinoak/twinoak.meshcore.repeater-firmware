@@ -15,7 +15,7 @@ namespace link {
 // The nRF52840's POWER->RESETREAS bits, as the Nordic product specification numbers them. The
 // SoftDevice's nrf_soc.h and the Arduino core's wiring.c read the same register; MeshCore captures
 // it in a constructor of priority 101 before anything clears it
-// (src/helpers/NRF52Board.cpp, nrf52_early_reset_capture, pin d9296435).
+// (src/helpers/NRF52Board.cpp:45, nrf52_early_reset_capture, pin 81dbae59).
 enum Nrf52ResetReas : uint32_t {
   kReasResetPin = 0x00000001,  // RESETPIN
   kReasDog = 0x00000002,       // DOG, the watchdog

@@ -67,7 +67,7 @@ static_assert(uint8_t(kReplyTrace) == link::kReplyTrace, "ReplyState must be 6.3
 static_assert(kReplyRssiUnknown == link::kRssiUnknown, "the unknown RSSI, in one place");
 
 // The plaintext of each send, as the agent firmware lays it out and as the receiving repeater
-// reads it (examples/simple_repeater/MyMesh.cpp at the pin d9296435):
+// reads it (examples/simple_repeater/MyMesh.cpp at the pin 81dbae59):
 constexpr size_t kLoginPlainMax = 4 + link::kLoginPasswordMax;  // timestamp, then the password
 constexpr size_t kRequestHeader = 5;    // tag (the timestamp), then the request type, then data
 constexpr size_t kCliHeader = 5;        // timestamp, the flags byte, then the line

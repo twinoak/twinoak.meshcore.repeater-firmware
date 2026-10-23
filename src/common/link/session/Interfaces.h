@@ -37,7 +37,7 @@ struct Firmware {
   uint8_t slot = 0;             // 0 on a single-radio unit
   const char* version = "";     // HELLO's fw_version, e.g. "0.3.0+abc1234"
   const char* board = "";       // e.g. "rak4630-single"
-  const char* upstream = "";    // what it is built on, e.g. "repeater-v1.17.1+d9296435"
+  const char* upstream = "";    // what it is built on, e.g. "repeater-v1.18.0+81dbae59"
 };
 
 // The node itself: uptime, why it last restarted, the per-boot identifier, and the restart.
@@ -92,7 +92,7 @@ struct CliAccess {
   //
   // `line` is NUL-terminated and is the session's own buffer, not the request's bytes, because
   // the interpreter is allowed to write into it: upstream's MyMesh::handleCommand terminates a
-  // parameter in place (examples/simple_repeater/MyMesh.cpp:1232 at the pin d9296435,
+  // parameter in place (examples/simple_repeater/MyMesh.cpp:1234 at the pin 81dbae59,
   // `*sp++ = 0`). `reply_cap` is what upstream's own console loop gives its interpreter -
   // 160 bytes, src/roles/repeater/main.cpp - and the session keeps room behind it for the few of upstream's
   // commands that can write past it (src/common/link/session/Session.h).

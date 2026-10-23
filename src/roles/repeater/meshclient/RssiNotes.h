@@ -3,7 +3,7 @@
 //
 // Why this exists at all. A packet's SNR is the packet's own - MeshCore stores it in the Packet
 // when the frame arrives (Dispatcher::checkRecv, `pkt->_snr = _radio->getLastSNR() * 4.0f`,
-// src/Dispatcher.cpp:206 at the pin d9296435) - but its **RSSI** is not: the radio keeps one
+// src/Dispatcher.cpp:206 at the pin 81dbae59) - but its **RSSI** is not: the radio keeps one
 // "last RSSI" and it has moved on by the time the packet is handled. A flood packet is held back
 // on purpose, for a delay the score decides and up to MAX_RX_DELAY_MILLIS (32 s) of it
 // (src/Dispatcher.cpp:243-253: `_mgr->queueInbound(pkt, futureMillis(_delay))`), so between
@@ -18,7 +18,7 @@
 //
 // The table is as long as the packet pool, so that a note cannot be pushed out by frames that
 // arrived after it while its own packet still waits: this build's pool is
-// `new StaticPoolPacketManager(32)` (examples/simple_repeater/MyMesh.cpp:863 at the pin), and
+// `new StaticPoolPacketManager(32)` (examples/simple_repeater/MyMesh.cpp:864 at the pin), and
 // src/roles/repeater/app/TwinOakMesh.cpp static_asserts kRssiNotes against that number's name.
 //
 // A pooled packet is reused, so an address is not unique over time: note() overwrites the note of

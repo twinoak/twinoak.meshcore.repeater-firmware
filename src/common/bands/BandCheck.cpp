@@ -39,7 +39,7 @@ static_assert(twinoak::bands::holds(kRows, kCount, TWINOAK_BAND, LORA_FREQ),
 
 // And the band's duty cycle, which is as much a property of the band as its frequencies are: a
 // row that carries none is a 0, which upstream's `set dutycycle` refuses (it takes 1 to 100 -
-// CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461 at the pin d9296435), so this is
+// CommonRadioPrefs::handleCommand, src/helpers/CommonRadioPrefs.cpp:88-100 at 81dbae59), so this is
 // the one place where "nobody looked the regulation up" is a build error rather than a repeater
 // transmitting at upstream's 50 % default. This assertion is about the whole table and not only
 // about this environment's band, because a row is added for every environment at once.

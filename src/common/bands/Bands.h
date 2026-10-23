@@ -102,8 +102,8 @@ constexpr int dutyCycleOf(const Band* rows, size_t count, const char* band) {
 }
 
 // Whether every row of the table carries a duty cycle a radio may be set to. Upstream's `set
-// dutycycle` takes 1 to 100 and refuses anything else (CommonCLI::handleSetCmd,
-// src/helpers/CommonCLI.cpp:450-461 at the pin d9296435), so a row outside that range is a
+// dutycycle` takes 1 to 100 and refuses anything else (CommonRadioPrefs::handleCommand,
+// src/helpers/CommonRadioPrefs.cpp:88-100 at the pin 81dbae59), so a row outside that range is a
 // profile line that would be refused on every first boot - and a row left at 0 is a band whose
 // regulation nobody looked up. src/common/bands/BandCheck.cpp makes this a compile error.
 constexpr bool everyDutyCycleIsSettable(const Band* rows, size_t count, size_t i = 0) {

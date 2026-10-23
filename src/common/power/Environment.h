@@ -6,7 +6,7 @@
 // This firmware reads the part itself rather than through upstream's manager, and
 // tasks/phase-1/reports/06.md says why in full. The short of it: upstream's own BME280 support
 // samples the part *inside* querySensors (MODE_FORCED, takeForcedMeasurement(),
-// src/helpers/sensors/EnvironmentSensorManager.cpp:271-290 at the pin d9296435), and
+// src/helpers/sensors/EnvironmentSensorManager.cpp:271-290 at the pin 81dbae59), and
 // querySensors is on the path of LPP_GET - so with it in the build a request on the box link
 // would perform I2C and wait for a conversion. ENV_INCLUDE_BME280 is therefore left out of the
 // board environment, test/test_rails holds that, and this is what replaces it.

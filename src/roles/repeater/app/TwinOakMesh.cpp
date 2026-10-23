@@ -37,7 +37,7 @@ static_assert(twinoak::meshclient::kObsAppDataMax == MAX_ADVERT_DATA_SIZE,
 static_assert(twinoak::meshclient::kObsPathBytesMax == MAX_PATH_SIZE,
               "a record's path is MAX_PATH_SIZE");
 // The note table is as long as the packet pool, so a note cannot be pushed out while its own
-// packet still waits in the inbound queue (examples/simple_repeater/MyMesh.cpp:863 at the pin
+// packet still waits in the inbound queue (examples/simple_repeater/MyMesh.cpp:864 at the pin
 // constructs `new StaticPoolPacketManager(32)`; the number is not a macro, so it is cited and
 // held here as a literal).
 static_assert(twinoak::meshclient::kRssiNotes == 32, "the packet pool of simple_repeater");
@@ -57,11 +57,11 @@ static_assert(twinoak::meshclient::kTelemPermBase == TELEM_PERM_BASE, "TELEM_PER
 //     if (ours(idx)) take it;  else upstream's(idx - 1);    // a reply awaited: the shift
 //
 // `extra_` is decided once per packet, in searchPeersByHash(), which Mesh::onRecvPacket calls
-// before the other three (src/Mesh.cpp:149, then :154, :173, :181 at the pin d9296435) - the
+// before the other three (src/Mesh.cpp:149, then :154, :173, :181 at the pin 81dbae59) - the
 // same contract upstream's own MyMesh relies on for its matching_peer_indexes[].
 //
 // The bound. Upstream's match array is `int matching_peer_indexes[MAX_CLIENTS]`
-// (examples/simple_repeater/MyMesh.h:116), written only by MyMesh::searchPeersByHash
+// (examples/simple_repeater/MyMesh.h:112), written only by MyMesh::searchPeersByHash
 // (MyMesh.cpp:623-631, one entry per ACL client that matches, so n <= acl.getNumClients() <=
 // MAX_CLIENTS) and read only by MyMesh::getPeerSharedSecret, onPeerDataRecv and onPeerPathRecv
 // with the index they are given (MyMesh.cpp:634, :665, :770, each range-checked against
@@ -70,10 +70,12 @@ static_assert(twinoak::meshclient::kTelemPermBase == TELEM_PERM_BASE, "TELEM_PER
 // loop bound in Mesh::onRecvPacket and nothing else: its loop (src/Mesh.cpp:152-186) keeps a
 // `secret[PUB_KEY_SIZE]` and a `data[MAX_PACKET_PAYLOAD]` per iteration and no array sized by the
 // count, and the "(max 4 matches supported ATM)" of its comment (:148) is a comment - nothing in
-// the function bounds `num`. MAX_CLIENTS itself is 20 in this build: MyMesh.h includes
-// helpers/ClientACL.h (its line 29) before its own `#ifndef MAX_CLIENTS / #define MAX_CLIENTS 32`
-// (line 62), so ClientACL.h:37's 20 is the one in force, and nothing in platformio.ini defines
-// it. tasks/phase-2/reports/01.md quotes the lines.
+// the function bounds `num`. MAX_CLIENTS itself is 32 in this build: since repeater-v1.18.0 it
+// is defined once, in helpers/ClientACL.h:44-45 (MyMesh.h's own `#define MAX_CLIENTS 32` is
+// gone - upstream's #3233), and nothing in platformio.ini defines it. At repeater-v1.17.1 it was
+// 20, ClientACL.h's 20 winning over MyMesh.h's 32 by include order; tasks/phase-2/reports/01.md
+// quotes those lines. Nothing here depends on the number: the count we return is a loop bound
+// and the shift is by one, whatever the array's length.
 
 int TwinOakMesh::searchPeersByHash(const uint8_t* hash) {
   const int n = MyMesh::searchPeersByHash(hash);
@@ -205,8 +207,8 @@ const uint8_t* TwinOakMesh::sharedSecret() {
 
 uint32_t TwinOakMesh::uniqueTime() {
   // "All timestamps the client sends come from the RAK's clock through MeshCore's unique-time
-  // source" (6.2): RTCClock::getCurrentTimeUnique (src/MeshCore.h:108-114 at the pin), the same
-  // call BaseChatMesh::sendLogin/sendRequest make (src/helpers/BaseChatMesh.cpp:577, :638) and
+  // source" (6.2): RTCClock::getCurrentTimeUnique (src/MeshCore.h:119-125 at the pin), the same
+  // call BaseChatMesh::sendLogin/sendRequest make (src/helpers/BaseChatMesh.cpp:608, :669) and
   // the same one the repeater stamps its own replies with.
   return getRTCClock()->getCurrentTimeUnique();
 }
@@ -237,7 +239,7 @@ bool TwinOakMesh::sendAnonRequest(const uint8_t* plain, size_t len,
   // this node's **public key** in the clear, then the plaintext encrypted and MACed with the
   // ECDH secret of the two - which the receiving repeater recomputes from that key
   // (Mesh::onRecvPacket, :208-211) before MyMesh::onAnonDataRecv reads the login. The same
-  // primitive BaseChatMesh::sendLogin uses (src/helpers/BaseChatMesh.cpp:591).
+  // primitive BaseChatMesh::sendLogin uses (src/helpers/BaseChatMesh.cpp:621).
   mesh::Packet* pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id,
                                          mesh::Identity(job_.peerKey()), sharedSecret(), plain,
                                          len);
@@ -250,7 +252,7 @@ bool TwinOakMesh::sendDatagram(uint8_t payload_type, const uint8_t* plain, size_
   // this node's hash, then the plaintext encrypted and MACed with the job's secret - which the
   // repeater has from the login (MyMesh::handleLoginReq copies it into the ACL entry,
   // MyMesh.cpp:122). The same primitive BaseChatMesh::sendRequest and sendCommandData use
-  // (src/helpers/BaseChatMesh.cpp:642, :470).
+  // (src/helpers/BaseChatMesh.cpp:673, :501).
   mesh::Packet* pkt =
       createDatagram(payload_type, mesh::Identity(job_.peerKey()), sharedSecret(), plain, len);
   return dispatch(pkt, route);
@@ -296,7 +298,7 @@ void TwinOakMesh::onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id,
                                size_t app_data_len) {
   // **The base first, before anything of ours.** Upstream's neighbour table is the repeater's
   // own - MyMesh::onAdvertRecv chains to mesh::Mesh and puts a zero-hop repeater advert in it
-  // (MyMesh.cpp:650-660 at the pin d9296435) - and it must see every advert exactly as it did
+  // (MyMesh.cpp:650-660 at the pin 81dbae59) - and it must see every advert exactly as it did
   // before this firmware existed. The ring is what we add after it, and nothing here can change
   // what upstream made of the advert.
   MyMesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len);

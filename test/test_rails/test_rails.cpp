@@ -622,7 +622,7 @@ TEST(Rails, AlsoKept_NoRequestHandlerCanReachAnI2cBus) {
 TEST(Rails, Rule2_NothingUnderTheBoxLinkCanLogACliLineOrItsReply) {
   // A CLI line over the link is a console command, so it can be `password <new>` - and the reply
   // to that one is `password now: <it>`, because upstream echoes it back to be sure
-  // (src/helpers/CommonCLI.cpp at the pin d9296435, the `password ` branch). `get prv.key` is
+  // (src/helpers/CommonCLI.cpp:267-271 at the pin 81dbae59, the `password ` branch). `get prv.key` is
   // another. So the whole of src/common/link/ is held to one rule: **it does not print**. The only
   // thing that directory writes is a frame, to Serial1, and the only other thing it does with a
   // UART is flush it before a restart - so the allowlist below is the whole of its business with
@@ -756,7 +756,7 @@ TEST(Rails, Rule3_TheFirstBootPathThatReplacesThatPasswordExists) {
 TEST(Rails, Rule4_EveryFloodTheClientOriginatesUsesTwoByteHashes) {
   // "Path hashes this firmware chooses are two bytes or more" (S-12, meshmaster.dk D-33).
   // Upstream's Mesh::sendFlood takes the size as its third argument and **defaults it to 1**
-  // (src/Mesh.h at the pin d9296435), so every call of ours has to pass the constant - and the
+  // (src/Mesh.h:202 at the pin 81dbae59), so every call of ours has to pass the constant - and the
   // constant has to be 2 or more. Both halves are checked: the value, from the header the
   // firmware itself uses, and the calls, by walking src/.
   //
@@ -790,8 +790,8 @@ TEST(Rails, Rule4_TheFirstBootProfileAsksForTwoByteHashesInAdvertsToo) {
   // The other half of S-12's path-hash rule, and the half upstream decides from a preference
   // rather than from an argument: this node's own **flooded adverts** go out at
   // `path_hash_mode + 1` bytes (MyMesh::sendSelfAdvertisement,
-  // examples/simple_repeater/MyMesh.cpp:1035 at the pin d9296435; the periodic flood advert at
-  // :1297), and upstream's default is 0 - one byte. The first-boot profile's one line is what
+  // examples/simple_repeater/MyMesh.cpp:1037 at the pin 81dbae59; the periodic flood advert at
+  // :1299), and upstream's default is 0 - one byte. The first-boot profile's one line is what
   // raises it, so the rail is that the line is still in the table and that the table is still
   // compiled by the native environment, where test/test_firstboot holds every rule about it.
   const fs::path root = projectRoot();

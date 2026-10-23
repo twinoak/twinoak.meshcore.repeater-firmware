@@ -24,8 +24,8 @@
 //     [band_868].duty_cycle - which is a budget of 360 s an hour, 6 s a minute (MyMesh overrides
 //     getAirtimeBudgetFactor() to return `_prefs.airtime_factor`; `set dutycycle 10` makes that
 //     9.0 and 1/(1+9) of a 3 600 000 ms window is the budget - examples/simple_repeater/
-//     MyMesh.h:134-137, src/helpers/CommonCLI.cpp:450-461 and src/Dispatcher.cpp:25-27 and
-//     :38-52 at the pin d9296435). Six maximum-size sends a minute is *above* that refill, and
+//     MyMesh.h:130-133, src/helpers/CommonRadioPrefs.cpp:88-100 and src/Dispatcher.cpp:25-27 and
+//     :38-52 at the pin 81dbae59). Six maximum-size sends a minute is *above* that refill, and
 //     what happens then is that **upstream delays**: nothing is refused and nothing is lost, and
 //     the hour stays inside 360 s whoever asked for it. Lowering this ceiling to match would cost
 //     the margin that makes it a backstop - three a minute is one and a half times the server's

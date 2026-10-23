@@ -6,7 +6,7 @@
 // Why they are here and not only on the box link: these are the two ways into a unit that do not
 // need the Walter. The USB console at the field port is one; a **mesh admin** with a phone is the
 // other, because upstream runs a logged-in admin's text message through the same interpreter
-// (examples/simple_repeater/MyMesh.cpp:702 at the pin d9296435 gates it on
+// (examples/simple_repeater/MyMesh.cpp:702 at the pin 81dbae59 gates it on
 // `client->isAdmin()`). So `sensor set walter.wake 1` from a phone that can reach this repeater
 // asks it to wake its own uplink - which is how a unit whose Walter is asleep is reached at all
 // (spec/LINK-PROTOCOL.md section 8, reason 4).

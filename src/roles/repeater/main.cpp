@@ -1,5 +1,5 @@
-// Ours. setup() and loop() are MeshCore's examples/simple_repeater/main.cpp at the pin d9296435
-// (repeater-v1.17.1), with:
+// Ours. setup() and loop() are MeshCore's examples/simple_repeater/main.cpp at the pin 81dbae59
+// (repeater-v1.18.0), with:
 //   - `the_mesh` a TwinOakMesh (src/roles/repeater/app/TwinOakMesh.h) where upstream constructs a MyMesh;
 //   - the display (DISPLAY_CLASS, UITask), Ethernet (ETHERNET_ENABLED) and the SenseCAP button
 //     left out - this adapter has none of them;
@@ -153,6 +153,13 @@ void setup() {
 void loop() {
   // Handle Serial CLI
   size_t len = strlen(command);
+  // Upstream's clamp since repeater-v1.18.0 ("ensure command buffers stay NUL-terminated"): if
+  // the buffer ever lost its NUL, strlen() would read past it and the loop below would index
+  // past the buffer.
+  if (len >= sizeof(command)) {
+    command[0] = 0;
+    len = 0;
+  }
   while (Serial.available() && len < sizeof(command)-1) {
     char c = Serial.read();
     if (c != '\n') {
@@ -162,8 +169,9 @@ void loop() {
     }
     if (c == '\r') break;
   }
-  if (len == sizeof(command)-1) {  // command buffer full
-    command[sizeof(command)-1] = '\r';
+  if (len == sizeof(command)-1) {  // buffer full: treat as a completed line (upstream's words)
+    command[sizeof(command)-2] = '\r';  // the end-of-line marker inside the buffer
+    command[sizeof(command)-1] = 0;     // and the buffer still NUL-terminated
   }
 
   if (len > 0 && command[len - 1] == '\r') {  // received complete line
@@ -181,6 +189,11 @@ void loop() {
 
     command[0] = 0;  // reset command buffer
   }
+
+  // Upstream's board hook (mesh::MainBoard::loop, src/MeshCore.h:90-92 at the pin 81dbae59, new
+  // at repeater-v1.18.0 - "let the board feed its watchdog, run periodic housekeeping"): a no-op
+  // on this board, called where upstream's main.cpp calls it so that ours stays a copy of theirs.
+  board.loop();
 
   // Before the mesh's own pass: a clock the console just set is noticed in the same pass that
   // set it, and the advert below is decided with this pass's state.

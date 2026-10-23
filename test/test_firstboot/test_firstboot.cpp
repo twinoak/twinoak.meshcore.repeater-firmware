@@ -98,7 +98,8 @@ const int kKeyHours = 73;
 // ----------------------------------------------------------------------------- the reply rule
 
 TEST(TheReplyRule, EveryAcceptanceUpstreamCanProduceIsOne) {
-  // CommonCLI.cpp's `set` branches, MyMesh.cpp and the `sensor set` branch, at the pin d9296435.
+  // CommonCLI.cpp's `set` branches, CommonRadioPrefs.cpp's (the radio keys, since
+  // repeater-v1.18.0), MyMesh.cpp and the `sensor set` branch, at the pin 81dbae59.
   const char* const yes[] = {
       "OK",                                     // most of `set`
       "OK - reboot to apply",                   // `set radio`, `set freq`
@@ -125,6 +126,7 @@ TEST(TheReplyRule, EveryRefusalUpstreamCanProduceIsNotOne) {
       "Error, bad key",                       // `set prv.key xx`
       "Error, max 64",                        // `set flood.max 65`
       "Error, must be 0-20",                  // `set rxdelay 21`
+      "ERROR: af must be 0-9",                // `set af 12`, refused since repeater-v1.18.0
       "unknown config: nonsense 1",           // a key this pin does not have
       "Unknown command",                      // not a `set` at all
       "can't find custom var",                // `sensor set` of a key that is not ours
@@ -320,7 +322,7 @@ TEST(TheDerivedLine, EveryKeyGivesAnHourInsideTheRangeThomasChose) {
     EXPECT_LE(kFloodAdvertHoursMin, hours) << "first byte " << first;
     EXPECT_GE(kFloodAdvertHoursMin + kFloodAdvertHoursSpan - 1, hours) << "first byte " << first;
     // And inside upstream's own range for the key, which is 0 or 3-168 hours
-    // (CommonCLI::handleSetCmd's `flood.advert.interval` branch at the pin d9296435): 85 is well
+    // (CommonCLI::handleSetCmd's `flood.advert.interval` branch at the pin 81dbae59): 85 is well
     // inside it, and a value outside it would be refused on the board and nowhere else.
     EXPECT_LE(3, hours);
     EXPECT_GE(168, hours);
@@ -447,16 +449,16 @@ TEST(TheTableAsShipped, IsTheSixLinesThisProjectHasADocumentFor) {
 
 TEST(TheTableAsShipped, TheDanishStandardsThreeStaticLinesAreTheValuesThomasChose) {
   // Thomas's decision of 22 October 2026 (tasks/phase-3/FOLLOWUPS.md, *The rest of the Danish
-  // standard*), each against upstream's own default at the pin d9296435 - so that a bump that
+  // standard*), each against upstream's own default at the pin 81dbae59 - so that a bump that
   // changed a default would not quietly turn one of these lines into a no-op nobody noticed.
   //
-  //   agc.reset.interval   0 (off; src/Dispatcher.h:172, MyMesh.h:157-159)        -> 4 seconds
-  //   loop.detect          off (uint8_t loop_detect = 0, CommonCLI.h:70)          -> moderate
-  //   flood.max.unscoped   64 (MyMesh.cpp:906)                                    -> 15 hops
+  //   agc.reset.interval   0 (off; src/Dispatcher.h:172, MyMesh.h:153-155)        -> 4 seconds
+  //   loop.detect          minimal since repeater-v1.18.0 (MyMesh.cpp:911; off before) -> moderate
+  //   flood.max.unscoped   64 (MyMesh.cpp:907)                                    -> 15 hops
   //
   // The reply each of them gets is one the rule above accepts: `OK - interval rounded to 4` for
-  // the first (CommonCLI.cpp:474-477: the value is stored as seconds/4 and echoed back times 4)
-  // and a plain `OK` for the other two (`:688-708`, `:632-639`).
+  // the first (CommonRadioPrefs.cpp:167-173: the value is stored as seconds/4 and echoed back
+  // times 4) and a plain `OK` for the other two (CommonCLI.cpp:587-606, :550-558).
   EXPECT_TRUE(replyAccepted("OK - interval rounded to 4"));
   EXPECT_TRUE(replyAccepted("OK"));
   EXPECT_FALSE(replyAccepted("Error, must be: off, minimal, moderate, or strict"));
@@ -512,8 +514,8 @@ TEST(TheTableAsShipped, TheDutyCycleLineIsTheBandsOwnNumber) {
       << "the profile's duty-cycle line is not the band's own number: a fresh unit would start"
          " outside what the band allows, or at a value this repository does not say";
   // And the reply upstream gives that line is one the rule above accepts: `set dutycycle 10`
-  // answers "OK - 10.0%" (CommonCLI::handleSetCmd, src/helpers/CommonCLI.cpp:450-461 at the pin
-  // d9296435), where every refusal of it is "ERROR: dutycycle must be 1-100".
+  // answers "OK - 10.0%" (CommonRadioPrefs::handleCommand, src/helpers/CommonRadioPrefs.cpp:88-100
+  // at the pin 81dbae59), where every refusal of it is "ERROR: dutycycle must be 1-100".
   EXPECT_TRUE(replyAccepted("OK - 10.0%"));
   EXPECT_FALSE(replyAccepted("ERROR: dutycycle must be 1-100"));
 }

@@ -5,7 +5,7 @@
 //
 //   - `TwinOakSensors::querySensors` (src/common/board/target.cpp) walks `ourFields()` and calls
 //     upstream's CayenneLPP for each one, because a mesh telemetry reply is upstream's buffer and
-//     upstream's library (examples/simple_repeater/MyMesh.cpp:241-259 at the pin d9296435);
+//     upstream's library (examples/simple_repeater/MyMesh.cpp:241-259 at the pin 81dbae59);
 //   - `LPP_GET` walks `telemetryFields()` - the same list with the two fields upstream's
 //     handleRequest adds around it - and encodes it with `encodeLpp()` below, which is a mirror
 //     of CayenneLPP's own `addField` and writes the same bytes.
@@ -64,8 +64,8 @@ constexpr uint8_t kPermLocation = 0x02;
 constexpr uint8_t kPermEnvironment = 0x04;
 
 // The buffer upstream gives its CayenneLPP: MAX_PACKET_PAYLOAD - 4
-// (examples/simple_repeater/MyMesh.cpp:866, with MAX_PACKET_PAYLOAD 184 in src/MeshCore.h:20 at
-// the pin d9296435) - the four bytes being the timestamp a reply is prefixed with. LPP_GET uses
+// (examples/simple_repeater/MyMesh.cpp:867, with MAX_PACKET_PAYLOAD 184 in src/MeshCore.h:20 at
+// the pin 81dbae59) - the four bytes being the timestamp a reply is prefixed with. LPP_GET uses
 // the same cap, because it answers with exactly what a mesh telemetry request gets.
 constexpr size_t kMeshLppCap = 180;
 

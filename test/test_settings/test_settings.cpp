@@ -289,7 +289,7 @@ TEST(TheTable, ObsWakeTakesZeroAndOneAndGoesBothWays) {
 
 namespace {
 
-// Upstream's `sensor list` (src/helpers/CommonCLI.cpp at the pin d9296435) writes "<n> vars\n"
+// Upstream's `sensor list` (src/helpers/CommonCLI.cpp:319-340 at the pin 81dbae59) writes "<n> vars\n"
 // and then "<name>=<value>\n" per setting while it has written fewer than 134 bytes, and ends
 // with "... next:<i>" when it stopped early. This is that loop over our table, so that what a
 // console and a mesh admin actually see is a test and not an intention.

@@ -21,7 +21,7 @@
 namespace twinoak {
 namespace meshclient {
 
-// MeshCore's payload types the client originates (src/Packet.h at the pin d9296435).
+// MeshCore's payload types the client originates (src/Packet.h at the pin 81dbae59).
 constexpr uint8_t kPayloadTypeReq = 0x00;      // a request: timestamp, type, data
 constexpr uint8_t kPayloadTypeTxtMsg = 0x02;   // a text message: timestamp, flags, text
 constexpr uint8_t kPayloadTypeAnonReq = 0x07;  // an anonymous request: a login
@@ -62,7 +62,7 @@ struct MeshPort {
   virtual ~MeshPort() {}
 
   // MeshCore's unique-time source: never the same second twice, which is what the peer judges
-  // replays by (6.2; RTCClock::getCurrentTimeUnique, src/MeshCore.h:108).
+  // replays by (6.2; RTCClock::getCurrentTimeUnique, src/MeshCore.h:119).
   virtual uint32_t uniqueTime() = 0;
   // Random bytes, for a discovery's blob and a trace's auth code.
   virtual void randomBytes(uint8_t* dest, size_t len) = 0;

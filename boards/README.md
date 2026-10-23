@@ -9,7 +9,7 @@ git from changing a line ending in it:
 
 | File | Copied from | At |
 |---|---|---|
-| `rak4631.json` | `boards/rak4631.json` in [MeshCore](https://github.com/meshcore-dev/MeshCore) | the commit `[meshcore].pin` names in `platformio.ini` (`repeater-v1.17.1`, `d9296435`) |
+| `rak4631.json` | `boards/rak4631.json` in [MeshCore](https://github.com/meshcore-dev/MeshCore) | the commit `[meshcore].pin` names in `platformio.ini` (`repeater-v1.18.0`, `81dbae59`) |
 
 Nothing here is edited: a difference between this file and the pinned package's
 is a bug, not a feature, and a pin bump re-copies it (`docs/upstream.md`, which

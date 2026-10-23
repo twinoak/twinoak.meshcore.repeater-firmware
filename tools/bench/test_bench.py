@@ -527,7 +527,7 @@ class TheRepeaterConsole(BenchCase):
         board, con, said = self.open()
         reply = con.send("ver")
         self.assertTrue(reply.ok)
-        self.assertEqual(reply.text, "v1.17.1 (Build: 14 Aug 2026)")
+        self.assertEqual(reply.text, "v1.18.0 (Build: 15 Oct 2026)")
         self.assertEqual(board.firmware.received, ["ver"])
         self.assertIn("> ver", said)
 
@@ -594,7 +594,7 @@ class TheRepeaterConsole(BenchCase):
         ports = FakePorts(boards=[self.board()], clock=self.clock)
         code, out = self.run_cli(["console", "ver"], ports=ports)
         self.assertEqual(code, cfg.EXIT_OK)
-        self.assertIn("v1.17.1", out)
+        self.assertIn("v1.18.0", out)
         self.out = io.StringIO()
         code, out = self.run_cli(["console", "password hunter2"], ports=ports)
         self.assertEqual(code, cfg.EXIT_OK)
@@ -1145,7 +1145,7 @@ class RecordAndRestore(BenchCase):
     def test_record_reads_the_id_off_the_console_without_a_reset(self):
         """The banner cannot be caught on a board that has been up - the first RAK4630 on this
         bench gave it neither on the first open nor after a `reboot` (p3.4-02) - so upstream's own
-        `get public.key` is asked, which is the same 32 bytes (CommonCLI.cpp:902 at d9296435)."""
+        `get public.key` is asked, which is the same 32 bytes (CommonCLI.cpp:750 at 81dbae59)."""
         board, ports, runner = self.fakes()
         code, out = self.run_cli(["record"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_OK, out)

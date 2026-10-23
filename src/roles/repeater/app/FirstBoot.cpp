@@ -3,7 +3,7 @@
 #include "roles/repeater/app/AdminPassword.h"
 
 // The build must say what upstream's constructor puts in the password field before this code
-// replaces it (MyMesh.cpp:897 at the pin copies ADMIN_PASSWORD into _prefs.password). Without the
+// replaces it (MyMesh.cpp:898 at the pin copies ADMIN_PASSWORD into _prefs.password). Without the
 // define upstream's MyMesh.cpp:32 would default it to "password" - the thing S-13 forbids - so a
 // board environment that forgets it does not build; test/test_rails holds the same line against
 // platformio.ini.
@@ -74,7 +74,7 @@ FirstBootOutcome firstBoot(TwinOakMesh& mesh, bool saved_prefs_found, char* line
   // had to move for it: src/roles/repeater/main.cpp loads `_main` from the identity store, or
   // makes a random identity and saves it, a dozen lines above this call - and prints all 32
   // bytes of it as `Repeater ID:` on the line after. `self_id` is mesh::Mesh's own public member
-  // (src/Mesh.h:180 at the pin d9296435), so nothing of upstream's is reached around.
+  // (src/Mesh.h:180 at the pin 81dbae59), so nothing of upstream's is reached around.
   const firstboot::NodeFacts facts = {mesh.self_id.pub_key, sizeof(mesh.self_id.pub_key)};
   out.profile = firstboot::runFirstBootProfile(saved_prefs_found, firstboot::kProfile,
                                                firstboot::kProfileCount, facts, cli, line,

@@ -33,7 +33,7 @@ Phases 0 to 3 have landed: everything the piles set out to build without a
 board. What the firmware does **today**, on a board nobody has flashed yet:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
-  `repeater-v1.17.1` (`d9296435`), compiled unmodified and subclassed — the
+  `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
   radio, the routing, the ACL, the console and the preferences are upstream's
   and behave exactly as a stock node's (`docs/ARCHITECTURE.md` §2).
 - **It speaks the box link** on `Serial1` at 115200: every request and event

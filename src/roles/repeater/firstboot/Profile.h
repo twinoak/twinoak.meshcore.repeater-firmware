@@ -119,7 +119,8 @@ struct ProfileResult {
 // Whether a reply from upstream's interpreter means "the line was taken".
 //
 // Upstream has no status code: a CLI line's outcome is the English in its reply. Across the whole
-// of CommonCLI.cpp and MyMesh.cpp at the pin d9296435, every acceptance starts with `OK` or `ok`,
+// of CommonCLI.cpp, CommonRadioPrefs.cpp (the radio keys, since repeater-v1.18.0) and MyMesh.cpp
+// at the pin 81dbae59, every acceptance starts with `OK` or `ok`,
 // optionally wrapped in brackets, and no refusal does:
 //
 //   accepted   "OK" (most of `set`)            "OK - reboot to apply" (`set radio`, `set freq`)
@@ -144,7 +145,7 @@ bool replyAccepted(const char* reply);
 // unit with one of five, and the one that was refused is on the console and in the state below.
 //
 // `line` is a mutable copy of each command, because upstream's interpreter terminates a parameter
-// in place (MyMesh::handleCommand, examples/simple_repeater/MyMesh.cpp:1232 at the pin); a line
+// in place (MyMesh::handleCommand, examples/simple_repeater/MyMesh.cpp:1234 at the pin); a line
 // that does not fit it is refused without being run. `reply` is the console's reply buffer: the
 // first link::kCliReplyMax bytes of it are the window upstream's own console gives its
 // interpreter, and anything beyond that is the guard behind it (src/common/link/session/Session.h

@@ -194,23 +194,33 @@ verified here*, as before the tool existed.
   bootloader; restored: the image the run began with* → ______. What is being
   checked is that no hand is needed between the two: the first board on this
   bench needed a `bench record --image …` typed in between (p3.4-02).
-- [ ] **p0-03** **The first Monday, and the first real bump.** The upstream
-  watch was rehearsed, not fired: what no session can check is that
-  `cron: "29 6 * * 1"` is a minute GitHub actually runs
-  `.github/workflows/upstream.yml` at, and that a *real* newer `repeater-v*`
-  tag takes the same path a rehearsal did. On the Monday after a MeshCore
-  repeater release: the run is in the Actions tab, a pull request **MeshCore
-  \<tag\>** is open with upstream's commit list in it, and its CI run needs
-  **Approve and run** (`docs/upstream.md` says why, and gives the `gh api`
-  line). Green means merge; red means
-  `tools/new-sync-task.ps1 -Tag <tag> -Pr <n>` and a session. **p3.2-01** is
-  what makes green the expected outcome: no test and no tool of ours names the
-  release any more, so a bump that changes nothing we rely on should pass on its
-  first run (`docs/upstream.md`, *What a bump costs today*;
+- [x] **p0-03** **The first real bump takes the rehearsal's path.** On the
+  Monday after a MeshCore repeater release the workflow fires, a pull request
+  **MeshCore \<tag\>** opens with upstream's commit list in it, and its CI run
+  waits for **Approve and run** (`docs/upstream.md` says why, and gives the
+  `gh api` line). `repeater-v1.18.0` was that release: run `39213499652` of
+  `.github/workflows/upstream.yml` fired on Monday 19 October 2026, pushed
+  `upstream/repeater-v1.18.0` (one commit - `platformio.ini`'s two lines and
+  the pin's history row, nothing else) and opened #26 with the 266 commits
+  between `d9296435` and `81dbae59` as its body; its CI run (`39213525960`)
+  went to *action_required* and stayed there, unapproved, until **p3.5-06**
+  read the bump four days later, merged the workflow's commit into its own
+  branch and did there what a person merging a green bump does: the eight
+  places of `tasks/sync/TEMPLATE.md`, which that report is the first full
+  reading of. (p3.5-06, 2026-10-23, read with `gh run list` and `gh pr view`,
+  not off the Actions tab)
+- [ ] **p0-03** **The minute GitHub actually runs the cron at.**
+  `cron: "29 6 * * 1"` asks for 06:29 UTC; the API says the 19 October run was
+  *created* at 07:03:00 UTC, 34 minutes late, which is GitHub's queue and not a
+  fault of the file. Read it off the Actions tab once, where the scheduled time
+  and the start are both shown, and write it here → ______. **p3.2-01** is
+  what makes green the expected outcome of such a run: no test and no tool of
+  ours names the release any more, so a bump that changes nothing we rely on
+  should pass on its first run (`docs/upstream.md`, *What a bump costs today*;
   `tasks/phase-3.2/reports/01.md`, where the same bump was rehearsed on
-  `repeater-v1.17.0` — a *real* tag is the thing no session can rehearse). What
-  to read before merging a green one is the eight places of
-  `tasks/sync/TEMPLATE.md`; a red one is still the first test of that file.
+  `repeater-v1.17.0`). A red one is still the first test of
+  `tasks/sync/TEMPLATE.md`; what the first real one found is that the click
+  nobody made is the only thing between a bump and its verdict.
 
 ## 1. The repeater alone on USB
 
@@ -218,15 +228,19 @@ verified here*, as before the tool existed.
   bootloader's drive appears) and open the console at 115200. It prints
   `Repeater ID: <64 hex digits>`, and on the very first boot of a module - or
   after `erase` - one more line, `First boot: a random admin password was set
-  (not shown; …)`. `ver` says `v1.17.1 (Build: 14 Aug 2026)`, upstream's.
+  (not shown; …)`. `ver` says upstream's own version for the pin -
+  `v1.18.0 (Build: 15 Oct 2026)` at `repeater-v1.18.0` - and the walk holds it to
+  the tag `fw.version` names, so a bump moves both together.
   `board` says `RAK 4631`. `get radio` says `869.618,62.5,8,8`. `sensor list`
   says **`10 vars`** and prints the first five of them -
-  `fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.17.1
-  (d9296435)` (a release build says its version instead), then `walter.wake`,
+  `fw.version=twinoak-repeater 0.0.0-dev on MeshCore repeater-v1.18.0
+  (81dbae59)` (a release build says its version instead), then `walter.wake`,
   `link.errors`, `walter.seen` and `clock.state` - and then `... next:` with
   **the digit cut**, because upstream stops a listing at 134 bytes and the
   tenth key made its header one byte longer (§5's paging line walks it, and
-  `tasks/phase-3/reports/03.md` has the arithmetic); `sensor list 5` is the
+  `tasks/phase-3/reports/03.md` has the arithmetic); on a node whose
+  `clock.state` reads `restored` the cut is three characters deeper, `... ne`,
+  which is the same arithmetic and not a fault (p3.5-06 met it); `sensor list 5` is the
   other five. `sensor get fw.version` is the same string; `sensor set
   fw.version x` is refused (`can't find custom var`, upstream's wording for a
   key that took no value). (bench, 2026-10-22, 9fb721b)
@@ -286,7 +300,7 @@ is put the bytes on a real UART through real filters.
   `slot 0`, `max_payload 240`, `caps 0x61` (`CLI` and `ATTENTION` from task 05,
   `TIME_PERSIST` from task 04; the rest of the protocol is not implemented yet,
   on purpose), a non-zero `boot_id`, `fw_version 0.0.0-dev`,
-  `board rak4630-single` and `upstream repeater-v1.17.1+d9296435`.
+  `board rak4630-single` and `upstream repeater-v1.18.0+81dbae59`.
 - [ ] **p1-03** `ping` answers and echoes the nonce; `status` shows the uptime
   and `reset_reason` — **1 (power-on)** after a power cycle, **2 (reset pin)**
   after the reset line, **4 (software)** after `reboot 0` — with
@@ -814,7 +828,7 @@ not to erase.
 - [x] **p3.5-05** **And the Danish standard reached it.** The four lines
   `docs/provisioning.md` §1 added to the profile on 22 October 2026, read back on
   the same first boot: `get agc.reset.interval` → `> 4` (upstream's own is `> 0`);
-  `get loop.detect` → `> moderate` (upstream's own is `> off`);
+  `get loop.detect` → `> moderate` (upstream's own is `> minimal` since 1.18.0, `> off` before);
   `get flood.max.unscoped` → `> 15` (upstream's own is `> 64`); and
   `get flood.advert.interval` (→ ______) → **the hour this node's own key gives
   it**, which is `60 + (k mod 26)` for `k` the first byte of the `Repeater ID`
