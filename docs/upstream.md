@@ -134,7 +134,9 @@ before it is a code change.
 ## Tier one — the weekly pull request (automatic)
 
 [`.github/workflows/upstream.yml`](../.github/workflows/upstream.yml), Monday
-mornings at 06:29 UTC and on demand:
+mornings at 06:29 UTC and on demand, **on the organisation's own Unraid
+runners** (`[self-hosted, unraid]`, like `ci.yml`: it checks, it does not ship
+— README.md, *Where CI runs*):
 
 1. `tools/upstream-check.ps1` reads `git ls-remote --tags` of the URL
    `[meshcore].url` names and compares the newest `repeater-vX.Y.Z` with the

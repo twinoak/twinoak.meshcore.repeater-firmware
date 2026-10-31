@@ -14,6 +14,10 @@
 # The comparison itself is tools/upstream-check.ps1, so that it can be run by hand and this
 # workflow is only the git and the gh around it.
 #
+# IT RUNS AT HOME, on [self-hosted, unraid], like ci.yml and for the same reason
+# (tasks/phase-3.6/01-built-at-home.md): it checks, it does not ship. ci.yml's first step is the
+# guard that holds it there.
+#
 # REHEARSAL. With the pin_tag input this workflow proves itself without waiting for upstream: it
 # pushes a throwaway base branch whose pin is that older tag, then does the real thing on top of
 # it and opens the pull request between the two. Close the pull request and delete both branches
@@ -43,7 +47,16 @@ concurrency:
 jobs:
   bump:
     name: is there a newer MeshCore?
-    runs-on: ubuntu-latest
+    # At home, like ci.yml: this job asks a question and opens a pull request, it ships nothing
+    # (tasks/phase-3.6/01-built-at-home.md; tools/ci/check-runners.ps1 holds it here). It calls
+    # git, sed, awk, date, pwsh and gh, all of which the runners have.
+    #
+    # It writes nowhere but its workspace and $RUNNER_TEMP. The three files it used to put in
+    # /tmp - the blobless clone of upstream, the pull request's body and the rewritten page - are
+    # in $RUNNER_TEMP now: on a GitHub-hosted runner /tmp was this job's alone, and on a shared
+    # one `git clone` into a directory last week's run left there fails. The runner empties
+    # $RUNNER_TEMP at the start of every job, which is exactly what /tmp was being trusted for.
+    runs-on: [self-hosted, unraid]
     permissions:
       contents: write
       pull-requests: write
@@ -138,14 +151,14 @@ jobs:
           NEW: ${{ steps.check.outputs.sha }}
         run: |
           set -euo pipefail
-          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" /tmp/meshcore
+          git clone --quiet --filter=blob:none --no-checkout "$UPSTREAM" "$RUNNER_TEMP/meshcore"
           {
             echo "## MeshCore ${{ steps.check.outputs.previous_tag }} -> ${{ steps.check.outputs.tag }}"
             echo
             echo "\`${PREVIOUS:0:8}\` -> \`${NEW:0:8}\`, and what is between them:"
             echo
             echo '```'
-            git -C /tmp/meshcore log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
+            git -C "$RUNNER_TEMP/meshcore" log --oneline --no-decorate "$PREVIOUS..$NEW" || echo "(the two pins are not on one line of history; see the tags)"
             echo '```'
             echo
             echo "CI on this pull request is the test - \`tools/verify.ps1\`, which is every board"
@@ -171,8 +184,8 @@ jobs:
             echo "_(If no CI run appears below, it is waiting for **Approve and run** on the Actions"
             echo "tab: GitHub holds workflows on a pull request that a workflow opened."
             echo "\`docs/upstream.md\` says why.)_"
-          } > /tmp/body.md
-          cat /tmp/body.md
+          } > "$RUNNER_TEMP/body.md"
+          cat "$RUNNER_TEMP/body.md"
 
       - name: Move the pin and open the pull request
         if: steps.check.outputs.newer == 'true' && steps.branch.outputs.exists == 'false'
@@ -193,8 +206,8 @@ jobs:
           marker='<!-- upstream.yml inserts the newest row directly under this line -->'
           test "$(grep -cF "$marker" docs/upstream.md)" = "1"
           row="| \`$TAG\` | \`${NEW:0:8}\` | $(LC_ALL=C date -u '+%-d %B %Y') | the weekly bump (\`upstream.yml\`), pull request below |"
-          awk -v m="$marker" -v r="$row" '{ print } index($0, m) { print r }' docs/upstream.md > /tmp/upstream.md
-          mv /tmp/upstream.md docs/upstream.md
+          awk -v m="$marker" -v r="$row" '{ print } index($0, m) { print r }' docs/upstream.md > "$RUNNER_TEMP/upstream.md"
+          mv "$RUNNER_TEMP/upstream.md" docs/upstream.md
           git diff --stat
           git add platformio.ini docs/upstream.md
           git commit -m "MeshCore $TAG"
@@ -206,7 +219,7 @@ jobs:
           gh label create meshcore --color 0e8a16 --description "A MeshCore pin bump" 2>/dev/null || true
           gh pr create \
             --title "MeshCore $TAG" \
-            --body-file /tmp/body.md \
+            --body-file "$RUNNER_TEMP/body.md" \
             --label meshcore \
             --head "${{ steps.branch.outputs.name }}" \
             --base "${BASE:-main}"

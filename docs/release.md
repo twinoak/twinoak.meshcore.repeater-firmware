@@ -9,6 +9,18 @@ when it refuses.
 **Merging never releases.** A release is a person pushing a tag. CI on `main`
 proves a commit is releasable; it publishes nothing.
 
+**And it is built away from home.** Every job of `release.yml` runs on a
+GitHub-hosted `ubuntu-latest`, while everything that only checks — `ci.yml`,
+`upstream.yml` — runs on the organisation's own Unraid runners
+(`[self-hosted, unraid]`; README.md, *Where CI runs*). This is what ships: the
+images every repeater's update trusts, signed with `RELEASE_SIGNING_KEY`. A
+self-hosted runner is shared with every branch a task session pushes and keeps
+its home — `~/.platformio` and its toolchains — from one job to the next, and
+signing somewhere else would keep the key off that runner but would still sign
+whatever it built. A tag is rare, so the minutes are few.
+`tools/ci/check-runners.ps1`, which runs as `ci.yml`'s first step, fails when a
+job of this file moves home or when any other job stays away.
+
 ## Making one
 
 ```powershell

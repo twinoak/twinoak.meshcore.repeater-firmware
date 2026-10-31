@@ -117,6 +117,34 @@ container provides it. The task piles that build the rest are run with
 .\tasks\run-all.ps1 -Phase 0  # one phase
 ```
 
+### Where CI runs
+
+**Everything that checks runs at home; everything that ships stays away.**
+
+| Workflow | Runs on | Why |
+|---|---|---|
+| [`ci.yml`](.github/workflows/ci.yml) | `[self-hosted, unraid]` | it only checks — `tools/verify.ps1` and nothing else — and GitHub-hosted minutes got out of hand |
+| [`upstream.yml`](.github/workflows/upstream.yml) | `[self-hosted, unraid]` | it asks whether MeshCore moved and opens a pull request; it ships nothing |
+| [`release.yml`](.github/workflows/release.yml) | `ubuntu-latest` | it builds the images every repeater's update trusts and signs them with `RELEASE_SIGNING_KEY` ([`keys/README.md`](keys/README.md)). It runs at a tag, so its minutes are few |
+
+`unraid` is the label on the organisation's own GitHub Actions runners
+(`unraid-1`…, `myoung34/github-runner` on the Unraid box).
+`tools/ci/check-runners.ps1` is the rule, in one place, over every job of
+`.github/workflows/`, and it runs as `ci.yml`'s first step — so neither half of
+it moves by accident. Run it by hand with
+`pwsh -File tools/ci/check-runners.ps1`.
+
+What a runner must have for these two: **node** (every action is one),
+**pwsh**, **bash**, **git**, **curl**, **tar**, the usual `sed`/`awk`/`date`,
+and **`gh`** for `upstream.yml`. `g++` is the one `ci.yml` installs itself when
+it is missing, because without a host compiler `tools/verify.ps1` would run the
+native tests in a container — and a container started from inside the runner's
+own container bind-mounts a path the daemon's host does not have. Python is
+`actions/setup-python`'s; PlatformIO's platform, toolchain and libraries live in
+the runner's own `~/.platformio`, which is why the cache steps run on GitHub's
+runners only. Nothing a job starts outlives it, nothing writes outside its
+workspace and that home, and no step opens a port on the host.
+
 ## What it will be, in one table
 
 | | |

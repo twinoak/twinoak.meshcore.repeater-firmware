@@ -9,6 +9,14 @@ does that, and it has two halves that live in two very different places.
 | private | the repository secret `RELEASE_SIGNING_KEY`, and nowhere else | nobody; GitHub holds it and the release workflow passes it to `tools/release/sign_manifest.py` in an environment variable |
 | public | `keys/release.pub`, in this repository | everybody — it proves nothing by itself |
 
+**The private half never reaches a machine of ours.** Every job of
+`.github/workflows/release.yml` runs on a GitHub-hosted runner, which begins
+each job new and is gone after it; the organisation's own Unraid runners, where
+everything that merely *checks* now runs, never see the secret and never build
+what is signed (README.md, *Where CI runs*; `docs/release.md`).
+`tools/ci/check-runners.ps1` is the guard, and it runs as `ci.yml`'s first
+step.
+
 **Nothing secret goes in this directory.** Not the private key, not a copy of
 it "for convenience", not a key file with the private half commented out. A
 private key that has been in a working tree is a key to replace.
