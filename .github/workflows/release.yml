@@ -1,3 +1,9 @@
+# EVERY JOB HERE STAYS ON GITHUB'S RUNNERS, while everything that only checks moved to the
+# organisation's Unraid runners: this is what ships, it is signed with RELEASE_SIGNING_KEY, and the
+# shared self-hosted runner keeps its home - ~/.platformio and its toolchains - from one branch's
+# job to the next (tasks/phase-3.6/01-built-at-home.md; tools/ci/check-runners.ps1 is the guard,
+# and it runs as ci.yml's first step). It runs at a tag, so its minutes are few.
+#
 # The release: a GitHub Release a person, MeshMaster's catalogue and the Walter can all use.
 #
 #   push a tag vX.Y.Z   -> refuse a commit ci has not passed -> build every board -> sign ->
