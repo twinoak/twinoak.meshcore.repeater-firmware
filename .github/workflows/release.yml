@@ -75,7 +75,7 @@ jobs:
   # cannot be signed. Both are settled here, before anything is built.
   ci-green:
     name: ci is green for this commit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, unraid]
     permissions:
       actions: read
       contents: read
