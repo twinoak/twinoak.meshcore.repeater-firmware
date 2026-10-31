@@ -49,7 +49,7 @@ jobs:
     name: verify
     # At home: this job checks, it does not ship. tools/ci/check-runners.ps1 below is what holds
     # it here, and release.yml on GitHub's runners.
-    runs-on: [self-hosted, unraid]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
