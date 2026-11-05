@@ -19,7 +19,8 @@ commit — with four things added:
 
 The plan, the decisions and the two protocols are in [`spec/`](spec/README.md)
 (start with `spec/SYSTEM.md`). How this firmware is put together is
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How a board becomes a unit is
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How a release gets onto a board
+is [`docs/flashing.md`](docs/flashing.md), and how a board becomes a unit is
 [`docs/provisioning.md`](docs/provisioning.md). How it gets built is
 [`tasks/`](tasks/README.md); how it gets released is
 [`docs/release.md`](docs/release.md); how it keeps up with MeshCore — the weekly
@@ -29,8 +30,15 @@ session, and the eight places a bump re-reads — is
 
 ## State
 
-Phases 0 to 3 have landed: everything the piles set out to build without a
-board. What the firmware does **today**, on a board nobody has flashed yet:
+**There is a release: [`v0.1.0`](../../releases/latest), the first one.** The
+images, the base, a signed manifest and a body a person can read are a GitHub
+Release, signed with the key `73efdd383a957596` on a GitHub runner;
+[`docs/flashing.md`](docs/flashing.md) is the one page for getting it onto a
+board and [`release-notes/v0.1.0.md`](release-notes/v0.1.0.md) is what it says
+about itself. Before it, the only way to get this firmware onto a board was to
+build it.
+
+The piles through 3.6 have landed. What the firmware does **today**:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
   `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
@@ -59,8 +67,9 @@ board. What the firmware does **today**, on a board nobody has flashed yet:
   ring of 64 records for the Walter to collect, application data copied and
   never parsed (§2g).
 - **It says what it is and is released signed**: an image descriptor, a
-  manifest, an Ed25519 signature over it, and a weekly pull request that moves
-  the MeshCore pin ([`docs/release.md`](docs/release.md),
+  manifest, an Ed25519 signature over it, a release body that begins with words
+  a person wrote, and a weekly pull request that moves the MeshCore pin
+  ([`docs/release.md`](docs/release.md),
   [`docs/upstream.md`](docs/upstream.md)).
 - **It is a family, not a firmware**: a second role, `scanner` — NoiseScope,
   the SX1262 spectrum and noise scanner that is flashed in place of the
@@ -75,9 +84,13 @@ board. What the firmware does **today**, on a board nobody has flashed yet:
   or over the link ([`docs/provisioning.md`](docs/provisioning.md)).
 
 Not done, and deliberately: the bridge role and the dual adapter
-(`docs/ARCHITECTURE.md` §8 has the seams). Nothing above has been on a bench:
-[`docs/bench.md`](docs/bench.md) is the walk that would prove it, and
-`tools/verify.ps1` is what has been proved without one.
+(`docs/ARCHITECTURE.md` §8 has the seams).
+
+**What a board has shown, and what it has not.** The first unit was powered up
+on 5 November 2026 and its repeater came up on the mesh — on a build flashed by
+hand, not on `v0.1.0`. 26 of the 97 lines of
+[`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
+scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 
 ## Building it
 
@@ -98,6 +111,13 @@ in `.pio/build/<env>/` — and `tools/verify.ps1` copies to `out/build/<env>/` �
 are `firmware.hex` (the Walter, over SWD), `firmware.zip` (a laptop,
 `adafruit-nrfutil dfu serial`), `firmware.uf2` (the bootloader's drive) and
 `firmware.elf`.
+
+**To put one on a board** — a build of your own or a release's file —
+[`docs/flashing.md`](docs/flashing.md) is the page: the `.uf2` on the
+bootloader's drive or the `.zip` over serial DFU on the adapter's USB-C, the
+`.bin` through the Walter over SWD, the base `.hex` for a radio fresh from the
+factory, the four things to look at afterwards, and the admin password nobody
+knows until somebody sets one.
 
 `pio test -e native` is a host build. Linux and CI use the machine's `g++`;
 this Windows machine has none, so `tools/verify.ps1` runs that step in a
@@ -153,8 +173,8 @@ workspace and that home, and no step opens a port on the host.
 | Built with | PlatformIO; MeshCore as a pinned dependency ([`docs/upstream.md`](docs/upstream.md)); the Adafruit nRF52 core MeshCore pins |
 | Builds | `pio run -e <role>_<board>`; `pio test -e native` for everything that needs no board |
 | Verified by | `tools/verify.ps1` — locally first; CI runs the same script |
-| Flashed | in service: by the Walter over SWD, application region only. At a bench: UF2 or serial DFU over the adapter's USB-C |
-| Released as | a GitHub Release: the images, `manifest.json`, its signature, `SHA256SUMS` |
+| Flashed | in service: by the Walter over SWD, application region only. At a bench: UF2 or serial DFU over the adapter's USB-C ([`docs/flashing.md`](docs/flashing.md)) |
+| Released as | a GitHub Release: the images, the base, `manifest.json`, its signature, `SHA256SUMS`, and a body that begins with `release-notes/vX.Y.Z.md` |
 | Channel | 869.618 MHz, 62.5 kHz, SF8, CR8, +22 dBm (MeshCore Denmark, EU Narrow) |
 
 ## Provisioning it

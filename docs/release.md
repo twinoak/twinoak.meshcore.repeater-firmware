@@ -4,7 +4,8 @@ A release of this firmware is a GitHub Release that three readers can use: a
 person with a laptop, MeshMaster's firmware catalogue, and the Walter that
 flashes the RAK over SWD. What it carries and how each reader checks it is
 `spec/FIRMWARE-MANIFEST.md`; this page is how it is made here, and what to do
-when it refuses.
+when it refuses. What to *do* with one — which file, which cable, what to check
+afterwards — is [`docs/flashing.md`](flashing.md).
 
 **Merging never releases.** A release is a person pushing a tag. CI on `main`
 proves a commit is releasable; it publishes nothing.
@@ -23,17 +24,23 @@ job of this file moves home or when any other job stays away.
 
 ## Making one
 
+**First, on a branch: the words.** `release-notes/v<X.Y.Z>.md` is the
+hand-written top of the release body and it is written before the tag, in the
+pull request that precedes it, so that it is reviewed like everything else here
+(*The notes*, below). A tag with no such file is refused.
+
 ```powershell
 git checkout main
 git pull --ff-only
-git tag v0.3.0            # the commit must be one of main's, and ci must be green on it
+git tag v0.3.0            # the commit must be one of main's, ci green on it, and its notes written
 git push origin v0.3.0
 ```
 
 That starts `.github/workflows/release.yml`, which does, in order:
 
 1. **`ci-green`** — refuses a tag whose commit `ci` has not passed, refuses a
-   tag that is not on `main`, refuses a tag when there is no signing key, and
+   tag that is not on `main`, refuses a tag when there is no signing key,
+   refuses a tag whose `release-notes/vX.Y.Z.md` is not in the repository, and
    works out the version: `X.Y.Z+<sha7>`, which is what the firmware itself
    reports.
 2. **`build`** — one job per board environment of `platformio.ini`, built with
@@ -41,7 +48,9 @@ That starts `.github/workflows/release.yml`, which does, in order:
    `tools/pio/buildinfo.py` leaves `buildinfo.json` and a copy of the linker
    script beside the images, which is what the next job reads instead of being
    told anything.
-3. **`publish`** — `tools/release/build_release.py` writes the files,
+3. **`publish`** — the body is `release-notes/vX.Y.Z.md` and then what
+   `tools/release/release_notes.py` puts after it;
+   `tools/release/build_release.py` writes the files,
    `tools/release/sign_manifest.py` signs the manifest with the repository
    secret `RELEASE_SIGNING_KEY`, `spec/tools/manifestref.py verify` proves that
    signature **before** anything is published, and then `gh release create`
@@ -162,12 +171,39 @@ base; a different module gets its own `boards/base/<family>/`) is a directory
 with the file, `base.json` and a README, and a family name in
 `tools/base/check.py`.
 
+## The notes
+
+A release body is two parts, in this order:
+
+1. **what a person wrote**, `release-notes/v<X.Y.Z>.md` in this repository: what
+   this release is, which MeshCore it is, the link to
+   [`docs/flashing.md`](flashing.md), and which Walter release it goes with. It
+   is committed on the branch before the tag and reviewed in that pull request,
+   and `tools/release/release_notes.py` puts it at the top of the body with a
+   `---` under it;
+2. **what the tooling generates** from the manifest — the version the firmware
+   reports, the table of files and what each one is for, the application region,
+   and where to read about flashing one.
+
+**A tag whose file is missing is refused in `ci-green`**, before anything is
+built, the way a tag with no signing key is: nothing else would catch it, and a
+release whose notes are only the generated table is a release nobody can read.
+An empty file is refused too. A *rehearsal* is not refused — its version is
+`0.0.0-dryrun+<sha7>`, no file is written for it, and the body says so in one
+line where the top would be, which is how that path is exercised without a tag.
+`tools/verify.ps1` reads every `release-notes/*.md` of the commit with the same
+code (`tools/release/selfcheck.py`), so a file named `v0.1.md`, or one that says
+nothing, fails on a commit.
+
 ## The key
 
 One Ed25519 key signs releases. Its private half is the repository secret
 `RELEASE_SIGNING_KEY` and lives nowhere else; its public half is
-`keys/release.pub` and is compiled into the Walter firmware.
-[`keys/README.md`](../keys/README.md) is how it is made, by a person, once.
+`keys/release.pub` — one line, `ed25519 <key id> <64 hex>`, which is the form
+the Walter firmware's trust table uses for the same key, and whose key id is
+recomputed from the key when it is read. [`keys/README.md`](../keys/README.md)
+is how it is made, by a person, once. The key that signs releases today is
+`73efdd383a957596`, made on 20 October 2026.
 
 Nothing in the pipeline prints a key, and no error message quotes one: when
 something is wrong with the key the message says what is wrong and not what it
@@ -185,6 +221,8 @@ a refused tag has published nothing, so the fix is a new commit and a new tag
 | `… is not a commit of main` | the tag is on a side branch | tag a commit of `main` |
 | `ci has completed for … without a green run` | `ci` was red on that commit | fix it on `main`, then tag the new commit |
 | `ci has not gone green for … within 20 minutes` | `ci` never ran, or is still running | wait for `ci` on `main` to finish and tag again; a tag whose commit CI has not passed is not released |
+| `release-notes/vX.Y.Z.md is not in the repository` | the tag has no hand-written notes | write that file on a branch, merge it, and tag the commit it merged as. *The notes*, above, says what goes in it |
+| `… does not hold a public key on its first line of content` / `… names key id …, and the key on that line is …` | `keys/release.pub` is not one line of `ed25519 <key id> <64 hex>` or of 64 hexadecimal characters, or its two halves disagree | `keys/README.md` has the one form. `tools/verify.ps1` reads the real file on every commit, so this should never be met at a tag |
 | `… is not the key keys/release.pub publishes` | the secret and the published public half are not two halves of one key | one of them is wrong. Replace the secret, or publish the right public half in a commit — and work out which, because a Walter trusts only what `keys/release.pub` says |
 | `this manifest says version X.Y.Z, which is a release` | something tried to sign a release with the test key | that is the guard working; a release is signed with `RELEASE_SIGNING_KEY` |
 | `is not one contiguous span` / `outside the application region` | the linked image is not a single span inside the application region | a change to the linker script or to a `KEEP` section put bytes somewhere an update may not write. Read the addresses in the message against the script line it quotes |

@@ -140,13 +140,12 @@ verified here*, as before the tool existed.
   `Repeater ID:` on the USB console at 115200 and advertise on 869.618 MHz,
   62.5 kHz, SF8, CR8 — and it carries upstream's default admin password, which
   phase 3's provisioning replaces.
-- [ ] **p0-02** **The release key, which only Thomas can make.**
-  `python spec/tools/manifestref.py keygen`, then the private hex into the
-  repository secret `RELEASE_SIGNING_KEY` and the public hex into
-  `keys/release.pub` in a commit (`keys/README.md`). Until it exists a tag is
-  refused, which is the safe state, and the tag path of
-  `.github/workflows/release.yml` has never run — only its dry run, which is
-  the same jobs with `gh release create` left out.
+- [x] **p0-02** **The release key, which only Thomas can make.** Made on
+  20 October 2026: key id `73efdd383a957596`, the private half in the
+  repository secret `RELEASE_SIGNING_KEY` and the public half in
+  `keys/release.pub` (`82e2534`; `keys/README.md`). The tag path of
+  `.github/workflows/release.yml` has run with it — `v0.1.0`, p3.7-01 — so it
+  is no longer only the dry run that has been exercised.
 - [ ] **p0-02** **The raw `.bin` written over SWD boots.** The release's
   `twinoak-repeater-rak4630-single-868-vX.Y.Z.bin` is the application bytes
   alone, to be written at the `load_address` the manifest gives (`0x00026000`
@@ -157,7 +156,32 @@ verified here*, as before the tool existed.
   checked: the board comes up exactly as it does from the `.uf2` of the same
   release — same console line, same advert — and the file system, the identity
   and the bootloader are untouched afterwards. No session can do it: nothing
-  was flashed and no radio was heard.
+  was flashed and no radio was heard. The file exists now:
+  `twinoak-repeater-rak4630-single-868-v0.1.0.bin` of the `v0.1.0` release.
+- [ ] **p3.7-01** **A published release on a board, from its own file.** Nothing
+  of `v0.1.0` has been flashed: the one unit that exists runs a build somebody
+  made by hand, and every image this bench has seen came out of
+  `out/build/<env>/`. Download the release, `sha256sum -c SHA256SUMS`, and then,
+  with the dummy load on the antenna port: the repeater's
+  `twinoak-repeater-rak4630-single-868-v0.1.0.uf2` on the bootloader's drive
+  (double-tap), and on a second run the `.zip` over serial DFU. What is being
+  checked is the four lines of `docs/flashing.md` §5 —
+  `sensor get fw.version` reads **`0.1.0+<sha7>`** and not `0.0.0-dev`, which is
+  the whole point (the version is a build flag, so a release's image says so
+  itself) → ______; `sensor get firstboot.state` → ______; `get radio` and
+  `get dutycycle` → ______; and the advert heard by a phone or a neighbour
+  → ______. Then the scanner image of the same release and the repeater back
+  (§9's round trip, from release files this time). `bench flash` takes the
+  release's `.zip` as it takes a build's.
+- [ ] **p3.7-01** **`docs/flashing.md` read against the desk it was written
+  for.** The page was written with no board and no release in hand: every port
+  number, drive name, reply and console line in it comes from `docs/bench.md`
+  §0a, `docs/provisioning.md` and the pinned MeshCore source. Walk it once with
+  a unit on the desk and correct what is wrong rather than believing it —
+  especially §2's three USB product ids and the `Device programmed.` line, and
+  §5's four replies. Its *Through the Walter* half (§3) cannot be walked until
+  the Walter has a release of its own (that repository's phase 7), and §4's
+  `rak provision` is p3.4-01's line above.
 
 - [ ] **p3.4-01** **The base boots, and the port after the reset.** The
   release's `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex` (`use: provision`;
