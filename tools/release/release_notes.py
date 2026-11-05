@@ -116,7 +116,17 @@ def main(argv=None):
     if args.check:
         print(os.path.relpath(notes_path(args.version, args.repo), args.repo).replace(os.sep, "/"))
         return 0
-    sys.stdout.write(text)
+    # The bytes, as UTF-8, and not through whatever encoding the console happens to have: these
+    # notes become a release body, and on Windows sys.stdout would quietly write cp1252 - an em
+    # dash as 0x97 - into a file GitHub then reads as UTF-8 (found while diffing the rehearsed
+    # body against the published one, p3.7-01). A stdout a test has replaced has no .buffer.
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is None:
+        sys.stdout.write(text)
+    else:
+        sys.stdout.flush()
+        stream.write(text.encode("utf-8"))
+        stream.flush()
     return 0
 
 

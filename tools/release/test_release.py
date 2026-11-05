@@ -41,6 +41,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -729,6 +730,22 @@ class TheHandWrittenNotes(ReleaseTestCase):
         self.assertEqual((code, err), (0, ""))
         self.assertEqual(out.strip(), "release-notes/v1.2.3.md")
         self.assertNotIn("The first release", out)
+
+    def test_the_script_writes_utf_8_whatever_the_console_is(self):
+        """The notes become a release body, which GitHub reads as UTF-8. On Windows a plain
+        sys.stdout.write would have put cp1252 in the file (an em dash as 0x97), so the script
+        writes the bytes itself - and this runs it as a process, because that is the only way the
+        encoding of its stdout is the real one."""
+        em_dash, nbsp = "\u2014", "\u00a0"
+        self.write(os.path.join(self.notes_dir(), "v1.2.3.md"),
+                   "**The first release** %s an em dash, and a non-breaking%sspace.\n"
+                   % (em_dash, nbsp))
+        raw = subprocess.check_output(
+            [sys.executable, os.path.join(HERE, "release_notes.py"),
+             "--version", self.VERSION, "--require", "--repo", self.tmp])
+        self.assertIn(em_dash.encode("utf-8"), raw)
+        self.assertIn(nbsp.encode("utf-8"), raw)
+        self.assertEqual(raw.decode("utf-8"), release_notes.hand_written(self.VERSION, self.tmp))
 
     def test_this_commits_own_notes_are_readable(self):
         """Every release-notes/*.md of this repository: a version this tooling understands, and
