@@ -23,18 +23,37 @@ private key that has been in a working tree is a key to replace.
 
 ## `release.pub`
 
-One line of 64 lowercase hexadecimal characters: the raw 32-byte Ed25519 public
-key. Lines beginning with `#`, and blank lines, are ignored, so the file can say
-who made the key and when.
+**One line, in the form both repositories write a key in** — the trust table's
+line, which is what the Walter firmware's `keys/release-keys.txt` carries for
+this same key:
 
 ```
-# TwinOak repeater firmware release key, made 2026-__-__ by Thomas.
-# key id <16 hex> (the first eight bytes of SHA-256 over the key below)
-<64 hex>
+ed25519 <key id> <64 hex>
 ```
 
-It is not here yet. Until it is, a tag is refused: `sign_manifest.py` says so
-and says this.
+`<64 hex>` is the raw 32-byte Ed25519 public key and `<key id>` is the first
+eight bytes of SHA-256 over it, which is also what a signature names itself by.
+The 64 hexadecimal characters **alone** are read too — that is what
+`manifestref.py keygen` prints — and lines beginning with `#`, and blank lines,
+are ignored, so the file can say who made the key and when.
+
+The key id is **recomputed from the key** and has to match the one the line
+names: both halves of that line are written by a person, and a line whose id was
+edited to say something the key does not say is refused
+(`tools/release/sign_manifest.py`, `public_key_of_line`). A release is never
+signed against a file this reader would not take, and `tools/verify.ps1` reads
+**this** file with **that** reader on every commit, so a malformed one fails on a
+commit rather than at a tag, after the builds.
+
+### The key that is here
+
+```
+ed25519 73efdd383a957596 …
+```
+
+made by Thomas on **20 October 2026** (`82e2534`), private half in this
+repository's `RELEASE_SIGNING_KEY` secret and in nothing else, and the same key
+the Walter firmware trusts. `v0.1.0` is the first release it signed.
 
 ## Making it — once, by a person
 
@@ -47,15 +66,15 @@ prints `private`, `public` and `key id`. Then:
 1. Put the **private** hex into the repository secret `RELEASE_SIGNING_KEY`
    (*Settings → Secrets and variables → Actions → New repository secret*).
    Paste it there and nowhere else; do not keep the terminal scrollback.
-2. Put the **public** hex into `keys/release.pub` in a commit, with the key id
-   in a comment above it.
+2. Put the **public** half into `keys/release.pub` in a commit, as the one line
+   above: `ed25519 <key id> <64 hex>`, which both repositories read.
 3. The public half is also what the Walter firmware is built to trust
    (`twinoak.meshcore.walter-firmware`; a Walter build trusts a small fixed
    list, room for three, so a key can be replaced by shipping a Walter that
    trusts both and then one that trusts only the new one).
 
 A Walter with no release key compiled in accepts no update at all, which is the
-state before the key exists and is safe.
+state before a key exists and is safe.
 
 ## What the key signs
 

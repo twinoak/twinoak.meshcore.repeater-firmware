@@ -18,7 +18,11 @@ spec/tools/manifestref.py does the arithmetic, and this script only decides what
     release.
   * **The public half must be the one this repository publishes.** On the real path the signature
     this key makes must name keys/release.pub's key id, so a release cannot go out signed by a key
-    no Walter will trust.
+    no Walter will trust. That file is read in the one form both repositories write a key in -
+    `ed25519 <key id> <64 hex>`, the trust table's line, or the 64 hexadecimal characters alone -
+    and a line whose named id is not the key's own is refused (keys/README.md). tools/verify.ps1
+    reads the real file with this reader on every commit, so a malformed one fails there and not
+    at a tag.
   * **A manifest without its base is not signed.** Every image of a board family that needs one
     (tools/base/check.py FAMILIES: the RAK4630) lists exactly one `provision` file, it is the
     pinned base, it lies beside the manifest and it passes spec/FIRMWARE-MANIFEST.md section 4a
@@ -72,9 +76,47 @@ def is_release_version(version):
     return bool(RELEASE_VERSION.match(version or ""))
 
 
+def public_key_of_line(line, path=PUBLIC_KEY_FILE):
+    """The 32 bytes a line of a .pub file names, in either of the two forms one key is written in
+    (keys/README.md):
+
+        ed25519 <key id> <64 hex>    the trust table's line. It is what the Walter firmware's
+                                     keys/release-keys.txt carries for this same key, and what
+                                     Thomas committed here on 20 October, so both repositories
+                                     read one line.
+        <64 hex>                     the key alone, which is what keygen prints.
+
+    The key id is **recomputed from the key** and a named one has to match it. Both halves of that
+    line are written by a person; a line whose id was edited to say something the key does not say
+    would have this script compare a signature against one key while a reader of the file believed
+    another, so it is refused here, before anything is signed. A message of this function may name
+    a key id - every signature carries one in the clear - and never the key.
+    """
+    fields = line.split()
+    if len(fields) == 3 and fields[0] == "ed25519":
+        named_id, hex_key = fields[1].lower(), fields[2]
+    elif len(fields) == 1:
+        named_id, hex_key = None, fields[0]
+    else:
+        raise SigningError("%s does not hold a public key on its first line of content: a line is "
+                           "either 'ed25519 <key id> <64 hex>' or the 64 hexadecimal characters "
+                           "alone (keys/README.md)" % path)
+    if not re.match(r"^[0-9a-fA-F]{64}$", hex_key):
+        raise SigningError("%s does not hold 64 hexadecimal characters as its key "
+                           "(keys/README.md)" % path)
+    public = bytes.fromhex(hex_key)
+    computed = manifestref.key_id(public)
+    if named_id is not None and named_id != computed:
+        raise SigningError("%s names key id %s, and the key on that line is %s: the line was "
+                           "edited by hand and one of its two halves is now wrong. A key id is "
+                           "the first eight bytes of SHA-256 over the key (keys/README.md); the "
+                           "key itself is not shown here." % (path, named_id, computed))
+    return public
+
+
 def read_public_key(path):
-    """The 32-byte public key of a .pub file: one line of 64 hexadecimal characters, with # comment
-    lines and blank lines allowed above it."""
+    """The 32-byte public key of a .pub file: its first line of content, in either form
+    public_key_of_line takes, with # comment lines and blank lines allowed above it."""
     if not os.path.isfile(path):
         raise SigningError("%s is not there.\n%s" % (path, HOW_TO_MAKE_THE_KEY))
     with open(path, "r", encoding="ascii", errors="replace") as fh:
@@ -82,10 +124,7 @@ def read_public_key(path):
             line = line.split("#", 1)[0].strip()
             if not line:
                 continue
-            if not re.match(r"^[0-9a-fA-F]{64}$", line):
-                raise SigningError("%s does not hold 64 hexadecimal characters on its first line "
-                                   "of content" % path)
-            return bytes.fromhex(line)
+            return public_key_of_line(line, path)
     raise SigningError("%s holds no key.\n%s" % (path, HOW_TO_MAKE_THE_KEY))
 
 

@@ -42,6 +42,11 @@
 # public test key and its version is 0.0.0-dryrun+<sha7>, which is not a release version, so
 # tools/release/sign_manifest.py would refuse to sign a real release the same way.
 #
+# **A release body begins with words a person wrote.** release-notes/vX.Y.Z.md, in the repository
+# and reviewed in the pull request before the tag, stands in front of what the manifest generates;
+# a tag without that file is refused in ci-green, as a tag without a key is
+# (tools/release/release_notes.py; docs/release.md, *The notes*).
+#
 # **Merging never releases.** A release is a person pushing a tag, or pressing *Run workflow* for
 # a rehearsal (tasks/RUNBOOK.md section 4).
 
@@ -130,6 +135,21 @@ jobs:
             exit 1
           fi
           echo "a signing key is present; its value is never printed"
+
+      # And a body a person can read. The hand-written top of the notes is written before the tag,
+      # on the branch, and reviewed in the pull request like everything else here; a tag without
+      # it is refused where a tag without a key is - before anything is built. The same module
+      # assembles the body in `publish`, so the two cannot disagree.
+      - name: And that the release notes have their hand-written top
+        if: github.ref_type == 'tag'
+        env:
+          VERSION: ${{ steps.commit.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! python3 tools/release/release_notes.py --version "$VERSION" --require --check; then
+            echo "::error::this tag has no hand-written release notes in the repository. Write release-notes/${GITHUB_REF_NAME}.md on a branch - what this release is, which MeshCore it is, the link to docs/flashing.md, and which Walter release it goes with - and tag the commit it merged as (docs/release.md, The notes)."
+            exit 1
+          fi
 
       # The board environments of platformio.ini, so that adding a role or a board stays one
       # section of that file and no second list (phase 0's task 01, decision 2).
@@ -291,12 +311,23 @@ jobs:
           # And that SHA256SUMS is true of the files beside it: the names in it have no path.
           (cd out/release && sha256sum -c SHA256SUMS)
 
+      # Two parts, in this order: the hand-written top from release-notes/vX.Y.Z.md, which a
+      # person wrote and the pull request reviewed, and then what the manifest generates. A tag
+      # with no such file was already refused in ci-green; a rehearsal has none and says so in
+      # one line, which is how that path gets exercised without a tag.
       - name: The release notes
         env:
           RELEASE: ${{ needs.ci-green.outputs.release }}
+          VERSION: ${{ needs.ci-green.outputs.version }}
         run: |
           set -euo pipefail
-          python - <<'PY' > out/NOTES.md
+          mkdir -p out
+          if [ "$RELEASE" = "true" ]; then
+            python tools/release/release_notes.py --version "$VERSION" --require > out/NOTES.md
+          else
+            python tools/release/release_notes.py --version "$VERSION" > out/NOTES.md
+          fi
+          python - <<'PY' >> out/NOTES.md
           import json, os
           m = json.load(open("out/release/manifest.json"))
           sig = open("out/release/manifest.json.sig").read().split()
@@ -367,9 +398,28 @@ jobs:
           print()
           print("## Flashing one")
           print()
-          print("`docs/release.md` in this repository is the long version. In short: the Walter "
-                "does this by itself for a unit in the field, and a board on a bench takes the "
-                "`.uf2` or the `.zip` over USB-C. Nothing has to be erased first.")
+          # The guide, at this tag, so the link is good for as long as the release is. A dry run
+          # has no tag of its own: it points at the branch it rehearsed.
+          ref = v if release else m["commit"][:7]
+          print("[**docs/flashing.md**](https://github.com/%s/blob/%s/docs/flashing.md) is the "
+                "page: which file is the repeater and which is the scanner, the `.uf2` and the "
+                "`.zip` over the adapter's USB-C, the `.bin` through the Walter over SWD, the "
+                "base `.hex` for a radio fresh from the factory, what to check afterwards, and "
+                "the admin password nobody knows until somebody sets one. "
+                "[docs/provisioning.md](https://github.com/%s/blob/%s/docs/provisioning.md) is "
+                "what makes a board *this* unit, and "
+                "[docs/release.md](https://github.com/%s/blob/%s/docs/release.md) is how a "
+                "release is made."
+                % (os.environ.get("GITHUB_REPOSITORY", "twinoak/twinoak.meshcore.repeater-firmware"),
+                   ref,
+                   os.environ.get("GITHUB_REPOSITORY", "twinoak/twinoak.meshcore.repeater-firmware"),
+                   ref,
+                   os.environ.get("GITHUB_REPOSITORY", "twinoak/twinoak.meshcore.repeater-firmware"),
+                   ref))
+          print()
+          print("In short: the Walter does this by itself for a unit in the field, and a board "
+                "on a bench takes the `.uf2` or the `.zip` over USB-C. Nothing has to be erased "
+                "first.")
           PY
           cat out/NOTES.md
           cat out/NOTES.md >> "${GITHUB_STEP_SUMMARY:-/dev/null}"

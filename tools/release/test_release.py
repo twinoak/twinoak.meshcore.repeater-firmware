@@ -19,6 +19,14 @@ path is exercised without GitHub. What is held here:
   * what may be signed: the specification's public test key never signs a release version, a tag
     with no key in the environment is refused and says how the key is made, and no message
     carries a key;
+  * the published public half, in the one form both repositories write a key in: the trust
+    table's `ed25519 <key id> <64 hex>` line and the 64 hexadecimal characters alone are the same
+    key, a named key id that is not the key's own is refused, and the **real** keys/release.pub
+    of this commit reads as the key it says it is;
+  * the hand-written top of a release body (release-notes/vX.Y.Z.md): which file a version
+    names, that a release with none is refused and says what to write, that an empty one is
+    refused too, that a rehearsal is not - and that **this** commit's release-notes/ holds a
+    readable file for the version platformio.ini is about to be tagged as, if one is there;
   * the base under the application (boards/base/, tools/base/check.py; spec/SYSTEM.md S-5a,
     spec/FIRMWARE-MANIFEST.md section 4a): every RAK4630 image of a release lists the one
     vendored file as `use: provision` and the manifest validates; a changed byte in that file is
@@ -46,6 +54,7 @@ sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 import build_release  # noqa: E402
 import check as base_check  # noqa: E402  (tools/base/check.py)
 import manifestref  # noqa: E402
+import release_notes  # noqa: E402
 import sign_manifest  # noqa: E402
 
 FIXTURES = os.path.join(REPO, "spec", "fixtures", "manifest")
@@ -554,14 +563,169 @@ class TheSignature(ReleaseTestCase):
                                             public_key_file=self.pub_file)
             self.assertNotIn(value, str(caught.exception))
 
+    def test_the_real_path_takes_the_trust_tables_line_for_the_public_half(self):
+        """What keys/release.pub actually holds: `ed25519 <key id> <64 hex>`, the line the Walter
+        firmware's trust table carries for the same key. Before p3.7-01 the tag path read this
+        file and refused it, after the builds (tasks/phase-3.7/01-the-first-release.md)."""
+        self.write(self.pub_file, "ed25519 %s %s\n"
+                   % (manifestref.key_id(self.test_public), self.test_public.hex()))
+        path = self.manifest(version="1.2.3+abc1234")
+        public = sign_manifest.sign_manifest(
+            path, environ={"RELEASE_SIGNING_KEY": manifestref.TEST_PRIVATE.hex()},
+            public_key_file=self.pub_file)
+        self.assertEqual(public, self.test_public)
+        with open(path, "rb") as fh:
+            message = fh.read()
+        with open(path + ".sig", "r", encoding="ascii") as fh:
+            self.assertTrue(manifestref.verify([public], message, fh.read()))
+
+
+# ------------------------------------------------------------- the public half, as it is written
+
+class ThePublishedPublicHalf(ReleaseTestCase):
+    """keys/release.pub, in the one form both repositories write a key in (keys/README.md):
+    `ed25519 <key id> <64 hex>` - the trust table's line - or the 64 hexadecimal characters alone.
+    The key id is recomputed from the key, so the two halves of that line cannot disagree."""
+
+    def setUp(self):
+        ReleaseTestCase.setUp(self)
+        self.test_public = sign_manifest.test_public_key()
+        self.pub_file = os.path.join(self.tmp, "release.pub")
+
+    def test_the_key_alone_is_a_key(self):
+        self.write(self.pub_file, "%s\n" % self.test_public.hex())
+        self.assertEqual(sign_manifest.read_public_key(self.pub_file), self.test_public)
+
+    def test_the_trust_tables_line_is_a_key(self):
+        self.write(self.pub_file, "ed25519 %s %s\n"
+                   % (manifestref.key_id(self.test_public), self.test_public.hex()))
+        self.assertEqual(sign_manifest.read_public_key(self.pub_file), self.test_public)
+
+    def test_an_upper_case_key_id_is_the_same_key_id(self):
+        self.write(self.pub_file, "ed25519 %s %s\n"
+                   % (manifestref.key_id(self.test_public).upper(), self.test_public.hex()))
+        self.assertEqual(sign_manifest.read_public_key(self.pub_file), self.test_public)
+
+    def test_a_key_id_that_is_not_the_keys_own_is_refused(self):
+        """The id is recomputed, so a hand-edited half is caught: the message names both ids -
+        a key id is public, a key is not - and never the key."""
+        self.write(self.pub_file, "ed25519 %s %s\n" % ("0" * 16, self.test_public.hex()))
+        with self.assertRaises(sign_manifest.SigningError) as caught:
+            sign_manifest.read_public_key(self.pub_file)
+        message = str(caught.exception)
+        self.assertIn("0" * 16, message)
+        self.assertIn(manifestref.key_id(self.test_public), message)
+        self.assertNotIn(self.test_public.hex(), message)
+
     def test_the_public_key_file_takes_comments(self):
         self.write(self.pub_file, "# who made it, and when\n\n%s\n" % self.test_public.hex())
         self.assertEqual(sign_manifest.read_public_key(self.pub_file), self.test_public)
 
     def test_a_public_key_file_that_is_not_a_key_is_refused(self):
-        self.write(self.pub_file, "not a key\n")
-        with self.assertRaises(sign_manifest.SigningError):
+        for content in ("not a key\n",                      # three fields, not a signature line
+                        "ed25519 %s\n" % self.test_public.hex(),          # two fields
+                        "ssh-ed25519 %s %s\n" % (manifestref.key_id(self.test_public),
+                                                 self.test_public.hex()),  # another algorithm
+                        "%s\n" % self.test_public.hex()[:-1],             # 63 characters
+                        "%szz\n" % self.test_public.hex()[:-2]):          # not hexadecimal
+            self.write(self.pub_file, content)
+            with self.assertRaises(sign_manifest.SigningError):
+                sign_manifest.read_public_key(self.pub_file)
+
+    def test_a_missing_file_and_an_empty_one_both_say_how_to_make_the_key(self):
+        with self.assertRaises(sign_manifest.SigningError) as caught:
             sign_manifest.read_public_key(self.pub_file)
+        self.assertIn("manifestref.py keygen", str(caught.exception))
+        self.write(self.pub_file, "# nothing but a comment\n\n")
+        with self.assertRaises(sign_manifest.SigningError) as caught:
+            sign_manifest.read_public_key(self.pub_file)
+        self.assertIn("manifestref.py keygen", str(caught.exception))
+
+    def test_the_committed_file_is_the_key_thomas_made(self):
+        """The **real** keys/release.pub, with the reader the tag path uses: key id
+        73efdd383a957596, made on 20 October 2026 and shared with the Walter firmware
+        (keys/README.md). tools/release/selfcheck.py runs this reader over the same file on every
+        commit, so a malformed file fails on a commit and not at a tag."""
+        public = sign_manifest.read_public_key(
+            os.path.join(REPO, sign_manifest.PUBLIC_KEY_FILE))
+        self.assertEqual(len(public), 32)
+        self.assertEqual(manifestref.key_id(public), "73efdd383a957596")
+
+
+# ------------------------------------------------------- the hand-written top of a release body
+
+class TheHandWrittenNotes(ReleaseTestCase):
+    """release-notes/vX.Y.Z.md: what a person wrote, in front of what the manifest generates
+    (tools/release/release_notes.py). A tag without it is refused in release.yml's ci-green, the
+    way a tag without a signing key is; a rehearsal has none and says so."""
+
+    VERSION = "1.2.3+abc1234"
+
+    def notes_dir(self):
+        path = os.path.join(self.tmp, release_notes.NOTES_DIR)
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def test_the_file_is_named_by_the_tag_and_not_by_the_build_metadata(self):
+        self.assertEqual(release_notes.tag_of("1.2.3+abc1234"), "v1.2.3")
+        self.assertEqual(release_notes.tag_of("1.2.3"), "v1.2.3")
+        self.assertEqual(release_notes.tag_of("0.0.0-dryrun+abc1234"), "v0.0.0")
+        self.assertEqual(release_notes.tag_of("10.20.30+a.b"), "v10.20.30")
+        self.assertTrue(release_notes.notes_path(self.VERSION, self.tmp).endswith(
+            os.path.join(release_notes.NOTES_DIR, "v1.2.3.md")))
+
+    def test_a_version_that_is_not_one_is_refused(self):
+        for version in ("", None, "v1.2.3", "1.2", "latest"):
+            with self.assertRaises(release_notes.NotesError):
+                release_notes.tag_of(version)
+
+    def test_the_top_is_the_files_text_with_a_divider_under_it(self):
+        self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "**The first release.**\n")
+        text = release_notes.hand_written(self.VERSION, self.tmp)
+        self.assertTrue(text.startswith("**The first release.**\n"))
+        self.assertTrue(text.endswith("\n---\n\n"))
+        # A `---` directly under a paragraph is a Markdown heading: there is a blank line above it.
+        self.assertIn("\n\n---\n", text)
+
+    def test_a_release_with_no_hand_written_top_is_refused_and_says_what_to_write(self):
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.hand_written(self.VERSION, self.tmp)
+        message = str(caught.exception)
+        self.assertIn("release-notes/v1.2.3.md", message)
+        self.assertIn("docs/flashing.md", message)
+        self.assertIn("not released", message)
+        self.assertEqual(release_notes.main(["--version", self.VERSION, "--require",
+                                             "--repo", self.tmp]), 1)
+
+    def test_an_empty_hand_written_top_is_refused_too(self):
+        self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "\n   \n")
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.hand_written(self.VERSION, self.tmp)
+        self.assertIn("holds nothing", str(caught.exception))
+
+    def test_a_rehearsal_is_not_refused_and_says_there_is_no_top(self):
+        text = release_notes.no_hand_written("0.0.0-dryrun+abc1234", self.tmp)
+        self.assertIn("release-notes/v0.0.0.md", text)
+        self.assertIn("No hand-written top", text)
+        self.assertTrue(text.endswith("\n---\n\n"))
+        self.assertEqual(release_notes.main(["--version", "0.0.0-dryrun+abc1234",
+                                             "--repo", self.tmp]), 0)
+
+    def test_this_commits_own_notes_are_readable(self):
+        """Every release-notes/*.md of this repository: a version this tooling understands, and
+        something in it. The file is written on the branch before the tag, so this is where a
+        typo in its name is caught - on a commit, and not at the tag."""
+        directory = os.path.join(REPO, release_notes.NOTES_DIR)
+        if not os.path.isdir(directory):
+            self.skipTest("no release-notes/ in this repository yet")
+        names = sorted(n for n in os.listdir(directory) if n.endswith(".md"))
+        for name in names:
+            version = name[1:-3] if name.startswith("v") else name[:-3]
+            self.assertEqual(release_notes.tag_of(version), name[:-3],
+                             "%s is not named vX.Y.Z.md" % name)
+            text = release_notes.hand_written(version, REPO)
+            self.assertIn("docs/flashing.md", text,
+                          "%s does not point a reader at the flashing guide" % name)
 
 
 # ------------------------------------------------------------------ the base under the application

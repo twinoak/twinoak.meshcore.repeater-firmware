@@ -3,9 +3,16 @@
 
     python tools/release/selfcheck.py --commit <40 hex> --build-dir .pio/build/<env> [--build-dir ...]
 
-Three things, in this order, so that the release path is exercised on every commit without GitHub
+Four things, in this order, so that the release path is exercised on every commit without GitHub
 and without the release key:
 
+  0. keys/release.pub and release-notes/, the two files of a tag that no dry run touches: the
+     **real** public half, read with sign_manifest.read_public_key - the reader the tag path uses
+     - and the hand-written top of the notes for every version release-notes/ holds. A dry run
+     signs with the specification's test key and generates its own body, so neither file is in its
+     way: before p3.7-01 keys/release.pub was in the form the Walter firmware's trust table uses
+     and the reader refused it, and a tag would have failed at `publish` after the builds. Both
+     now fail here instead, on a commit (tasks/phase-3.7/01-the-first-release.md).
   1. tools/release/test_release.py - every test of the tooling - and tools/bench's own,
      test_bench.py and test_walk.py: the guards of the bench tool a session may touch a board
      with, and every walk of docs/bench.md run end to end, both against its fake serial layer
@@ -39,6 +46,7 @@ sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 import build_release  # noqa: E402
 import check as base_check  # noqa: E402  (tools/base/check.py: the base under the application)
 import manifestref  # noqa: E402
+import release_notes  # noqa: E402
 import sign_manifest  # noqa: E402
 import test_release  # noqa: E402
 
@@ -55,6 +63,31 @@ def run_tests():
         suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
     result = unittest.TextTestRunner(verbosity=2, stream=sys.stdout).run(suite)
     return result.wasSuccessful(), result.testsRun
+
+
+def the_files_only_a_tag_reads(repo=REPO):
+    """keys/release.pub with the tag path's own reader, and every release-notes/vX.Y.Z.md.
+
+    Neither is on the dry run's path - it signs with the test key and writes its own notes - so
+    without this a malformed one is found at a tag, after the builds, and by then nothing can be
+    done but a new commit and a new tag (docs/release.md, *When a tag is refused*).
+    """
+    path = os.path.join(repo, sign_manifest.PUBLIC_KEY_FILE)
+    public = sign_manifest.read_public_key(path)
+    print("%s: a %d-byte Ed25519 public key, key id %s (the form keys/README.md describes)"
+          % (sign_manifest.PUBLIC_KEY_FILE, len(public), manifestref.key_id(public)))
+
+    directory = os.path.join(repo, release_notes.NOTES_DIR)
+    names = sorted(n for n in os.listdir(directory) if n.endswith(".md")) \
+        if os.path.isdir(directory) else []
+    if not names:
+        print("%s/: no hand-written release notes yet, so no tag would be accepted"
+              % release_notes.NOTES_DIR)
+    for name in names:
+        version = name[1:-3] if name.startswith("v") else name[:-3]
+        text = release_notes.hand_written(version, repo)
+        print("%s/%s: %d characters, %d line(s) in front of the generated part"
+              % (release_notes.NOTES_DIR, name, len(text), text.count("\n")))
 
 
 def dry_run(build_dirs, commit, out_dir, require_descriptor=False):
@@ -83,10 +116,19 @@ def main(argv=None):
     parser.add_argument("--commit", required=True, help="the 40 hexadecimal characters of the commit")
     parser.add_argument("--out", default=os.path.join("out", "release"))
     parser.add_argument("--require-descriptor", action="store_true")
-    parser.add_argument("--only", choices=("tests", "base", "dryrun"), default=None)
+    parser.add_argument("--only", choices=("keys", "tests", "base", "dryrun"), default=None)
     args = parser.parse_args(argv)
 
+    if args.only in (None, "keys"):
+        print("== the two files only a tag reads: keys/release.pub, and the release notes")
+        try:
+            the_files_only_a_tag_reads()
+        except (sign_manifest.SigningError, release_notes.NotesError) as exc:
+            sys.stderr.write("error: %s\n" % exc)
+            return 1
+
     if args.only in (None, "tests"):
+        print()
         print("== the release tooling's tests")
         ok, count = run_tests()
         if not ok:
