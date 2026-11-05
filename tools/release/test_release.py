@@ -666,6 +666,14 @@ class TheHandWrittenNotes(ReleaseTestCase):
         os.makedirs(path, exist_ok=True)
         return path
 
+    @staticmethod
+    def command_line(args):
+        """release_notes.py's main, with what it printed instead of the console."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = release_notes.main(args)
+        return code, out.getvalue(), err.getvalue()
+
     def test_the_file_is_named_by_the_tag_and_not_by_the_build_metadata(self):
         self.assertEqual(release_notes.tag_of("1.2.3+abc1234"), "v1.2.3")
         self.assertEqual(release_notes.tag_of("1.2.3"), "v1.2.3")
@@ -694,8 +702,10 @@ class TheHandWrittenNotes(ReleaseTestCase):
         self.assertIn("release-notes/v1.2.3.md", message)
         self.assertIn("docs/flashing.md", message)
         self.assertIn("not released", message)
-        self.assertEqual(release_notes.main(["--version", self.VERSION, "--require",
-                                             "--repo", self.tmp]), 1)
+        code, out, err = self.command_line(["--version", self.VERSION, "--require",
+                                            "--repo", self.tmp])
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("release-notes/v1.2.3.md", err)
 
     def test_an_empty_hand_written_top_is_refused_too(self):
         self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "\n   \n")
@@ -708,8 +718,17 @@ class TheHandWrittenNotes(ReleaseTestCase):
         self.assertIn("release-notes/v0.0.0.md", text)
         self.assertIn("No hand-written top", text)
         self.assertTrue(text.endswith("\n---\n\n"))
-        self.assertEqual(release_notes.main(["--version", "0.0.0-dryrun+abc1234",
-                                             "--repo", self.tmp]), 0)
+        code, out, err = self.command_line(["--version", "0.0.0-dryrun+abc1234",
+                                            "--repo", self.tmp])
+        self.assertEqual((code, err, out), (0, "", text))
+
+    def test_the_check_the_tag_job_runs_prints_the_path_and_not_the_body(self):
+        self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "**The first release.**\n")
+        code, out, err = self.command_line(["--version", self.VERSION, "--require", "--check",
+                                            "--repo", self.tmp])
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(out.strip(), "release-notes/v1.2.3.md")
+        self.assertNotIn("The first release", out)
 
     def test_this_commits_own_notes_are_readable(self):
         """Every release-notes/*.md of this repository: a version this tooling understands, and
