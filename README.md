@@ -30,15 +30,18 @@ session, and the eight places a bump re-reads — is
 
 ## State
 
-**There is a release: [`v0.1.0`](../../releases/latest), the first one.** The
-images, the base, a signed manifest and a body a person can read are a GitHub
-Release, signed with the key `73efdd383a957596` on a GitHub runner;
+**There is a release: [`v0.1.1`](../../releases/latest).** The images, the base,
+a signed manifest and a body a person can read are a GitHub Release, signed with
+the key `73efdd383a957596` on a GitHub runner;
 [`docs/flashing.md`](docs/flashing.md) is the one page for getting it onto a
-board and [`release-notes/v0.1.0.md`](release-notes/v0.1.0.md) is what it says
-about itself. Before it, the only way to get this firmware onto a board was to
-build it.
+board and [`release-notes/v0.1.1.md`](release-notes/v0.1.1.md) is what it says
+about itself. `v0.1.0` of 5 November was the first;
+[`v0.1.1`](release-notes/v0.1.1.md) is the one whose `HELLO` says the radio's
+band (link 1.1), without which MeshMaster cannot pick a unit's first image over
+LTE. Before them, the only way to get this firmware onto a board was to build
+it.
 
-The piles through 3.6 have landed. What the firmware does **today**:
+The piles through 3.8 have landed. What the firmware does **today**:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
   `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
@@ -89,7 +92,11 @@ Not done, and deliberately: the bridge role and the dual adapter
 
 **What a board has shown, and what it has not.** The first unit was powered up
 on 5 November 2026 and its repeater came up on the mesh — on a build flashed by
-hand, not on `v0.1.0`. 26 of the 97 lines of
+hand. A day later it showed the one thing a release had not: on 6 November a
+Walter at `v0.1.0` left the radio's application half-written over SWD, and the
+radio came back over its own USB-C from **`v0.1.0`'s published `.uf2`, with its
+key** ([`docs/flashing.md`](docs/flashing.md) §3a is what to do and why it is
+safe). No board has run `v0.1.1`. 26 of the 102 lines of
 [`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
 scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 
