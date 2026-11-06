@@ -36,10 +36,12 @@ path is exercised without GitHub. What is held here:
 """
 
 import contextlib
+import glob
 import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -368,11 +370,32 @@ class TheManifest(ReleaseTestCase):
         with open(os.path.join(self.out, "manifest.json"), "rb") as fh:
             self.assertEqual(fh.read(), manifestref.canonical(manifest))
 
-    def test_the_link_version_is_the_specifications(self):
-        with open(os.path.join(REPO, "spec", "fixtures", "link", "link-v1.json"), "r",
-                  encoding="utf-8") as fh:
-            major, minor = json.load(fh)["link"].split(".")
-        self.assertEqual(self.release()["link"], {"major": int(major), "minor": int(minor)})
+    def test_the_link_version_is_the_firmwares_own_constant(self):
+        """`link` is read from src/common/link/codec/Numbers.h - what the firmware speaks - and
+        not from a fixture file's name (p3.8-01). The newest fixture file in spec/ must say the
+        same thing, or the firmware and the specification have drifted apart."""
+        path = os.path.join(REPO, build_release.LINK_NUMBERS)
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        major = int(re.search(r"kProtoMajor\s*=\s*(\d+)", text).group(1))
+        minor = int(re.search(r"kProtoMinor\s*=\s*(\d+)", text).group(1))
+        self.assertEqual(self.release()["link"], {"major": major, "minor": minor})
+
+        newest = max(glob.glob(os.path.join(REPO, "spec", "fixtures", "link", "link-v*.json")),
+                     key=lambda p: tuple(int(n) for n in os.path.basename(p)[6:-5].split(".")))
+        with open(newest, "r", encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["link"], "%d.%d" % (major, minor),
+                             "%s is not the version the firmware speaks" % os.path.basename(newest))
+
+    def test_the_link_version_is_refused_when_the_constants_are_gone(self):
+        """A rename of either constant is a release that stops, not a release that guesses."""
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, os.path.dirname(build_release.LINK_NUMBERS)))
+            with open(os.path.join(tmp, build_release.LINK_NUMBERS), "w", encoding="utf-8") as fh:
+                fh.write("constexpr uint8_t kProtoMajor = 1;\n")
+            with self.assertRaises(build_release.ReleaseError) as caught:
+                build_release.link_version(repo=tmp)
+            self.assertIn("kProtoMinor", str(caught.exception))
 
     def test_the_upstream_pin_is_the_builds(self):
         # The build directory's own buildinfo.json, whatever pin that says - not a pin this
@@ -430,8 +453,25 @@ class TheDescriptor(ReleaseTestCase):
         return self.build_dir(runs=[(APP_START, bytes(blob))])
 
     @staticmethod
-    def descriptor(board="rak4630-single", version="0.3.0+abc1234", band="868"):
-        return manifestref.make_descriptor("repeater", version, board, band, 1, 0)
+    def descriptor(board="rak4630-single", version="0.3.0+abc1234", band="868", link=None):
+        # The box link this firmware speaks, read where a release reads it (p3.8-01): a
+        # descriptor must agree with the manifest, and the manifest's `link` is this. Writing a
+        # minor here by hand would make a bump of the protocol fail this test instead of the
+        # thing the test is about.
+        link = link or build_release.link_version()
+        return manifestref.make_descriptor("repeater", version, board, band,
+                                           link["major"], link["minor"])
+
+    def test_a_descriptor_of_another_link_minor_is_refused(self):
+        """An image built before a minor bump, released with a manifest that claims the bump:
+        the descriptor and the manifest come from the same constant, so they can only differ if
+        the image is not the one that was just built."""
+        older = dict(build_release.link_version())
+        older["minor"] = older["minor"] - 1 if older["minor"] > 0 else 1
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(build_dirs=[self.image_with(self.descriptor(link=older))],
+                         require_descriptor=True)
+        self.assertIn("link_minor", str(caught.exception))
 
     def test_without_the_flag_an_image_without_one_is_fine(self):
         said = []

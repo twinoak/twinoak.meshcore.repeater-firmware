@@ -89,6 +89,11 @@ namespace {
 
 const char* const kVersion = "0.0.0-dev";
 const char* const kBoard = "rak4630-single";
+// The repeater image's band, as tools/linkloop/check.sh takes it out of platformio.ini and
+// passes it in: HELLO's `band` in link 1.1 (spec/LINK-PROTOCOL.md 5.1). On the board this is a
+// pointer into the image's own descriptor (src/roles/repeater/link/BoardLink.cpp); a host build
+// has no descriptor, so it is the define the same section was compiled with.
+const char* const kBand = TWINOAK_BAND;
 const char* const kUpstream = "repeater-v1.18.0+81dbae59";
 const char* const kNodeName = "TwinOak linkloop";
 
@@ -579,6 +584,7 @@ void wire() {
   g_firmware.slot = 0;
   g_firmware.version = kVersion;
   g_firmware.board = kBoard;
+  g_firmware.band = kBand;
   g_firmware.upstream = kUpstream;
   g_services.firmware = &g_firmware;
   g_services.system = &g_system;

@@ -241,7 +241,7 @@ _section("8", "What an image says it is", [
     PageLine("8.1", ("p3-01",), "The file you are about to flash says what it is, before you",
              "the descriptor in the file: role, board, band, version, offset"),
     PageLine("8.2", ("p3-01",), "The unit then says the same thing",
-             "`hello` over the link: role, board, fw_version, slot"),
+             "`hello` over the link: role, board, band, fw_version, slot"),
     PageLine("8.3", ("p3-01",), "The console agrees too",
              "the console's `sensor get fw.version` after the flash, and upstream's `ver`"),
     PageLine("8.4", ("p3-01",), "The Walter's half, in the Walter's repository",
@@ -1307,19 +1307,25 @@ class Walker(object):
         found = parse_linkcli(output)
         slot = re.search(r"^slot\s+(\d+)", output or "", re.M)
         board = re.search(r"^board\s+(\S+)", output or "", re.M)
-        return self.step("8.2", "`hello` over the link says the descriptor's role, board and "
-                                "fw_version, and `slot 0`",
+        # `band` is the fourth of the four strings a release's image is chosen by, and HELLO has
+        # carried it since box link 1.1 (spec/LINK-PROTOCOL.md 5.1, p3.8-01). It is checked the
+        # same way as the other three: against the descriptor in the file that was just flashed,
+        # so what the unit says and what the image says cannot differ unnoticed.
+        return self.step("8.2", "`hello` over the link says the descriptor's role, board, band "
+                                "and fw_version, and `slot 0`",
                          ok=(code == 0 and found.get("role") == desc["role"]
                              and found.get("version") == desc["version"]
                              and board is not None and board.group(1) == desc["board"]
+                             and found.get("band") == desc["band"]
                              and slot is not None and slot.group(1) == "0"),
                          sent=["linkcli.py --port %s hello" % dongle.device], saw=output,
-                         expected="role %s, board %s, fw_version %s, slot 0"
-                                  % (desc["role"], desc["board"], desc["version"]),
+                         expected="role %s, board %s, band %s, fw_version %s, slot 0"
+                                  % (desc["role"], desc["board"], desc["band"], desc["version"]),
                          blanks={"section 8 hello":
-                                 "role %s, board %s, fw_version %s, slot %s"
+                                 "role %s, board %s, band %s, fw_version %s, slot %s"
                                  % (found.get("role"), board and board.group(1),
-                                    found.get("version"), slot and slot.group(1))})
+                                    found.get("band"), found.get("version"),
+                                    slot and slot.group(1))})
 
     # -- section 9 -----------------------------------------------------------
 

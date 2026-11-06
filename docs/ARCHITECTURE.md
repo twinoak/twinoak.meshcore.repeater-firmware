@@ -210,10 +210,13 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
    every type, status, mode and limit of the protocol in one header; `Bytes.h`'s `Reader` and
    `Writer` are the little-endian scalars; `Messages.{h,cpp}` is a plain struct per payload with
    the one direction this side of the link needs — **a decoder for every request, an encoder for
-   every response and every event**, because in 1.0 only the Walter sends requests and only the
-   RAK sends events, and the other half of each pair is the Walter's firmware's. Tested against
-   every case of `spec/fixtures/link/link-v1.json` (`test/test_link_codec`), with a test that
-   fails when the fixture gains a case nothing exercises.
+   every response and every event**, because only the Walter sends requests and only the RAK
+   sends events, and the other half of each pair is the Walter's firmware's. Tested against every
+   case of **both** files of `spec/fixtures/link/` — `link-v1.json`, which is 1.0's and whose
+   bytes never change, and `link-v1.1.json`, which is 1.0's cases and the four 1.1 adds
+   (`test/test_link_codec`) — with a test that fails when a fixture gains a case nothing
+   exercises. `kProtoMinor` is the one place the firmware says which minor it speaks: the image
+   descriptor's `link_minor` and the release manifest's `link` are both read from it.
 2. **Session** (portable, `src/common/link/session/`, proved by p1-03): a receiver that turns bytes into
    packets and counts what it drops; a dispatcher from request type to handler; the one-entry
    memory of the last request and its response, which is what makes a retried request harmless;

@@ -122,7 +122,7 @@ rest of this page is a person's, and so are the lines in the right-hand column:
 | §1 | the console on a repeater: the banner's `Repeater ID`, `ver`, `board`, `get radio`, both `sensor list` pages with the cut digit, `sensor get fw.version`, `sensor set fw.version x` refused, and `get dutycycle` | the adverts and the repeating, a phone's login, `INFO.VARIANT`, the scope on SCL, the two USB serial numbers (a double-tap), and the refusals with `rf: antenna` in the config |
 | §3 | the clock on the USB console: `sensor get clock.state` on a node that has never had one, upstream's own `clock`, a `time <epoch>` set, `clock sync`, a `reboot` and a `clkreboot` — and `rtc` never said on a board with no RV-3028 | the `linkcli.py` lines, the reset switch, a minute without power, a companion's view of the adverts, and a hand-fitted RV-3028 |
 | §5 | the two thresholds on the USB console: `power.low_mv` set to 3600 and still 3600 after a `reboot`, and `3350`, `2400` and `4400` refused with nothing changed — **and both values put back as they were found**, which is the walk's last line | the DMM, the phone's telemetry, the thermometer, the simulator's steps, the unplugged I2C bus, and the boot-voltage question (its three `get`s are read and filled in here) |
-| §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the three agreeing | the Walter's half, which is another repository's |
+| §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the four agreeing (`role`, `board`, `band`, `fw_version`) | the Walter's half, which is another repository's |
 | §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
 | §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the Danish standard's four (the advert interval computed from the key it read), the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
 | §0, §2, §4, §6, §7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
@@ -320,11 +320,30 @@ is put the bytes on a real UART through real filters.
 
 - [ ] **p1-03** **A 3.3 V USB-UART dongle on the adapter's link pins** (J4/J5
   on 1–2; dongle TX to P0.15, dongle RX to P0.16, grounds together).
-  `linkcli.py --port <port> hello` prints `protocol 1.0`, `role 1 (repeater)`,
-  `slot 0`, `max_payload 240`, `caps 0x61` (`CLI` and `ATTENTION` from task 05,
+  `linkcli.py --port <port> hello` prints `protocol 1.1` (`1.0` on an image from
+  before p3.8-01), `role 1 (repeater)`, `slot 0`, `max_payload 240`,
+  `caps 0x61` (`CLI` and `ATTENTION` from task 05,
   `TIME_PERSIST` from task 04; the rest of the protocol is not implemented yet,
   on purpose), a non-zero `boot_id`, `fw_version 0.0.0-dev`,
   `board rak4630-single` and `upstream repeater-v1.18.0+81dbae59`.
+- [ ] **p3.8-01** **The radio says its band.** `linkcli.py --port <port> hello`
+  on this image ends its body with `band 868` — the string the descriptor of the
+  file that was flashed carries (`manifestref.py descriptor <file>`, §8), read
+  out of the image's own 96 bytes and not from a define. band → ______. The line
+  appears because `linkcli.py` asks in 1.1; `protocol` on the same answer says
+  `1.1`.
+- [ ] **p3.8-01** **A 1.0 Walter is answered as it always was.** The 0.1.0
+  Walter's `rak hello` reports no band, and its `protocol` line says `1.0`: the
+  radio answers at the highest minor both ends know (`spec/LINK-PROTOCOL.md`
+  §5.1, *Versions*), so an older Walter sees the bytes it has always seen and
+  needs no update to take this image. Nothing here can be walked until that
+  Walter is on the unit — it is the line that says the compatibility is real and
+  not only tested.
+- [ ] **p3.8-01** **A 0.1.1 Walter says the band back.** `rak hello` on the
+  Walter's console prints `band 868` for this radio, and it is the same string
+  `linkcli.py hello` printed on the dongle. That is what lets meshmaster.dk
+  offer a first image over LTE to a radio whose Walter has no golden image yet
+  (the Walter's pile 8, task 05). band → ______.
 - [ ] **p1-03** `ping` answers and echoes the nonce; `status` shows the uptime
   and `reset_reason` — **1 (power-on)** after a power cycle, **2 (reset pin)**
   after the reset line, **4 (software)** after `reboot 0` — with
@@ -697,10 +716,12 @@ release's files, a flash, and one `hello` over the link.
   the build would have failed first — what is being checked on the bench is
   that the file which left the release is still that file. (bench, 2026-10-22, 9fb721b)
 - [ ] **p3-01** **The unit then says the same thing.** After flashing it,
-  `linkcli.py hello`'s `role`, `board` and `fw_version` are the three the
+  `linkcli.py hello`'s `role`, `board`, `band` and `fw_version` are the four the
   descriptor gave, and `slot` is **0** on the single-RAK adapter. They are read
   out of the descriptor object inside the running firmware, so a disagreement
-  here means the image on the board is not the image that was checked.
+  here means the image on the board is not the image that was checked. (`band`
+  is `HELLO`'s since box link 1.1, p3.8-01; `bench walk 8` step 8.2 checks all
+  four and `--tick` ticks this line.)
 - [x] **p3-01** **The console agrees too.** `sensor get fw.version` on the USB
   console reads `twinoak-repeater <version> on MeshCore <tag> (<pin>)` with the
   same version, and upstream's own `ver` line is unchanged. (bench, 2026-10-22, 9fb721b)

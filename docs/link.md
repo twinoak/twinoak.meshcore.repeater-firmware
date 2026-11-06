@@ -5,16 +5,26 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
+**This firmware speaks 1.1** (`kProtoMinor` in
+[`src/common/link/codec/Numbers.h`](../src/common/link/codec/Numbers.h), which is
+also the image descriptor's `link_minor` and the release manifest's `link`).
+1.1 added one field and changed nothing else: `HELLO`'s answer and `EV_BOOT`
+end with **`band`**, the band the running image was built for. A Walter that
+asks in 1.0 is answered in 1.0, without it — so the 0.1.0 Walter on the bench
+sees exactly the bytes it always saw.
+
 What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's
 four): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
 `REBOOT`, `CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job
 requests `JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, the five sends
 `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY` and `SEND_TRACE`, the
 reply with `REPLY_GET`, `OBS_PULL` and `MESH_COUNTERS`, and `EV_BOOT`,
-`EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type protocol
-1.0 defines** outside its two reserved ranges (provisioning, phase 3's task 03;
-the bridge role, later). `HELLO`'s `caps` is `0x7f`, every bit of it, because a
-capability is an interface that is there (`src/common/link/session/Interfaces.h`).
+`EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type the
+protocol defines** outside its two reserved ranges (provisioning, phase 3's
+task 03; the bridge role, later): 1.1 added no type and no capability bit, only
+`band` at the end of two payloads. `HELLO`'s `caps` is `0x7f`, every bit of it,
+because a capability is an interface that is there
+(`src/common/link/session/Interfaces.h`).
 `LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
@@ -78,7 +88,7 @@ is how you learn what you are talking to:
 
 ```
 HELLO
-  protocol      1.0
+  protocol      1.1
   role          1 (repeater)
   slot          0
   max_payload   240
@@ -87,6 +97,7 @@ HELLO
   fw_version    0.0.0-dev
   board         rak4630-single
   upstream      repeater-v1.18.0+81dbae59
+  band          868
 ```
 
 - `boot_id` is random and drawn once per boot, from the radio's noise listener.
@@ -95,9 +106,20 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` is `0x7f` — every bit protocol 1.0 defines. A capability is an
-  interface that is there, so a build that left one out would simply not
-  advertise it and would answer `ERR_UNSUPPORTED` for its requests.
+- `caps` is `0x7f` — every bit the protocol defines (1.1 added none). A
+  capability is an interface that is there, so a build that left one out would
+  simply not advertise it and would answer `ERR_UNSUPPORTED` for its requests.
+- `protocol` is the version **this session** speaks: the highest minor both ends
+  know (§5.1, *Versions*). `linkcli.py` asks in 1.1, so it is answered 1.1 and
+  the `band` line is there. A 1.0 Walter asks in 1.0, is answered 1.0, and gets
+  no `band` line — which is the whole of what 1.1 changed.
+- `band` is `role` and `board`'s third: the three together are what a release's
+  image is chosen by (`spec/FIRMWARE-MANIFEST.md`), and `HELLO` is where the
+  Walter reads them until its first install through itself commits. It is read
+  out of the running image's own descriptor, like `role`, `board` and
+  `fw_version`, so a disagreement with the file that was flashed is a real
+  finding. `EV_BOOT` carries it too, at this firmware's own minor, whether or
+  not the Walter knows 1.1.
 
 `ping` proves the main loop is turning, which a reset line cannot: it echoes
 the nonce and reports the uptime. `status` is the one to read when something is
@@ -119,8 +141,8 @@ into a report when a frame is refused.
 
 A capability is an interface that is there (`src/common/link/session/Interfaces.h`), so
 this table is `caps` read the other way round: what each bit buys, and what a
-build without it would answer. `0x7f` is every bit protocol 1.0 defines, which
-is what this role has.
+build without it would answer. `0x7f` is every bit the protocol defines (1.1
+added none), which is what this role has.
 
 | Request | Capability bit | Where it is walked |
 |---|---|---|

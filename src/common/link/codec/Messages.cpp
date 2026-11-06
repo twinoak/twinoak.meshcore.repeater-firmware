@@ -59,6 +59,10 @@ void putHelloBody(Writer& w, const HelloBody& b) {
   w.str8(b.fw_version);
   w.str8(b.board);
   w.str8(b.upstream);
+  // 1.1's one addition, at the end of the body, and only when the body says 1.1 or later
+  // (section 5.1, the `band` row): a 1.0 Walter is answered the bytes it has always been
+  // answered. The reference does the same (spec/tools/linkref.py, enc_hello_body).
+  if (b.proto_minor >= 1) w.str8(b.band);
 }
 
 bool putReply(Writer& w, const ReplyRecord& rec) {

@@ -106,7 +106,9 @@ def git_commit(repo=REPO):
 # ----------------------------------------------------------------------------- recording
 
 def parse_linkcli(output):
-    """`role 1 (repeater)`, `fw_version X`, `pubkey <64 hex>`, `name ...` out of linkcli's output."""
+    """`role 1 (repeater)`, `fw_version X`, `band X`, `pubkey <64 hex>`, `name ...` out of
+    linkcli's output. `band` arrives with box link 1.1 and is absent from a 1.0 radio's `hello`,
+    which is why nothing here requires it."""
     found = {}
     for raw in (output or "").splitlines():
         line = raw.strip()
@@ -116,6 +118,9 @@ def parse_linkcli(output):
         m = re.match(r"^fw_version\s+(\S+)", line)
         if m:
             found["version"] = m.group(1)
+        m = re.match(r"^band\s+(\S+)", line)
+        if m:
+            found["band"] = m.group(1)
         m = re.match(r"^pubkey\s+([0-9A-Fa-f]{64})", line)
         if m:
             found["repeater_id"] = m.group(1).upper()
@@ -194,8 +199,11 @@ def record_board(config, ports, runner, log, home, found_image=None, timeouts=No
                        role=found.get("role"), version=found.get("version"),
                        repeater_id=found.get("repeater_id"), name=found.get("name"),
                        found_image=found_image, how=found.get("how"),
+                       # `band` is HELLO's since link 1.1 and is what a release's image is
+                       # chosen by with the role and the board, so a run that read it keeps it.
                        board_said=dict((k, v) for k, v in found.items()
-                                       if k in ("rom", "radio_ok", "first_boot") and v is not None))
+                                       if k in ("rom", "radio_ok", "first_boot", "band")
+                                       and v is not None))
     save_run(home, record)
     log("recorded: %s" % record.describe())
     return record

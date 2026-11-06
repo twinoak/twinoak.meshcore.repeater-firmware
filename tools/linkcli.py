@@ -401,6 +401,11 @@ def print_hello_body(f, indent=""):
     print("%sfw_version    %s" % (indent, f["fw_version"]))
     print("%sboard         %s" % (indent, f["board"]))
     print("%supstream      %s" % (indent, f["upstream"]))
+    # Link 1.1's one addition, at the end of the body (spec/LINK-PROTOCOL.md 5.1). A 1.0 radio
+    # answers without it, and then there is nothing to print: the Walter reports no band, as
+    # before 1.1 existed.
+    if "band" in f:
+        print("%sband          %s" % (indent, f["band"]))
 
 
 def print_fields(msg_type, f, indent=""):

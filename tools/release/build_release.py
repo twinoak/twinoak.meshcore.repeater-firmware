@@ -342,14 +342,35 @@ def read_build_info(build_dir):
     return info
 
 
+LINK_NUMBERS = os.path.join("src", "common", "link", "codec", "Numbers.h")
+_LINK_CONSTANT = re.compile(
+    r"^constexpr\s+uint8_t\s+kProto(Major|Minor)\s*=\s*(\d+)\s*;", re.M)
+
+
 def link_version(repo=REPO):
-    """The box-link version this repository's specification defines (spec/LINK-PROTOCOL.md, whose
-    fixture carries it). When phase 1 gives the firmware a constant of its own, that is what a
-    release should read instead - the manifest's `link` is what the firmware speaks."""
-    with open(os.path.join(repo, "spec", "fixtures", "link", "link-v1.json"), "r",
-              encoding="utf-8") as fh:
-        major, minor = json.load(fh)["link"].split(".")
-    return {"major": int(major), "minor": int(minor)}
+    """The box-link version this *firmware* speaks: `kProtoMajor` and `kProtoMinor` of
+    src/common/link/codec/Numbers.h.
+
+    The manifest's `link` is what the firmware speaks, not what the specification's newest
+    fixture file happens to be called, and since p3.8-01 the firmware has a constant of its own -
+    which is also what the image descriptor's `link_major`/`link_minor` are built from
+    (src/common/fwdesc/ImageDescriptor.cpp). Reading that one place is what makes
+    check_descriptor() below a real check instead of two copies of the same number: an image
+    built at another minor than the manifest claims fails the release.
+
+    Until p3.8-01 this read spec/fixtures/link/link-v1.json's `link` field, which stopped being
+    the answer the moment 1.1's fixtures arrived beside 1.0's: that file is 1.0's and never
+    changes.
+    """
+    path = os.path.join(repo, LINK_NUMBERS)
+    with open(path, "r", encoding="utf-8") as fh:
+        found = dict((m.group(1), int(m.group(2))) for m in _LINK_CONSTANT.finditer(fh.read()))
+    for key in ("Major", "Minor"):
+        if key not in found:
+            raise ReleaseError("%s has no `constexpr uint8_t kProto%s = <n>;` line: the box-link "
+                               "version a release claims is read from there and nowhere else"
+                               % (LINK_NUMBERS, key))
+    return {"major": found["Major"], "minor": found["Minor"]}
 
 
 def name_for(info, version, extension):

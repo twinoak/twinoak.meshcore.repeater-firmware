@@ -44,10 +44,11 @@ The piles through 3.6 have landed. What the firmware does **today**:
   `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
   radio, the routing, the ACL, the console and the preferences are upstream's
   and behave exactly as a stock node's (`docs/ARCHITECTURE.md` §2).
-- **It speaks the box link** on `Serial1` at 115200: every request and event
-  protocol 1.0 defines outside its two reserved ranges, `caps 0x7f`.
-  `tools/linkcli.py` from a laptop is how a person walks it
-  ([`docs/link.md`](docs/link.md)).
+- **It speaks the box link** on `Serial1` at 115200, **protocol 1.1**: every
+  request and event the protocol defines outside its two reserved ranges,
+  `caps 0x7f`, and `HELLO`'s answer and `EV_BOOT` end with the image's `band`.
+  A Walter that asks in 1.0 is answered in 1.0. `tools/linkcli.py` from a laptop
+  is how a person walks it ([`docs/link.md`](docs/link.md)).
 - **It keeps time without an RTC**: the clock is restored across a restart from
   a file, adverts are held back until it is trustworthy, and a backwards set is
   refused once anything of ours has carried a timestamp (`docs/link.md` §2a).

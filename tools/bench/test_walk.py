@@ -70,16 +70,26 @@ WALK_NOW = 1792000000
 PASSWORD = "a-password-nobody-keeps"
 DONGLE = "A50285BI"
 
-HELLO = """protocol 1.0
+# What `linkcli.py hello` prints against a 1.1 radio: `band` at the end of the body
+# (spec/LINK-PROTOCOL.md 5.1). The band here is the one the fake image's descriptor carries, so
+# section 8.2 compares the two and agrees.
+HELLO = """protocol 1.1
 role 1 (repeater)
 slot 0
 max_payload 240
-caps 0x61
+caps 0x7f
 boot_id 7
 fw_version 0.0.0-dev
 board rak4630-single
 upstream repeater-v1.18.0+81dbae59
+band 868
 """
+
+# The same radio before 1.1: no `band` line at all. Section 8.2 cannot agree with the descriptor
+# then, and says so rather than passing.
+HELLO_1_0 = "\n".join(
+    l for l in HELLO.splitlines() if not l.startswith("band ")).replace(
+        "protocol 1.1", "protocol 1.0") + "\n"
 
 PROVISIONED = """provision unit.txt: 8 line(s)
   2:   set name bench-walk
@@ -693,8 +703,22 @@ class SectionEight(WalkCase):
         code, out = self.walk(["walk", "8"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_OK, out)
         _name, text = self.result_file()
-        self.assertIn("**section 8 hello** -> role repeater, board rak4630-single, "
+        self.assertIn("**section 8 hello** -> role repeater, board rak4630-single, band 868, "
                       "fw_version 0.0.0-dev, slot 0", text)
+
+    def test_hello_without_a_band_does_not_pass_section_eight(self):
+        """A 1.0 radio answers `hello` without a `band` (spec/LINK-PROTOCOL.md 5.1), and the step
+        checks the band against the descriptor of the image it just flashed: it cannot agree, so
+        it must come back as not ok rather than as a tick."""
+        self.config(dongle=DONGLE)
+        dongle = PortInfo("COM9", DONGLE, 0x0403, 0x6001, "FT232")
+        _board, ports, runner = self.fakes(others=[dongle], linkcli_output=HELLO_1_0)
+        self.walk(["walk", "8"], ports=ports, runner=runner)
+        _name, text = self.result_file()
+        self.assertIn("band 868", text)                   # what was expected
+        self.assertIn("band None", text)                  # what came back
+        self.assertNotIn("**section 8 hello** -> role repeater, board rak4630-single, band 868",
+                         text)
 
     def test_an_image_that_is_not_ours_is_refused_before_any_port(self):
         _board, ports, runner = self.fakes()
