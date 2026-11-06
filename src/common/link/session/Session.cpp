@@ -134,6 +134,10 @@ HelloBody Session::helloBody(uint8_t proto_minor) const {
   b.fw_version = bytesOfText(s_.firmware->version);
   b.board = bytesOfText(s_.firmware->board);
   b.upstream = bytesOfText(s_.firmware->upstream);
+  // 1.1 (section 5.1). The encoder writes it only when `proto_minor` is 1 or more, so a 1.0
+  // Walter is answered exactly the body it was answered before; filling it in here regardless
+  // keeps the one place that knows what this image is to one place.
+  b.band = bytesOfText(s_.firmware->band);
   return b;
 }
 

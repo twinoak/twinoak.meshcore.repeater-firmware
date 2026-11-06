@@ -1169,14 +1169,19 @@ class RecordAndRestore(BenchCase):
     def test_record_over_the_link_when_the_dongle_is_there(self):
         self.config(dongle="A50285BI")
         dongle = PortInfo("COM9", "A50285BI", 0x0403, 0x6001, "FT232")
-        linkcli = ("HELLO\n  protocol      1.0\n  role          1 (repeater)\n  fw_version    0.0.0-dev\n"
-                   "  board         rak4630-single\nIDENTITY\n  pubkey        %s\n  name          Bench\n" % REPEATER_ID.lower())
+        # Box link 1.1: `band` at the end of HELLO's body (spec/LINK-PROTOCOL.md 5.1). The run
+        # keeps it, because with the role and the board it is what a release's image is
+        # chosen by.
+        linkcli = ("HELLO\n  protocol      1.1\n  role          1 (repeater)\n  fw_version    0.0.0-dev\n"
+                   "  board         rak4630-single\n  band          868\n"
+                   "IDENTITY\n  pubkey        %s\n  name          Bench\n" % REPEATER_ID.lower())
         board, ports, runner = self.fakes(others=[dongle], linkcli_output=linkcli)
         code, out = self.run_cli(["record"], ports=ports, runner=runner)
         self.assertEqual(code, cfg.EXIT_OK, out)
         run = load_run(self.home, SERIAL)
         self.assertEqual(run.repeater_id, REPEATER_ID)
         self.assertEqual(run.name, "Bench")
+        self.assertEqual(run.board_said.get("band"), "868")
         self.assertTrue(run.how.startswith("link"))
         self.assertEqual(board.firmware.rebooted, 0)
         self.assertEqual(self.ports.opened, [])  # the console was never needed

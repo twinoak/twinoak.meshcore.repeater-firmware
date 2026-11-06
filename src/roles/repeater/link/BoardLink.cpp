@@ -200,6 +200,7 @@ void linkBegin(TwinOakMesh& mesh) {
   g_firmware.slot = fwdesc::imageSlot();
   g_firmware.version = fwdesc::imageVersion();  // "0.0.0-dev" unless the release says otherwise
   g_firmware.board = fwdesc::imageBoard();      // "rak4630-single"
+  g_firmware.band = fwdesc::imageBand();        // "868", HELLO's `band` in link 1.1
   g_firmware.upstream = upstreamString();       // "<tag>+<pin8>"
 
   g_services.firmware = &g_firmware;

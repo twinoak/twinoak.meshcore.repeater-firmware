@@ -1,13 +1,19 @@
 // src/common/link/session/: the whole box-link session, driven the way src/common/link/SerialTransport.cpp
-// drives it, against fakes - and held against spec/fixtures/link/link-v1.json for every request
-// this firmware answers today (HELLO, PING, STATUS, TIME_SET, TIME_GET, IDENTITY, REBOOT, CLI,
-// SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL) and for EV_BOOT and EV_ATTENTION.
+// drives it, against fakes - and held against **both** files of spec/fixtures/link/ for every
+// request this firmware answers today (HELLO, PING, STATUS, TIME_SET, TIME_GET, IDENTITY, REBOOT,
+// CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL) and for EV_BOOT and EV_ATTENTION.
 //
-// The fixture is read at run time from FIXTURES_DIR (platformio.ini's [env:native]). For each
-// request case the suite finds the response case of the same type and seq, sets the fakes to
-// return exactly the values that response carries, feeds the request's own `frame` byte by byte,
-// and expects the bytes the session hands the transport to be that response's `frame` - so a
-// disagreement with the Walter can only be a disagreement with the specification.
+// link-v1.json is 1.0's and its bytes never change; link-v1.1.json is every case of 1.0 and the
+// four 1.1 adds (spec/LINK-PROTOCOL.md section 11). Both are run, in that order and not one in
+// place of the other: the Walter on the bench speaks 1.0 and must still be answered the bytes it
+// has always been answered, which is only checkable while 1.0's file is still run.
+//
+// The fixtures are read at run time from FIXTURES_DIR (platformio.ini's [env:native]). For each
+// request case the suite finds the response case of the same type and seq **in the same file**,
+// sets the fakes to return exactly the values that response carries, feeds the request's own
+// `frame` byte by byte, and expects the bytes the session hands the transport to be that
+// response's `frame` - so a disagreement with the Walter can only be a disagreement with the
+// specification.
 //
 // What else is checked, in the order tasks/phase-1/03-the-link-session.md asks for it:
 //   - the same request frame twice: one handler call, two identical responses; a different seq:
@@ -96,12 +102,26 @@ std::vector<uint8_t> frameOf(uint8_t type, uint8_t seq, const std::vector<uint8_
 
 // ----------------------------------------------------------------------------- the fixture file
 
-JsonDocument& fixture() {
-  static JsonDocument doc;
-  static bool loaded = false;
-  if (!loaded) {
-    loaded = true;
-    const std::string path = std::string(FIXTURES_DIR) + "/link-v1.json";
+// The two files, and how many of the requests this firmware answers each one has a request case
+// for: 1.0's thirteen, and 1.1's the same thirteen plus its second HELLO.
+struct FixtureFile {
+  const char* file;
+  const char* link;
+  int requests_answered;
+};
+const FixtureFile kFixtures[] = {
+    {"link-v1.json", "1.0", 13},
+    {"link-v1.1.json", "1.1", 14},
+};
+constexpr size_t kFixtureCount = sizeof(kFixtures) / sizeof(kFixtures[0]);
+
+JsonDocument& fixture(size_t which) {
+  static JsonDocument docs[kFixtureCount];
+  static bool loaded[kFixtureCount] = {false};
+  JsonDocument& doc = docs[which];
+  if (!loaded[which]) {
+    loaded[which] = true;
+    const std::string path = std::string(FIXTURES_DIR) + "/" + kFixtures[which].file;
     std::ifstream in(path, std::ios::binary);
     EXPECT_TRUE(in.good()) << "cannot read " << path;
     std::stringstream buf;
@@ -114,6 +134,7 @@ JsonDocument& fixture() {
 }
 
 struct Case {
+  size_t from = 0;  // which of kFixtures it came from
   std::string name;
   std::string kind;
   uint8_t type = 0;
@@ -121,14 +142,18 @@ struct Case {
   JsonObject fields;
   std::vector<uint8_t> payload;
   std::vector<uint8_t> frame;
+
+  std::string where() const { return std::string(kFixtures[from].file) + ": " + name; }
 };
 
-const std::vector<Case>& cases() {
-  static std::vector<Case> all;
-  if (all.empty()) {
-    JsonArray from = fixture()["cases"].as<JsonArray>();
+const std::vector<Case>& casesOf(size_t which) {
+  static std::vector<Case> all[kFixtureCount];
+  std::vector<Case>& mine = all[which];
+  if (mine.empty()) {
+    JsonArray from = fixture(which)["cases"].as<JsonArray>();
     for (JsonObject c : from) {
       Case k;
+      k.from = which;
       k.name = c["name"].as<std::string>();
       k.kind = c["kind"].as<std::string>();
       k.type = c["type"].as<uint8_t>();
@@ -136,20 +161,36 @@ const std::vector<Case>& cases() {
       k.fields = c["fields"].as<JsonObject>();
       k.payload = fromHex(c["payload"].as<std::string>());
       k.frame = fromHex(c["frame"].as<std::string>());
-      all.push_back(k);
+      mine.push_back(k);
+    }
+  }
+  return mine;
+}
+
+// Every case of both files, 1.0's first.
+const std::vector<Case>& cases() {
+  static std::vector<Case> all;
+  if (all.empty()) {
+    for (size_t i = 0; i < kFixtureCount; i++) {
+      for (const Case& c : casesOf(i)) all.push_back(c);
     }
   }
   return all;
 }
 
-// The case of that kind, type and seq, or nullptr.
-const Case* findCase(const char* kind, uint8_t type, uint8_t seq) {
-  for (const Case& c : cases()) {
+// The case of that kind, type and seq in one file, or nullptr. Which file matters where 1.1 added
+// a case: a request must be paired with the answer its own file gives it. Everything 1.1 did not
+// touch is the same case in both, so the default is 1.0's file - the one every test written
+// before 1.1 means.
+const Case* findCase(const char* kind, uint8_t type, uint8_t seq, size_t which = 0) {
+  for (const Case& c : casesOf(which)) {
     if (c.kind == kind && c.type == type && c.seq == seq) return &c;
   }
   return nullptr;
 }
 
+// By name, in either file: a name is unique across the two, and the cases they share are the
+// same bytes (the codec suite's TheTwoFixtureFiles holds that).
 const Case* findCaseNamed(const char* name) {
   for (const Case& c : cases()) {
     if (c.name == name) return &c;
@@ -497,6 +538,7 @@ class Harness {
     firmware.version = version.c_str();
     firmware.board = board.c_str();
     firmware.upstream = upstream.c_str();
+    firmware.band = band.c_str();
 
     services.firmware = &firmware;
     services.system = &system;
@@ -512,13 +554,18 @@ class Harness {
   }
 
   // The strings HELLO reports. Set before the first pass; the Firmware struct points into them.
-  void setStrings(const std::string& v, const std::string& b, const std::string& u) {
+  // `band` is HELLO's since link 1.1 and is given whatever minor the request asks for: it is what
+  // this image *is*, and only the encoder decides whether a body carries it.
+  void setStrings(const std::string& v, const std::string& b, const std::string& u,
+                  const std::string& nd = "868") {
     version = v;
     board = b;
     upstream = u;
+    band = nd;  // `nd`, because `b` is the board
     firmware.version = version.c_str();
     firmware.board = board.c_str();
     firmware.upstream = upstream.c_str();
+    firmware.band = band.c_str();
   }
 
   void feed(const std::vector<uint8_t>& data) {
@@ -592,6 +639,7 @@ class Harness {
   std::string version = "0.0.0-dev";
   std::string board = "rak4630-single";
   std::string upstream = "repeater-v1.17.1+d9296435";
+  std::string band = "868";
 };
 
 // Sets the fakes so that the session's answer to `request` is exactly `response`.
@@ -602,8 +650,11 @@ void arrange(Harness& h, const Case& response) {
       h.system.boot_id = f["boot_id"].as<uint32_t>();
       h.firmware.role = f["role"].as<uint8_t>();
       h.firmware.slot = f["slot"].as<uint8_t>();
+      // A 1.0 case has no `band` field: the radio still has a band, and the answer is what has
+      // to leave it out. 868 is the band of every case of both files that carries one.
       h.setStrings(f["fw_version"].as<std::string>(), f["board"].as<std::string>(),
-                   f["upstream"].as<std::string>());
+                   f["upstream"].as<std::string>(),
+                   f["band"].is<const char*>() ? f["band"].as<std::string>() : "868");
       break;
     case kMsgPing:
       h.system.uptime_s = f["uptime_s"].as<uint32_t>();
@@ -727,32 +778,68 @@ bool handledHere(uint8_t type) {
 // ----------------------------------------------------------------------------- the fixtures
 
 TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
-  int n = 0;
-  for (const Case& c : cases()) {
-    if (c.kind != "request" || !handledHere(c.type)) continue;
-    const Case* want = findCase("response", c.type, c.seq);
-    ASSERT_NE(nullptr, want) << c.name << ": no response case with the same type and seq";
+  // Both files, each paired with itself: 1.0's hello request is answered 1.0's hello response,
+  // and 1.1's is answered the one with the band at the end. The same session answers both, and
+  // nothing but the request's `proto_minor` tells the two apart.
+  for (size_t which = 0; which < kFixtureCount; which++) {
+    int n = 0;
+    for (const Case& c : casesOf(which)) {
+      if (c.kind != "request" || !handledHere(c.type)) continue;
+      const Case* want = findCase("response", c.type, c.seq, which);
+      ASSERT_NE(nullptr, want) << c.where() << ": no response case with the same type and seq";
 
-    Harness h;
-    arrange(h, *want);
-    h.feed(c.frame);
-    h.run();
+      Harness h;
+      arrange(h, *want);
+      h.feed(c.frame);
+      h.run();
 
-    ASSERT_EQ(1u, h.sent.size()) << c.name << ": exactly one answer to one request";
-    EXPECT_EQ(toHex(want->frame), h.lastFrame()) << c.name << " -> " << want->name;
-    EXPECT_TRUE(h.lastHadLeadingZero())
-        << c.name << ": the line was idle, so the frame carries the leading 0x00 (section 2)";
-    EXPECT_EQ(1u, h.session.executed()) << c.name << ": one handler call";
-    n++;
+      ASSERT_EQ(1u, h.sent.size()) << c.where() << ": exactly one answer to one request";
+      EXPECT_EQ(toHex(want->frame), h.lastFrame()) << c.where() << " -> " << want->name;
+      EXPECT_TRUE(h.lastHadLeadingZero())
+          << c.where() << ": the line was idle, so the frame carries the leading 0x00 (section 2)";
+      EXPECT_EQ(1u, h.session.executed()) << c.where() << ": one handler call";
+      n++;
+    }
+    EXPECT_EQ(kFixtures[which].requests_answered, n)
+        << kFixtures[which].file << ": HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET,"
+           " CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL - and 1.1's second HELLO";
   }
-  EXPECT_EQ(13, n) << "HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET, CLI,"
-                      " SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL";
+}
+
+// A 1.0 Walter asking a 1.1 radio is answered a 1.0 body, with no band: the fixture case
+// "hello response from a 1.0 radio to a 1.1 request: no band" seen from this side (section 5.1,
+// "Versions"). Its bytes are what a radio of either minor answers that request with, which is
+// exactly why the Walter on the bench can be left alone.
+TEST(TheFixtures, AOnePointZeroRequestIsAnsweredAOnePointZeroBodyWithNoBand) {
+  const Case* want = findCaseNamed("hello response from a 1.0 radio to a 1.1 request: no band");
+  ASSERT_NE(nullptr, want);
+  ASSERT_EQ(0, want->fields["proto_minor"].as<int>());
+  ASSERT_FALSE(want->fields["band"].is<const char*>());
+
+  // The 1.0 file's own hello request - proto_minor 0 - at the seq the answer above carries.
+  const Case* req = findCase("request", kMsgHello, 1);
+  ASSERT_NE(nullptr, req);
+  ASSERT_EQ(0, req->payload[1]) << "the 1.0 request asks for minor 0";
+
+  Harness h;
+  arrange(h, *want);
+  EXPECT_EQ("868", std::string(h.firmware.band)) << "the radio has a band; the answer omits it";
+  h.feed(frameOf(kMsgHello, want->seq, req->payload));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame());
 }
 
 TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
-  const Case* want = findCase("event", kMsgEvBoot, 0);
+  // EV_BOOT carries the body "as the RAK speaks it" (section 5.1): this firmware's own minor,
+  // band included, whatever the Walter knows - which is why the case it must match is 1.1's and
+  // not 1.0's. 1.0's EV_BOOT case is the same event from a 1.0 radio; its bytes are held by the
+  // codec suite, which encodes every event case of both files.
+  const Case* want = findCaseNamed("boot event, 1.1: the band at the end");
   ASSERT_NE(nullptr, want);
   JsonObject f = want->fields;
+  ASSERT_EQ(unsigned(kProtoMinor), f["proto_minor"].as<unsigned>())
+      << "the fixture's newest EV_BOOT is not at the minor this firmware speaks";
 
   Harness h;
   h.system.reset_reason = f["reset_reason"].as<uint8_t>();
@@ -760,12 +847,12 @@ TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
   h.firmware.role = f["role"].as<uint8_t>();
   h.firmware.slot = f["slot"].as<uint8_t>();
   h.setStrings(f["fw_version"].as<std::string>(), f["board"].as<std::string>(),
-               f["upstream"].as<std::string>());
+               f["upstream"].as<std::string>(), f["band"].as<std::string>());
 
   EXPECT_EQ(0, h.session.nextEventSeq());
   h.session.begin(h.now);
   ASSERT_TRUE(h.takeOutgoing());
-  EXPECT_EQ(toHex(want->frame), h.lastFrame());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << want->where();
   EXPECT_TRUE(h.lastHadLeadingZero()) << "the first thing the link ever sends leads with 0x00";
   EXPECT_EQ(1, h.session.nextEventSeq()) << "events are counted from 0 and wrap (section 3)";
 
@@ -1100,7 +1187,9 @@ TEST(TheByteStream, AFrameSplitOverThreeReads) {
 TEST(TheByteStream, TheFixturesStreamWithNoiseInIt) {
   // The fixture's own stream: two terminators, a good PING frame, seven bytes of garbage and a
   // terminator, another terminator, a good STATUS frame.
-  JsonObject s = fixture()["stream"].as<JsonObject>();
+  // The `stream` is the same in both files (the codec suite's TheTwoFixtureFiles holds that),
+  // so 1.0's is read here.
+  JsonObject s = fixture(0)["stream"].as<JsonObject>();
   const std::vector<uint8_t> bytes = fromHex(s["bytes"].as<std::string>());
   JsonArray want = s["packets"].as<JsonArray>();
 

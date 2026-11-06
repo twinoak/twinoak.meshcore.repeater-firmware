@@ -1,7 +1,7 @@
-// Every message of protocol 1.0 as a plain struct and the one function this firmware needs for
+// Every message of protocol 1.1 as a plain struct and the one function this firmware needs for
 // it: a decoder for every request, an encoder for every response and every event
-// (spec/LINK-PROTOCOL.md sections 5 to 8). In 1.0 only the Walter sends requests and only the RAK
-// sends events, so the other half of each pair is the Walter's firmware's and is not here.
+// (spec/LINK-PROTOCOL.md sections 5 to 8). Only the Walter sends requests and only the RAK sends
+// events, so the other half of each pair is the Walter's firmware's and is not here.
 //
 // Host-portable: no Arduino, no MeshCore, no heap, no recursion. The rules every function here
 // keeps:
@@ -45,6 +45,12 @@ struct Path {
 };
 
 // The body of a HELLO response, which EV_BOOT repeats after its reset reason (section 5.1).
+//
+// `band` is 1.1's one addition, at the end: the encoder writes it when *this body's*
+// `proto_minor` is 1 or more and leaves it out of a 1.0 body, which is the whole of the version
+// rule here ("a minor adds fields at the end of a payload and never changes what exists"). The
+// field is filled in whatever the minor is - the session reads it from the image's descriptor
+// once - and a 1.0 body simply does not carry it.
 struct HelloBody {
   uint8_t proto_major = kProtoMajor;
   uint8_t proto_minor = kProtoMinor;
@@ -56,6 +62,7 @@ struct HelloBody {
   Bytes fw_version;
   Bytes board;
   Bytes upstream;
+  Bytes band;  // 1.1 only: written when proto_minor >= 1
 };
 
 // A reply record: what REPLY_GET answers and what EV_MESH_REPLY carries (section 6.3).

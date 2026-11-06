@@ -1,8 +1,15 @@
-// src/common/link/codec/: the box link as bytes, held against spec/fixtures/link/link-v1.json - the file
-// spec/tools/linkref.py generates from spec/LINK-PROTOCOL.md and that the Walter's firmware tests
-// its own codec against, in its own repository.
+// src/common/link/codec/: the box link as bytes, held against *both* files of
+// spec/fixtures/link/ - link-v1.json, which is 1.0's and whose bytes never change because
+// firmware that speaks 1.0 has been released, and link-v1.1.json, which is every case of 1.0 and
+// the four 1.1 adds (spec/LINK-PROTOCOL.md section 11). spec/tools/linkref.py generates them
+// from that document, and the Walter's firmware tests its own codec against the same files in
+// its own repository.
 //
-// The fixture is read at run time from FIXTURES_DIR (platformio.ini's [env:native]), so a case
+// The two are read side by side and not one in place of the other: a 1.0 Walter - the one on the
+// bench - must still be answered the bytes it has always been answered, and that is only
+// checkable while 1.0's file is still run.
+//
+// The fixtures are read at run time from FIXTURES_DIR (platformio.ini's [env:native]), so a case
 // added to the specification is a case this suite runs without a line changing here - and
 // `CasesOfTheFixture.EveryCaseIsExercised` fails if one of them is of a shape no function here
 // knows, which is what keeps "every case passes" an honest claim.
@@ -81,12 +88,26 @@ std::string asText(Bytes b) {
 
 // ----------------------------------------------------------------------------- the fixture file
 
-JsonDocument& fixture() {
-  static JsonDocument doc;
-  static bool loaded = false;
-  if (!loaded) {
-    loaded = true;
-    const std::string path = std::string(FIXTURES_DIR) + "/link-v1.json";
+// The two files of spec/fixtures/link/, and what each says its `link` is. `least_cases` is the
+// count this task was written against: fewer is a copy that lost something.
+struct FixtureFile {
+  const char* file;
+  const char* link;
+  size_t least_cases;
+};
+const FixtureFile kFixtures[] = {
+    {"link-v1.json", "1.0", 69},
+    {"link-v1.1.json", "1.1", 73},
+};
+constexpr size_t kFixtureCount = sizeof(kFixtures) / sizeof(kFixtures[0]);
+
+JsonDocument& fixture(size_t which) {
+  static JsonDocument docs[kFixtureCount];
+  static bool loaded[kFixtureCount] = {false};
+  JsonDocument& doc = docs[which];
+  if (!loaded[which]) {
+    loaded[which] = true;
+    const std::string path = std::string(FIXTURES_DIR) + "/" + kFixtures[which].file;
     std::ifstream in(path, std::ios::binary);
     EXPECT_TRUE(in.good()) << "cannot read " << path;
     std::stringstream buf;
@@ -98,8 +119,10 @@ JsonDocument& fixture() {
   return doc;
 }
 
-// One case of the fixture's `cases`, read into something a test can hold.
+// One case of a fixture's `cases`, read into something a test can hold. `file` is which of the
+// two it came from, so a failure names the file as well as the case.
 struct Case {
+  std::string file;
   std::string name;
   std::string kind;
   std::string type_name;
@@ -110,14 +133,18 @@ struct Case {
   std::vector<uint8_t> payload;
   std::vector<uint8_t> packet;
   std::vector<uint8_t> frame;
+
+  std::string where() const { return file + ": " + name; }
 };
 
-const std::vector<Case>& cases() {
-  static std::vector<Case> all;
-  if (all.empty()) {
-    JsonArray from = fixture()["cases"].as<JsonArray>();
+const std::vector<Case>& casesOf(size_t which) {
+  static std::vector<Case> all[kFixtureCount];
+  std::vector<Case>& mine = all[which];
+  if (mine.empty()) {
+    JsonArray from = fixture(which)["cases"].as<JsonArray>();
     for (JsonObject c : from) {
       Case k;
+      k.file = kFixtures[which].file;
       k.name = c["name"].as<std::string>();
       k.kind = c["kind"].as<std::string>();
       k.type_name = c["type_name"].as<std::string>();
@@ -128,7 +155,19 @@ const std::vector<Case>& cases() {
       k.payload = fromHex(c["payload"].as<std::string>());
       k.packet = fromHex(c["packet"].as<std::string>());
       k.frame = fromHex(c["frame"].as<std::string>());
-      all.push_back(k);
+      mine.push_back(k);
+    }
+  }
+  return mine;
+}
+
+// Every case of both files, 1.0's first. The cases 1.1 repeats from 1.0 are run twice, which is
+// the point: the same bytes have to come out whichever file asked for them.
+const std::vector<Case>& cases() {
+  static std::vector<Case> all;
+  if (all.empty()) {
+    for (size_t i = 0; i < kFixtureCount; i++) {
+      for (const Case& c : casesOf(i)) all.push_back(c);
     }
   }
   return all;
@@ -137,18 +176,18 @@ const std::vector<Case>& cases() {
 // ----------------------------------------------------------------------------- field matchers
 
 void expectNum(const Case& c, const char* key, long long got) {
-  ASSERT_TRUE(c.fields[key].is<long long>()) << c.name << ": the fixture has no " << key;
-  EXPECT_EQ(c.fields[key].as<long long>(), got) << c.name << "." << key;
+  ASSERT_TRUE(c.fields[key].is<long long>()) << c.where() << ": the fixture has no " << key;
+  EXPECT_EQ(c.fields[key].as<long long>(), got) << c.where() << "." << key;
 }
 
 void expectHex(const Case& c, const char* key, Bytes got) {
-  ASSERT_TRUE(c.fields[key].is<const char*>()) << c.name << ": the fixture has no " << key;
-  EXPECT_EQ(c.fields[key].as<std::string>(), toHex(got)) << c.name << "." << key;
+  ASSERT_TRUE(c.fields[key].is<const char*>()) << c.where() << ": the fixture has no " << key;
+  EXPECT_EQ(c.fields[key].as<std::string>(), toHex(got)) << c.where() << "." << key;
 }
 
 void expectText(const Case& c, const char* key, Bytes got) {
-  ASSERT_TRUE(c.fields[key].is<const char*>()) << c.name << ": the fixture has no " << key;
-  EXPECT_EQ(c.fields[key].as<std::string>(), asText(got)) << c.name << "." << key;
+  ASSERT_TRUE(c.fields[key].is<const char*>()) << c.where() << ": the fixture has no " << key;
+  EXPECT_EQ(c.fields[key].as<std::string>(), asText(got)) << c.where() << "." << key;
 }
 
 void expectPath(const Case& c, const Path& p) {
@@ -157,13 +196,13 @@ void expectPath(const Case& c, const Path& p) {
     expectNum(c, "hash_size", p.hash_size);
     expectNum(c, "hop_count", p.hop_count);
     expectHex(c, "hashes", p.hashes);
-    EXPECT_EQ(size_t(p.hash_size) * size_t(p.hop_count), size_t(p.hashes.len)) << c.name;
+    EXPECT_EQ(size_t(p.hash_size) * size_t(p.hop_count), size_t(p.hashes.len)) << c.where();
   } else {
-    EXPECT_EQ(0, p.hash_size) << c.name;
-    EXPECT_EQ(0, p.hop_count) << c.name;
-    EXPECT_EQ(0u, unsigned(p.hashes.len)) << c.name;
+    EXPECT_EQ(0, p.hash_size) << c.where();
+    EXPECT_EQ(0, p.hop_count) << c.where();
+    EXPECT_EQ(0u, unsigned(p.hashes.len)) << c.where();
     EXPECT_FALSE(c.fields["hashes"].is<const char*>())
-        << c.name << ": path_mode " << unsigned(p.mode) << " carries no hashes";
+        << c.where() << ": path_mode " << unsigned(p.mode) << " carries no hashes";
   }
 }
 
@@ -218,6 +257,10 @@ HelloBody helloBodyFromFields(JsonObject f, Store& store) {
   b.fw_version = store.text(f, "fw_version");
   b.board = store.text(f, "board");
   b.upstream = store.text(f, "upstream");
+  // 1.1's `band`, at the end and only in a body that says 1.1 or later (section 5.1). A 1.0
+  // case has no `band` field at all, and leaving it empty here is what the encoder is then held
+  // to: it must write nothing for it.
+  if (f["band"].is<const char*>()) b.band = store.text(f, "band");
   return b;
 }
 
@@ -251,23 +294,26 @@ bool exerciseRequest(const Case& c) {
   switch (c.type) {
     case kMsgHello: {
       Hello m;
-      EXPECT_TRUE(decodeHello(in, m)) << c.name;
+      EXPECT_TRUE(decodeHello(in, m)) << c.where();
       expectNum(c, "proto_major", m.proto_major);
       expectNum(c, "proto_minor", m.proto_minor);
       expectNum(c, "peer_kind", m.peer_kind);
       expectNum(c, "max_payload", m.max_payload);
       expectText(c, "fw_version", m.fw_version);
+      // 1.1 changed the *answer*, not the request: the request's layout is 1.0's whatever minor
+      // it asks for (section 5.1).
+      EXPECT_EQ(size_t(5) + size_t(m.fw_version.len), c.payload.size()) << c.where();
       return true;
     }
     case kMsgPing: {
       Ping m;
-      EXPECT_TRUE(decodePing(in, m)) << c.name;
+      EXPECT_TRUE(decodePing(in, m)) << c.where();
       expectNum(c, "nonce", m.nonce);
       return true;
     }
     case kMsgTimeSet: {
       TimeSet m;
-      EXPECT_TRUE(decodeTimeSet(in, m)) << c.name;
+      EXPECT_TRUE(decodeTimeSet(in, m)) << c.where();
       expectNum(c, "epoch", m.epoch);
       expectNum(c, "source", m.source);
       expectNum(c, "flags", m.flags);
@@ -275,55 +321,55 @@ bool exerciseRequest(const Case& c) {
     }
     case kMsgReboot: {
       Reboot m;
-      EXPECT_TRUE(decodeReboot(in, m)) << c.name;
+      EXPECT_TRUE(decodeReboot(in, m)) << c.where();
       expectNum(c, "mode", m.mode);
       expectNum(c, "delay_ms", m.delay_ms);
       return true;
     }
     case kMsgSleepNotice: {
       SleepNotice m;
-      EXPECT_TRUE(decodeSleepNotice(in, m)) << c.name;
+      EXPECT_TRUE(decodeSleepNotice(in, m)) << c.where();
       expectNum(c, "expect_back_s", m.expect_back_s);
       return true;
     }
     case kMsgCli: {
       Cli m;
-      EXPECT_TRUE(decodeCli(in, m)) << c.name;
+      EXPECT_TRUE(decodeCli(in, m)) << c.where();
       expectText(c, "text", m.text);
       return true;
     }
     case kMsgLppGet: {
       LppGet m;
-      EXPECT_TRUE(decodeLppGet(in, m)) << c.name;
+      EXPECT_TRUE(decodeLppGet(in, m)) << c.where();
       expectNum(c, "perm_mask", m.perm_mask);
       return true;
     }
     case kMsgJobBegin: {
       JobBegin m;
-      EXPECT_TRUE(decodeJobBegin(in, m)) << c.name;
-      EXPECT_NE(nullptr, m.pubkey) << c.name;
+      EXPECT_TRUE(decodeJobBegin(in, m)) << c.where();
+      EXPECT_NE(nullptr, m.pubkey) << c.where();
       if (m.pubkey != nullptr) {
-        EXPECT_EQ(c.fields["pubkey"].as<std::string>(), toHex(m.pubkey, kPubKeyLen)) << c.name;
+        EXPECT_EQ(c.fields["pubkey"].as<std::string>(), toHex(m.pubkey, kPubKeyLen)) << c.where();
       }
       expectPath(c, m.path);
       return true;
     }
     case kMsgPathSet: {
       Path p;
-      EXPECT_TRUE(decodePathSet(in, p)) << c.name;
+      EXPECT_TRUE(decodePathSet(in, p)) << c.where();
       expectPath(c, p);
       return true;
     }
     case kMsgSendLogin: {
       SendLogin m;
-      EXPECT_TRUE(decodeSendLogin(in, m)) << c.name;
+      EXPECT_TRUE(decodeSendLogin(in, m)) << c.where();
       expectNum(c, "timeout_ms", m.timeout_ms);
       expectHex(c, "password", m.password);
       return true;
     }
     case kMsgSendRequest: {
       SendRequest m;
-      EXPECT_TRUE(decodeSendRequest(in, m)) << c.name;
+      EXPECT_TRUE(decodeSendRequest(in, m)) << c.where();
       expectNum(c, "timeout_ms", m.timeout_ms);
       expectNum(c, "req_type", m.req_type);
       expectHex(c, "data", m.data);
@@ -331,7 +377,7 @@ bool exerciseRequest(const Case& c) {
     }
     case kMsgSendCli: {
       SendCli m;
-      EXPECT_TRUE(decodeSendCli(in, m)) << c.name;
+      EXPECT_TRUE(decodeSendCli(in, m)) << c.where();
       expectNum(c, "timeout_ms", m.timeout_ms);
       expectNum(c, "flags", m.flags);
       expectText(c, "text", m.text);
@@ -339,13 +385,13 @@ bool exerciseRequest(const Case& c) {
     }
     case kMsgSendDiscovery: {
       SendDiscovery m;
-      EXPECT_TRUE(decodeSendDiscovery(in, m)) << c.name;
+      EXPECT_TRUE(decodeSendDiscovery(in, m)) << c.where();
       expectNum(c, "timeout_ms", m.timeout_ms);
       return true;
     }
     case kMsgSendTrace: {
       SendTrace m;
-      EXPECT_TRUE(decodeSendTrace(in, m)) << c.name;
+      EXPECT_TRUE(decodeSendTrace(in, m)) << c.where();
       expectNum(c, "timeout_ms", m.timeout_ms);
       expectNum(c, "hash_size", m.hash_size);
       expectHex(c, "hashes", m.hashes);
@@ -353,7 +399,7 @@ bool exerciseRequest(const Case& c) {
     }
     case kMsgObsPull: {
       ObsPull m;
-      EXPECT_TRUE(decodeObsPull(in, m)) << c.name;
+      EXPECT_TRUE(decodeObsPull(in, m)) << c.where();
       expectNum(c, "max", m.max);
       return true;
     }
@@ -367,9 +413,9 @@ bool exerciseRequest(const Case& c) {
     case kMsgPathGet:
     case kMsgReplyGet:
     case kMsgMeshCounters:
-      EXPECT_TRUE(c.payload.empty()) << c.name << ": this request carries no fields";
-      EXPECT_TRUE(decodeNoFields(in)) << c.name;
-      EXPECT_EQ(0u, c.fields.size()) << c.name << ": the fixture gives it fields";
+      EXPECT_TRUE(c.payload.empty()) << c.where() << ": this request carries no fields";
+      EXPECT_TRUE(decodeNoFields(in)) << c.where();
+      EXPECT_EQ(0u, c.fields.size()) << c.where() << ": the fixture gives it fields";
       return true;
     default:
       return false;
@@ -480,7 +526,7 @@ bool exerciseOutgoing(const Case& c, std::vector<uint8_t>& out) {
         m.channels[i].current_ma = int16_t(ch["current_ma"].as<int>());
         i++;
       }
-      EXPECT_EQ(kPowerChannels, i) << c.name << ": three channels, always";
+      EXPECT_EQ(kPowerChannels, i) << c.where() << ": three channels, always";
       n = encodePowerResponse(m, buf, sizeof(buf));
       break;
     }
@@ -609,9 +655,24 @@ std::vector<std::string> receiveAll(FrameReceiver& rx, const std::vector<uint8_t
 
 // ----------------------------------------------------------------------------- crc and cobs
 
+// `cases` is the one part of the two files that differs (section 11 lists the five parts). The
+// tests below therefore read `crc16`, `cobs`, `invalid` and `stream` from 1.0's file alone - and
+// this is what makes that sound: if the generator ever makes one of them depend on the minor,
+// this fails and says which part, and the test that reads it has to run both files instead.
+TEST(TheTwoFixtureFiles, DifferOnlyInTheirCases) {
+  for (const char* part : {"crc16", "cobs", "invalid", "stream"}) {
+    std::string from_10;
+    std::string from_11;
+    serializeJson(fixture(0)[part], from_10);
+    serializeJson(fixture(1)[part], from_11);
+    EXPECT_EQ(from_10, from_11) << part << ": the two files no longer agree on it";
+  }
+  EXPECT_LT(casesOf(0).size(), casesOf(1).size()) << "1.1 is 1.0's cases and four more";
+}
+
 TEST(Crc16Vectors, EveryVectorOfTheFixture) {
   int n = 0;
-  JsonArray vectors = fixture()["crc16"].as<JsonArray>();
+  JsonArray vectors = fixture(0)["crc16"].as<JsonArray>();
   for (JsonObject v : vectors) {
     const std::vector<uint8_t> data = fromHex(v["data"].as<std::string>());
     const uint16_t want = uint16_t(std::stoul(v["crc"].as<std::string>(), nullptr, 16));
@@ -636,7 +697,7 @@ TEST(Crc16Vectors, EveryVectorOfTheFixture) {
 
 TEST(CobsVectors, EveryVectorOfTheFixtureBothDirections) {
   int n = 0;
-  JsonArray vectors = fixture()["cobs"].as<JsonArray>();
+  JsonArray vectors = fixture(0)["cobs"].as<JsonArray>();
   for (JsonObject v : vectors) {
     const std::vector<uint8_t> raw = fromHex(v["raw"].as<std::string>());
     const std::vector<uint8_t> want = fromHex(v["encoded"].as<std::string>());
@@ -697,7 +758,7 @@ TEST(CasesOfTheFixture, EveryRequestDecodesToItsFields) {
   int n = 0;
   for (const Case& c : cases()) {
     if (c.kind != "request") continue;
-    EXPECT_TRUE(exerciseRequest(c)) << c.name << ": no decoder for type 0x" << std::hex
+    EXPECT_TRUE(exerciseRequest(c)) << c.where() << ": no decoder for type 0x" << std::hex
                                     << unsigned(c.type);
     n++;
   }
@@ -709,9 +770,9 @@ TEST(CasesOfTheFixture, EveryResponseAndEventEncodesToItsPayload) {
   for (const Case& c : cases()) {
     if (c.kind == "request") continue;
     std::vector<uint8_t> got;
-    ASSERT_TRUE(exerciseOutgoing(c, got)) << c.name << ": no encoder for type 0x" << std::hex
+    ASSERT_TRUE(exerciseOutgoing(c, got)) << c.where() << ": no encoder for type 0x" << std::hex
                                           << unsigned(c.type);
-    EXPECT_EQ(toHex(c.payload), toHex(got)) << c.name;
+    EXPECT_EQ(toHex(c.payload), toHex(got)) << c.where();
     n++;
   }
   EXPECT_GT(n, 0) << "the fixture has no response or event cases";
@@ -719,32 +780,32 @@ TEST(CasesOfTheFixture, EveryResponseAndEventEncodesToItsPayload) {
 
 TEST(CasesOfTheFixture, EveryCaseBuildsItsPacketAndItsFrame) {
   for (const Case& c : cases()) {
-    EXPECT_LE(c.payload.size(), size_t(kMaxPayload)) << c.name;
+    EXPECT_LE(c.payload.size(), size_t(kMaxPayload)) << c.where();
 
     uint8_t packet[kMaxPacket];
     const size_t packet_len =
         buildPacket(c.wire_type, c.seq, c.payload.data(), c.payload.size(), packet, sizeof(packet));
-    ASSERT_GT(packet_len, 0u) << c.name;
-    EXPECT_EQ(toHex(c.packet), toHex(packet, packet_len)) << c.name;
+    ASSERT_GT(packet_len, 0u) << c.where();
+    EXPECT_EQ(toHex(c.packet), toHex(packet, packet_len)) << c.where();
 
     FrameWriter w;
-    ASSERT_TRUE(w.build(c.wire_type, c.seq, c.payload.data(), c.payload.size(), false)) << c.name;
-    EXPECT_EQ(toHex(c.frame), toHex(w.bytes(), w.size())) << c.name;
+    ASSERT_TRUE(w.build(c.wire_type, c.seq, c.payload.data(), c.payload.size(), false)) << c.where();
+    EXPECT_EQ(toHex(c.frame), toHex(w.bytes(), w.size())) << c.where();
 
     // The same frame with the leading 0x00 a sender adds after 100 ms of idle line (section 2).
     FrameWriter idle;
-    ASSERT_TRUE(idle.build(c.wire_type, c.seq, c.payload.data(), c.payload.size(), true)) << c.name;
-    EXPECT_EQ("00" + toHex(c.frame), toHex(idle.bytes(), idle.size())) << c.name;
+    ASSERT_TRUE(idle.build(c.wire_type, c.seq, c.payload.data(), c.payload.size(), true)) << c.where();
+    EXPECT_EQ("00" + toHex(c.frame), toHex(idle.bytes(), idle.size())) << c.where();
 
     // And the way back: the receiver delivers exactly this packet and drops nothing.
     FrameReceiver rx;
     const std::vector<std::string> got = receiveAll(rx, c.frame, false);
-    ASSERT_EQ(1u, got.size()) << c.name;
+    ASSERT_EQ(1u, got.size()) << c.where();
     EXPECT_EQ(std::to_string(unsigned(c.wire_type)) + "/" + std::to_string(unsigned(c.seq)) + "/" +
                   toHex(c.payload),
               got[0])
-        << c.name;
-    EXPECT_EQ(0, rx.drops()) << c.name;
+        << c.where();
+    EXPECT_EQ(0, rx.drops()) << c.where();
   }
 }
 
@@ -772,18 +833,89 @@ TEST(CasesOfTheFixture, EveryCaseIsExercised) {
         << exercised[entry.first] << " were exercised";
   }
   EXPECT_EQ(in_fixture.size(), exercised.size());
-  // And the fixture is the one this task was written against: fewer cases than that is a copy
-  // that lost something.
-  EXPECT_GE(cases().size(), 69u) << "spec/fixtures/link/link-v1.json has shrunk";
-  EXPECT_EQ(size_t(kMaxPayload), fixture()["max_payload"].as<size_t>());
-  EXPECT_EQ("1.0", fixture()["link"].as<std::string>());
+  // And each file is the one this task was written against: fewer cases than that is a copy
+  // that lost something, and the `link` each one says is what names it.
+  for (size_t i = 0; i < kFixtureCount; i++) {
+    EXPECT_GE(casesOf(i).size(), kFixtures[i].least_cases)
+        << "spec/fixtures/link/" << kFixtures[i].file << " has shrunk";
+    EXPECT_EQ(size_t(kMaxPayload), fixture(i)["max_payload"].as<size_t>()) << kFixtures[i].file;
+    EXPECT_EQ(kFixtures[i].link, fixture(i)["link"].as<std::string>()) << kFixtures[i].file;
+  }
+  // 1.1's file is 1.0's plus what 1.1 adds: every case of 1.0, by name, is in it too. That is
+  // what makes running both files a check of 1.0 and not two copies of the same list.
+  for (const Case& old_case : casesOf(0)) {
+    bool found = false;
+    for (const Case& newer : casesOf(1)) {
+      if (newer.name == old_case.name && newer.frame == old_case.frame) found = true;
+    }
+    EXPECT_TRUE(found) << old_case.where() << " is not in " << kFixtures[1].file
+                       << " with the same frame";
+  }
+}
+
+// ----------------------------------------------------------------------------- 1.1's band
+
+TEST(TheBand, IsWrittenOnlyWhenTheBodySaysOnePointOneOrLater) {
+  // Section 5.1, the `band` row: "present when this body's proto_minor is 1 or more, absent in a
+  // 1.0 body". The two fixture cases are the same radio answering at the two minors; here the
+  // same HelloBody is encoded twice, with nothing changed but its minor.
+  const Case* at_11 = nullptr;
+  for (const Case& c : casesOf(1)) {
+    if (c.name == "hello response, 1.1: the band at the end") at_11 = &c;
+  }
+  ASSERT_NE(nullptr, at_11) << "link-v1.1.json has no 1.1 hello response";
+
+  Store store;
+  HelloBody b = helloBodyFromFields(at_11->fields, store);
+  ASSERT_EQ(1, b.proto_minor);
+  ASSERT_EQ("868", asText(b.band));
+
+  uint8_t out[kMaxPayload];
+  size_t n = encodeHelloResponse(b, out, sizeof(out));
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(toHex(at_11->payload), toHex(out, n)) << "the band at the end of a 1.1 body";
+
+  // EV_BOOT is that same body after a reset reason instead of the status byte, so it carries the
+  // band too (section 5.1: "a 1.1 RAK puts its band at the end whether or not the Walter knows
+  // 1.1").
+  uint8_t ev[kMaxPayload];
+  const size_t m = encodeEvBoot(kResetPowerOn, b, ev, sizeof(ev));
+  ASSERT_EQ(n, m) << "one byte, then the body";
+  EXPECT_EQ(unsigned(kResetPowerOn), unsigned(ev[0]));
+  EXPECT_EQ(toHex(out + 1, n - 1), toHex(ev + 1, m - 1)) << "EV_BOOT carries the band too";
+
+  // The same body with nothing changed but its minor: four bytes shorter, and the band nowhere
+  // in it.
+  b.proto_minor = 0;
+  uint8_t older[kMaxPayload];
+  const size_t n0 = encodeHelloResponse(b, older, sizeof(older));
+  ASSERT_GT(n0, 0u);
+  EXPECT_EQ(n - 4, n0) << "a str8 of three characters is four bytes";
+  EXPECT_EQ(std::string::npos, toHex(older, n0).find("03383638"))
+      << "a 1.0 body carries no band";
+  // Byte 2 is the body's own minor; from byte 3 on the two are the same bytes, which is what
+  // "a minor adds fields at the end of a payload and never changes what exists" means here.
+  EXPECT_EQ(0, older[2]);
+  EXPECT_EQ(1, out[2]);
+  EXPECT_EQ(toHex(older + 3, n0 - 3), toHex(out + 3, n0 - 3));
+}
+
+TEST(TheBand, AnEmptyOneIsAZeroLengthStringAndNotAnOmission) {
+  // A role that has no band to report still writes the field in a 1.1 body: a receiver reads a
+  // str8 there, and a body that simply stopped would be a 1.0 body claiming to be 1.1.
+  HelloBody b;
+  b.proto_minor = 1;
+  uint8_t out[kMaxPayload];
+  const size_t n = encodeHelloResponse(b, out, sizeof(out));
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(0x00, out[n - 1]) << "a zero-length str8 is one zero byte";
 }
 
 // ----------------------------------------------------------------------------- invalid and stream
 
 TEST(InvalidFrames, EveryOneIsRefusedAndCounted) {
   int n = 0;
-  JsonArray frames = fixture()["invalid"].as<JsonArray>();
+  JsonArray frames = fixture(0)["invalid"].as<JsonArray>();
   for (JsonObject v : frames) {
     const std::vector<uint8_t> frame = fromHex(v["frame"].as<std::string>());
     FrameReceiver rx;
@@ -801,7 +933,7 @@ TEST(InvalidFrames, EveryOneIsRefusedAndCounted) {
 }
 
 TEST(TheStream, FedWholeAndFedOneByteAtATime) {
-  JsonObject s = fixture()["stream"].as<JsonObject>();
+  JsonObject s = fixture(0)["stream"].as<JsonObject>();
   const std::vector<uint8_t> data = fromHex(s["bytes"].as<std::string>());
   std::vector<std::string> want;
   JsonArray expected = s["packets"].as<JsonArray>();
@@ -1007,16 +1139,16 @@ TEST(MalformedRequests, EveryTruncationOfEveryFixtureRequestIsRefusedOrLegal) {
     for (size_t len = 0; len < c.payload.size(); len++) {
       const bool accepted = decodeAccepts(c.type, c.payload.data(), len);
       if (min == kWholePayload || len < min) {
-        EXPECT_FALSE(accepted) << c.name << " truncated to " << len
+        EXPECT_FALSE(accepted) << c.where() << " truncated to " << len
                                << " bytes: a payload one byte short of its layout is malformed";
       } else {
-        EXPECT_TRUE(accepted) << c.name << " truncated to " << len
+        EXPECT_TRUE(accepted) << c.where() << " truncated to " << len
                               << " bytes: the last field of this layout is *rest*";
       }
       truncations++;
     }
     // The payload itself, of course, decodes.
-    EXPECT_TRUE(decodeAccepts(c.type, c.payload.data(), c.payload.size())) << c.name;
+    EXPECT_TRUE(decodeAccepts(c.type, c.payload.data(), c.payload.size())) << c.where();
   }
   EXPECT_GT(truncations, 50) << "the fixture's requests are all empty?";
 }
@@ -1194,6 +1326,15 @@ TEST(TheNumbers, AreTheTablesOfTheSpecification) {
   EXPECT_EQ(240, kMaxPayload);
   EXPECT_EQ(244, kMaxPacket);
   EXPECT_EQ(246, kReceiveBuffer);
+
+  // The version this firmware speaks (section 5.1). 1.1 since 6 November 2026; the image
+  // descriptor's link_minor and the release manifest's `link` are both this constant
+  // (test/test_image, tools/release/build_release.py).
+  EXPECT_EQ(1, kProtoMajor);
+  EXPECT_EQ(1, kProtoMinor);
+  EXPECT_EQ(kFixtures[kFixtureCount - 1].link,
+            std::to_string(kProtoMajor) + "." + std::to_string(kProtoMinor))
+      << "the newest fixture file is not the version this firmware speaks";
 
   // An observation's path_len, MeshCore's encoding (section 7).
   EXPECT_EQ(1, obsHashSize(0x00));

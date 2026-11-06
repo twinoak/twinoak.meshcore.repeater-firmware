@@ -167,12 +167,19 @@ if (Step-Wanted 'spec') {
 
 # 2. link ------------------------------------------------------------------------------------
 if (Step-Wanted 'link') {
-    $log = Join-Path $logDir 'link.log'
-    Write-Line "`n== link: the link fixture checks"
-    if (-not $python) { Add-Result 'link' $false $log 'no python' }
-    else {
-        $code = Invoke-Logged $log $python @('spec/tools/linkref.py', 'check', 'spec/fixtures/link/link-v1.json')
-        Add-Result 'link' ($code -eq 0) $log
+    # Both files of spec/fixtures/link/, which is what the codec and session suites run:
+    # link-v1.json is 1.0's and its bytes never change, link-v1.1.json is 1.0's cases and the four
+    # 1.1 adds (spec/LINK-PROTOCOL.md section 11). Checking only the newest would let a
+    # regenerated 1.0 file through, and firmware that speaks 1.0 has been released. One row and
+    # one log per file, because Invoke-Logged writes a log rather than appending to one.
+    $files = @('link-v1.json', 'link-v1.1.json')
+    foreach ($f in $files) {
+        $log = Join-Path $logDir ('link-' + $f.Replace('.json', '') + '.log')
+        Write-Line "`n== link: the fixture checks of $f"
+        if (-not $python) { Add-Result "link $f" $false $log 'no python'; continue }
+        $code = Invoke-Logged $log $python @('spec/tools/linkref.py', 'check',
+                                             "spec/fixtures/link/$f")
+        Add-Result "link $f" ($code -eq 0) $log
     }
 }
 

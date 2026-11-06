@@ -1,4 +1,4 @@
-// The numbers of the box link, protocol 1.0: message types, status codes, roles, capability
+// The numbers of the box link, protocol 1.1: message types, status codes, roles, capability
 // bits, modes and the few limits the protocol fixes. One header that reads like the tables of
 // spec/LINK-PROTOCOL.md sections 2 to 10, so that no other file of the codec carries a magic
 // number and a reviewer can hold this file against that document line by line. Section 10's
@@ -20,7 +20,12 @@ namespace link {
 
 // LINK-PROTOCOL.md section 2, "Frames".
 constexpr uint8_t kProtoMajor = 1;
-constexpr uint8_t kProtoMinor = 0;
+// 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with `band` (LINK-PROTOCOL.md 5.1). This
+// constant is the one place the firmware says which minor it speaks: the image descriptor's
+// `link_minor` is built from it (src/common/fwdesc/ImageDescriptor.cpp), the release manifest's
+// `link` is read out of this header (tools/release/build_release.py's link_version), and the
+// session answers HELLO at the highest minor both ends know.
+constexpr uint8_t kProtoMinor = 1;
 constexpr uint16_t kMaxPayload = 240;              // bytes of payload in one packet
 constexpr uint16_t kMinPacket = 4;                 // type + seq + crc16, with no payload
 constexpr uint16_t kMaxPacket = kMaxPayload + 4;   // type + seq + payload + crc16: 244
@@ -105,10 +110,9 @@ enum PeerKind : uint8_t {
 };
 
 // "A RAK that speaks the request's major answers with the highest minor both ends know"
-// (section 5.1, "Versions"). Both ends are runtime values here on purpose: with kProtoMinor at 0
-// the answer is always 0, and a comparison against the constant is a tautology the compiler is
-// right to refuse under -Werror=type-limits. This is the rule, and it will still be the rule when
-// 1.1 exists.
+// (section 5.1, "Versions"). Both ends are runtime values here on purpose: the rule is the rule
+// whatever kProtoMinor is, and while kProtoMinor was 0 a comparison against the constant was a
+// tautology the compiler was right to refuse under -Werror=type-limits.
 inline uint8_t highestMinorBothKnow(uint8_t theirs, uint8_t ours) {
   return theirs < ours ? theirs : ours;
 }

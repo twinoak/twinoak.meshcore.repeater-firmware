@@ -29,7 +29,7 @@
 namespace twinoak {
 namespace link {
 
-// What this image is: the three strings and the role HELLO reports, which are the same strings the
+// What this image is: the strings and the role HELLO reports, which are the same strings the
 // image descriptor carries (spec/FIRMWARE-MANIFEST.md section 4). Given to the session once; the
 // strings must live as long as it does.
 struct Firmware {
@@ -38,6 +38,10 @@ struct Firmware {
   const char* version = "";     // HELLO's fw_version, e.g. "0.3.0+abc1234"
   const char* board = "";       // e.g. "rak4630-single"
   const char* upstream = "";    // what it is built on, e.g. "repeater-v1.18.0+81dbae59"
+  // HELLO's `band`, link 1.1 (spec/LINK-PROTOCOL.md 5.1): the band the running image was built
+  // for, as its descriptor says it - "868". With `role` and `board` it is what a release's image
+  // is chosen by, and HELLO is where the Walter reads all three until its first install commits.
+  const char* band = "";
 };
 
 // The node itself: uptime, why it last restarted, the per-boot identifier, and the restart.

@@ -7,12 +7,12 @@
 // and what the running firmware reports in the box link's `HELLO` all come from the same three
 // strings.
 //
-// **The readers read the object, not the defines.** `HELLO`'s `role`, `board` and `fw_version`
-// are a byte and two pointers into those 96 bytes (src/roles/repeater/link/BoardLink.cpp), which
-// does three things at once: the firmware references the descriptor, so the linker keeps it; what
-// the unit says and what the image says cannot drift; and it costs no code and no RAM, because
-// the fields are already ASCII and already zero-terminated - which the static_asserts beside the
-// object are what guarantee. Parsing a descriptor (CRC and all) is for a *reader of somebody
+// **The readers read the object, not the defines.** `HELLO`'s `role`, `board`, `fw_version` and
+// - since link 1.1 - `band` are a byte and three pointers into those 96 bytes
+// (src/roles/repeater/link/BoardLink.cpp), which does three things at once: the firmware
+// references the descriptor, so the linker keeps it; what the unit says and what the image says
+// cannot drift; and it costs no code and no RAM, because the fields are already ASCII and
+// already zero-terminated - which the static_asserts beside the object are what guarantee. Parsing a descriptor (CRC and all) is for a *reader of somebody
 // else's image* - the release tooling, the Walter, the native tests - and is
 // src/common/fwdesc/Descriptor.h's `parse()`.
 
