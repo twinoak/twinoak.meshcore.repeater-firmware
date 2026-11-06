@@ -1,11 +1,12 @@
 # The system specification, copied - never edited here.
-# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 7faea5fa5e4874c4b612096ceeda7da3ac52daf3
+# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 80abba16870a0826068d24cfdc32596560f2c575 plus uncommitted changes
 # written by spec/tools/specsync.py; README.md in this directory says how
 #
 # sha256                                                           bytes  name
 f16aafa20c4ffc07da943a895c9f34befd17e9b3f87e06c7357bef07fa4b5e94    13082  FIRMWARE-MANIFEST.md
-816719365e2335cb950278cde03032cdb701c0cf580fdc65269e2243df42d467    27417  LINK-PROTOCOL.md
+1f30ae8a58361b71e1bc50931839528e2bae5fdf68e6ac3abc149bf4ca6fea33    28912  LINK-PROTOCOL.md
 6a93378991dc43343e9212e5eb41fe7aff0e7e4369de3261849010a30f93410a    22055  SYSTEM.md
+2b1ffc693b046ad6ec520b8645dd9ab31103a80a84da0d30544c63b1a6781fd6    38736  fixtures/link/link-v1.1.json
 ad03e70fe6e6081641eab336397f16e37d6b41b2ff4dd6c2db29cd911d058776    35303  fixtures/link/link-v1.json
 46292a69beece337ec8fa3ca4716a9999cbba624474feeb3eff4e27bf2e1f2e6      322  fixtures/manifest/TEST-KEY.txt
 d8c255fbfded576993b49bcf90a4d2f514358917904caf14b24561a699c539d7     1524  fixtures/manifest/base-after-the-end.hex
@@ -40,6 +41,6 @@ b5f8c150015905204eb6b8e2f7f1978fc90f4459267cc4635773974bc51d0f9d     5836  fixtu
 16dac826780fce1345832f7d346e5b5c13413e053b3044f32f3e9ba731aef0a4     5201  proposals/02-firmware-catalogue-and-updates.md
 e775af04946609e6263661c204d9dd3c84cc784077e1c1fbd91bd9223f5d8f68     4842  proposals/03-agent-core-as-a-library.md
 7049056c063ebe7ad0eecf9724f1c191a3b7eab818d2ff99cd0c7f830e1cffd4     2800  proposals/04-the-walter-provisions-a-new-radio.md
-0a5af80c6542fb5e8b24862a45d9be54de41e5f4f764eb876ae35ce374c79200    32344  tools/linkref.py
+5eff09b544b2e06b08fd7143a3ce6fbccafcb3b6c215d98938571b442dfb357b    34031  tools/linkref.py
 f2c1ec5ed41bf1d86ab62125fea07d03c3c57454dec1e886bc2d1c6fd287a031    31599  tools/manifestref.py
 650b352a0fa6fae3b66bd5c168a3ad8c622d66fe04b053511a4590802ef5fb6f     4895  tools/specsync.py
