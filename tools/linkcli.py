@@ -1237,7 +1237,7 @@ def cmd_listen(link, args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="linkcli.py",
-        description="Speak the TwinOak box link (spec/LINK-PROTOCOL.md 1.0) to a repeater.",
+        description="Speak the TwinOak box link (spec/LINK-PROTOCOL.md 1.1) to a repeater.",
         epilog="docs/link.md has the wiring and a worked session.",
     )
     where = p.add_mutually_exclusive_group(required=True)

@@ -182,6 +182,28 @@ verified here*, as before the tool existed.
   §5's four replies. Its *Through the Walter* half (§3) cannot be walked until
   the Walter has a release of its own (that repository's phase 7), and §4's
   `rak provision` is p3.4-01's line above.
+- [ ] **p3.8-02** **The published `v0.1.1` on a board, and the band off its own
+  file.** `v0.1.0`'s `.uf2` has been on the first unit's radio (6 November,
+  below); `v0.1.1`'s has not. Download the release, `sha256sum -c SHA256SUMS`,
+  and with the dummy load on the antenna port copy
+  `twinoak-repeater-rak4630-single-868-v0.1.1.uf2` onto the bootloader's drive.
+  Then the two readings that are this release: **`sensor get fw.version` reads
+  `0.1.1+<sha7>`** and not `0.0.0-dev` → ______, and `linkcli.py --port <port>
+  hello` prints `protocol 1.1` with `band 868` at the end → ______ — the same
+  string `python spec/tools/manifestref.py descriptor <the .bin of the same
+  release>` prints. That second reading is p3.8-01's §2 line walked from a
+  release's file instead of a build's, so walking it here ticks both.
+- [ ] **p3.8-02** **§3a of `docs/flashing.md` against what the radio actually
+  did on 6 November.** A Walter at `v0.1.0` left the radio's application
+  half-written and the radio came back over its own USB-C from `v0.1.0`'s `.uf2`
+  with its key: that happened, and §3a is written from the flasher's step order
+  (the Walter's `flasher.cpp` at its `v0.1.0`) and from the 0.4.4 bootloader's
+  own code, not from the desk. What only the desk knows: when the cable went
+  in, was the `RAK4631` drive **already there**, or did it take a reset, or a
+  double-tap? → ______. And afterwards, `get public.key` is the key the unit had
+  before → ______ (if it was written down; if not, that the node is still the
+  one MeshMaster knows). If the drive needed a hand, §3a's four steps are in the
+  wrong order and the page says so.
 
 - [ ] **p3.4-01** **The base boots, and the port after the reset.** The
   release's `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex` (`use: provision`;

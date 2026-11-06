@@ -98,6 +98,65 @@ The Walter checks the manifest, the signature, the image's own descriptor and
 the region before it writes anything, and holds the `HELLO` it gets afterwards
 against the descriptor it wrote. **No chip erase, ever.**
 
+## 3a. A radio left half-written
+
+**6 November 2026.** A Walter at `v0.1.0` began a first install over SWD and
+its own watchdog reset it part-way through, leaving the radio's application
+region partly written and the radio with nothing it could start. It came back
+over its own USB-C, with its key, and this is the whole of it:
+
+1. **Plug a cable into the adapter's USB-C and look for the `RAK4631` drive.**
+   An interrupted install leaves the radio in its bootloader by itself, so the
+   drive is very likely there with nothing pressed. The flasher writes *bank 0
+   holds nothing* into the bootloader's settings page **before** its first
+   erase and *bank 0 holds a valid application* only **after** the whole image
+   has been read back and its SHA-256 checked, and the vector-table page is the
+   first it erases — so between those two points the bootloader refuses the
+   application on both of its counts, and a bootloader that refuses the
+   application comes up in its own DFU and stays there.
+2. **If no drive appears, reset the radio once** — the adapter's reset button,
+   or power the box down and up. A flash that was interrupted can have left the
+   core halted over SWD, and only a reset puts it back on its own feet.
+3. **If there is still no drive, double-tap the reset button.** That works
+   whatever is in the application region: the double tap is the bootloader's
+   own — two resets on the pin within half a second — and neither the Walter
+   nor a `.uf2` can reach where the bootloader lives.
+4. **Copy the release's `.uf2` onto the drive.** §2, the ordinary way in. The
+   board reboots by itself when the copy finishes, on this release.
+
+**And it keeps its key.** The node's identity, its settings, its ACL and its
+clock file are in the file system *above* the application, from `0xED000` up,
+and neither path may write there. The Walter's flasher writes the application
+region (`0x26000`–`0xED000`) and exactly one page outside it — the bootloader's
+settings page at `0xFF000`, which is what makes an interrupted install announce
+itself as above. The bootloader's own UF2 handler writes a block only below
+`0xEA000` and refuses one above, so a `.uf2` cannot reach the file system even
+if it named an address in it; and this release's `.uf2` names none — every block
+of it is inside the application region. **No chip erase, ever.** That is
+`rak provision`'s alone (§4), and it is the one thing here that does take the
+identity with it.
+
+**The one line that shows it worked**, on the Walter's console:
+
+```
+> rak hello
+hello: protocol 1.0, role 1 (repeater), slot 0, max payload 240, boot_id 0x5eed1234
+  firmware 0.1.1+<sha7>, board rak4630-single, upstream repeater-v1.18.0+81dbae59
+  capabilities 0x7f: CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST
+```
+
+or the same question from a laptop on the link pins, which asks in 1.1 and is
+answered in it:
+
+```bash
+python3 tools/linkcli.py --port COM7 hello    # protocol 1.1, and band 868 at the end
+```
+
+`firmware` is the reading that matters: the version is *inside* the image, so
+`0.1.1+<sha7>` is this release running and `0.0.0-dev` would be a build
+somebody made by hand. A **0.1.0** Walter says `protocol 1.0` and prints no
+band — correct, and all it ever said ([`docs/link.md`](link.md) §1).
+
 ## 4. A radio fresh from the factory: the base, once
 
 A RAK4630 arrives with RAK's RUI3, not the MBR, SoftDevice and bootloader this
