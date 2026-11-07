@@ -157,6 +157,14 @@ added none), which is what this role has.
 | `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY`, `SEND_TRACE`, `REPLY_GET`, `MESH_COUNTERS` | `MESH_CLIENT` `0x08` | §2f, §2h |
 | `OBS_PULL` | `OBSERVATIONS` `0x10` | §2g |
 
+One exception among the five that are always there: a node that has **refused to make
+itself a key** (`src/roles/repeater/app/IdentityGuard.h`: its file system would not mount,
+or its settings are there and its key file is not — pile 3.9's task 01) answers `IDENTITY`
+with `ERR_STATE`, because it has no identity to answer with, and advertises `0x21` (`CLI`,
+`ATTENTION`) and nothing else. `CLI` then runs the lost mode's handler, which knows `erase`
+and `reboot` and answers every other line with the `IDENTITY LOST` explanation
+(`docs/flashing.md` §3a).
+
 | Event | Capability bit |
 |---|---|
 | `EV_BOOT` | — (always) |
@@ -356,6 +364,12 @@ EV_ATTENTION seq 8
 | 4 | a person asked for the Walter | 0 |
 | 5 | the observation ring is nearly full | records waiting |
 | 6 | a fault the node wants reported | a code of the firmware's own |
+
+The codes of reason 6, this firmware's own:
+
+| `detail` | |
+|---:|---|
+| 1 | the identity is lost: the node refused to make itself a key, and waits for `erase` and `reboot` (`src/roles/repeater/app/IdentityGuard.h`, `docs/flashing.md` §3a) |
 
 - **One at a time, with a queue behind it**, and the same reason is never
   queued twice: the second battery-low of one discharge is the same news as the

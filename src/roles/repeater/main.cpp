@@ -7,6 +7,13 @@
 //     else (the external-watchdog hook stays, as upstream has it, for a board that defines it);
 //   - the debug-only delay and the debug print lines left out - nothing the mesh says is logged
 //     as text (spec/SYSTEM.md S-12);
+//   - the identity decided before it is made: upstream calls InternalFS.begin(), which **formats
+//     a volume it cannot mount**, and then draws a new key whenever /_main.id is missing. Ours
+//     mounts without the format, reads what is there, and makes a key only where no node was;
+//     a node whose settings are there and whose key is not, or whose volume is torn, refuses
+//     and runs a lost mode - the console and the link up, no mesh, no key - until a person types
+//     `erase` and `reboot` (src/roles/repeater/app/IdentityGuard.h; pile 3.9's task 01, after
+//     the first radio lost its key on 6 November 2026);
 //   - the first boot after the_mesh.begin(): the random admin password and the first-boot
 //     profile's lines, in one hold of the preference saves (src/roles/repeater/app/FirstBoot.h,
 //     src/roles/repeater/firstboot/Profile.h, S-13 and S-12);
@@ -29,6 +36,7 @@
 // Upstream's headers come in through these two and through nothing else here
 // (src/common/board/UpstreamHeaders.h says why).
 #include "roles/repeater/app/FirstBoot.h"
+#include "roles/repeater/app/IdentityGuard.h"
 #include "roles/repeater/app/TwinOakMesh.h"
 #include "roles/repeater/clock/BoardClock.h"
 #include "roles/repeater/link/BoardLink.h"
@@ -61,6 +69,85 @@ static const size_t kReplyGuard = 64;    // and the room behind it, as the link 
 static char command[160];
 static char reply[kReplyWindow + kReplyGuard];
 
+// --- the lost mode (src/roles/repeater/app/IdentityGuard.h) ------------------------------------
+//
+// What this boot runs when it has refused to make a key: the USB console reading lines into the
+// lost mode's two-word handler, the box link in its lost shape (src/roles/repeater/link/BoardLink.h),
+// and the explanation printed again every ten seconds - the boot line alone is a race with a
+// terminal that is not open yet (docs/bench.md 0a). Nothing of the mesh, the clock keeper, the
+// sensors or the first boot runs: none of them may write the file system on this boot.
+namespace {
+
+class BoardLostActions : public twinoak::identity::LostIdentityActions {
+ public:
+  bool eraseFileSystem() override {
+    // The core's own erase-every-page, format and mount (InternalFileSystem::begin at the pinned
+    // core d541301) - the one call this boot declined to make by itself, now on a person's word.
+    return InternalFS.begin();
+  }
+  void restart() override {
+    Serial.flush();
+    Serial1.flush();
+    board.reboot();  // TwinOakBoard::reboot -> the role's beforeRestart (no file to write: the
+                     // clock keeper was never attached this boot) -> NVIC_SystemReset
+  }
+};
+
+BoardLostActions g_lost_actions;
+twinoak::identity::Verdict g_verdict;
+twinoak::identity::LostIdentityCli g_lost_cli(g_lost_actions, g_verdict);
+bool g_identity_lost = false;
+uint32_t g_lost_said_ms = 0;
+constexpr uint32_t kLostRepeatMs = 10000;
+
+void lostLoop() {
+  // The console, as upstream's loop below reads it: a line ends at '\r', '\n' is dropped, the
+  // buffer full is a line.
+  size_t len = strlen(command);
+  if (len >= sizeof(command)) {
+    command[0] = 0;
+    len = 0;
+  }
+  while (Serial.available() && len < sizeof(command) - 1) {
+    char c = Serial.read();
+    if (c != '\n') {
+      command[len++] = c;
+      command[len] = 0;
+      Serial.print(c);
+    }
+    if (c == '\r') break;
+  }
+  if (len == sizeof(command) - 1) {
+    command[sizeof(command) - 2] = '\r';
+    command[sizeof(command) - 1] = 0;
+  }
+  if (len > 0 && command[len - 1] == '\r') {
+    Serial.print('\n');
+    command[len - 1] = 0;
+    memset(reply, 0, sizeof(reply));
+    g_lost_cli.runCommand(command, reply, kReplyWindow);
+    if (reply[0]) {
+      Serial.print("  -> "); Serial.println(reply);
+    }
+    command[0] = 0;
+    g_lost_said_ms = millis();  // an answer is this boot's word for the next ten seconds
+  }
+
+  const uint32_t now = millis();
+  if (uint32_t(now - g_lost_said_ms) >= kLostRepeatMs) {
+    twinoak::identity::explainLost(g_verdict, g_lost_cli.erased(), reply, sizeof(reply));
+    Serial.println(reply);
+    reply[0] = 0;
+    g_lost_said_ms = now;
+  }
+
+  board.loop();
+  twinoak::link::linkLoop();
+  rtc_clock.tick();
+}
+
+}  // namespace
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -77,11 +164,57 @@ void setup() {
 
   fast_rng.begin(radio_driver.getRngSeed());
 
-  FILESYSTEM* fs;
-  InternalFS.begin();
-  fs = &InternalFS;
+  // --- the file system and the identity (src/roles/repeater/app/IdentityGuard.h) -------------
+  //
+  // Upstream's two lines here are `InternalFS.begin()` and `if (!store.load(...)) { new key }`.
+  // InternalFileSystem::begin() (libraries/InternalFileSytem/src/InternalFileSystem.cpp at the
+  // pinned core d541301) erases the whole region and formats it when lfs_mount fails, and a
+  // volume with nothing in it has no /_main.id, so the two lines together turn a torn file system
+  // into a new node without a word. The base class's begin() is the mount alone
+  // (Adafruit_LittleFS::begin, same library), which is what is called first; the format is made
+  // only where every byte of the region is still 0xFF - the base just written, S-5a - and
+  // otherwise this boot decides from what it found, and makes a key only where no node was.
+  using twinoak::identity::Decision;
+  using twinoak::identity::KeyFile;
+  using twinoak::identity::Volume;
+  Volume volume;
+  if (InternalFS.Adafruit_LittleFS::begin()) {
+    volume = Volume::kMounted;
+  } else if (twinoak::identity::regionIsBlank(
+                 reinterpret_cast<const uint8_t*>(twinoak::identity::kRegionStart),
+                 twinoak::identity::kRegionBytes)) {
+    // Never formatted: the core's erase, format and mount loses nothing here.
+    volume = InternalFS.begin() ? Volume::kBlank : Volume::kFormatFailed;
+  } else {
+    volume = Volume::kUnmountable;
+  }
+  FILESYSTEM* fs = &InternalFS;
   IdentityStore store(InternalFS, "");
-  if (!store.load("_main", the_mesh.self_id)) {
+  KeyFile key = KeyFile::kAbsent;
+  bool saved_prefs = false;
+  if (volume == Volume::kMounted || volume == Volume::kBlank) {
+    // "/_main.id" is what IdentityStore(InternalFS, "").load("_main", ...) opens
+    // (src/helpers/IdentityStore.cpp at the pin 81dbae59, "%s/%s.id").
+    if (InternalFS.exists("/_main.id")) {
+      key = store.load("_main", the_mesh.self_id) ? KeyFile::kLoaded : KeyFile::kUnreadable;
+    }
+    saved_prefs = twinoak::hasSavedPrefs(InternalFS);
+  }
+  g_verdict = twinoak::identity::decide(volume, key, saved_prefs);
+  if (g_verdict.decision == Decision::kRefuse) {
+    // No key is made, nothing is written, the mesh is not started. The console and the link
+    // stay up and say why, and `erase` + `reboot` - a person's - is the way to a new node.
+    g_identity_lost = true;
+    twinoak::identity::explainLost(g_verdict, false, reply, sizeof(reply));
+    Serial.println(reply);
+    reply[0] = 0;
+    command[0] = 0;
+    twinoak::link::linkBeginIdentityLost(g_lost_cli);
+    board.onBootComplete();
+    return;
+  }
+  if (g_verdict.decision == Decision::kMakeNew) {
+    // Upstream's own lines, unchanged: a random identity whose first byte is not a reserved hash.
     the_mesh.self_id = radio_new_identity();   // create new random identity
     int count = 0;
     while (count < 10 && (the_mesh.self_id.pub_key[0] == 0x00 || the_mesh.self_id.pub_key[0] == 0xFF)) {  // reserved id hashes
@@ -110,13 +243,13 @@ void setup() {
   // After radio_init(), which is where rtc_clock.begin(Wire) probes the bus for that RTC.
   twinoak::clock::begin(InternalFS);
 
-  // Decided before begin() runs loadPrefs, acted on after it: a node with no saved preferences
-  // gets a random admin password and then the first-boot profile, through upstream's own console
-  // interpreter, in one hold of the preference saves - so the settings file appears once, with
-  // both in it (src/roles/repeater/app/FirstBoot.h). Before the radio is used: nothing has been
-  // sent or received at this point, loop() has not run, and the console's two buffers are idle
-  // and are what the profile is given. The password itself is never printed.
-  const bool saved_prefs = twinoak::hasSavedPrefs(InternalFS);
+  // Decided before begin() runs loadPrefs (`saved_prefs`, read above with the key), acted on
+  // after it: a node with no saved preferences gets a random admin password and then the
+  // first-boot profile, through upstream's own console interpreter, in one hold of the
+  // preference saves - so the settings file appears once, with both in it
+  // (src/roles/repeater/app/FirstBoot.h). Before the radio is used: nothing has been sent or
+  // received at this point, loop() has not run, and the console's two buffers are idle and are
+  // what the profile is given. The password itself is never printed.
   the_mesh.begin(fs);
   const twinoak::FirstBootOutcome first_boot = twinoak::firstBoot(
       the_mesh, saved_prefs, command, sizeof(command), reply, sizeof(reply));
@@ -151,6 +284,11 @@ void setup() {
 }
 
 void loop() {
+  if (g_identity_lost) {
+    lostLoop();
+    return;
+  }
+
   // Handle Serial CLI
   size_t len = strlen(command);
   // Upstream's clamp since repeater-v1.18.0 ("ensure command buffers stay NUL-terminated"): if

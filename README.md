@@ -94,9 +94,11 @@ Not done, and deliberately: the bridge role and the dual adapter
 on 5 November 2026 and its repeater came up on the mesh — on a build flashed by
 hand. A day later it showed the one thing a release had not: on 6 November a
 Walter at `v0.1.0` left the radio's application half-written over SWD, and the
-radio came back over its own USB-C from **`v0.1.0`'s published `.uf2`, with its
-key** ([`docs/flashing.md`](docs/flashing.md) §3a is what to do and why it is
-safe). No board has run `v0.1.1`. 26 of the 102 lines of
+radio came back over its own USB-C from **`v0.1.0`'s published `.uf2` — as a
+new node**: the file system holding its key had been torn and the firmware of
+the day formatted it without a word (pile 3.9's task 01 found the mechanism and
+makes the radio refuse instead; [`docs/flashing.md`](docs/flashing.md) §3a is
+what to do and what to expect). No board has run `v0.1.1`. 26 of the 102 lines of
 [`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
 scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 

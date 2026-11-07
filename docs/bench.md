@@ -196,14 +196,15 @@ verified here*, as before the tool existed.
 - [ ] **p3.8-02** **§3a of `docs/flashing.md` against what the radio actually
   did on 6 November.** A Walter at `v0.1.0` left the radio's application
   half-written and the radio came back over its own USB-C from `v0.1.0`'s `.uf2`
-  with its key: that happened, and §3a is written from the flasher's step order
+  - **as a new node**, p3.9-01 found, not with its key as this line first said -
+  and §3a is written from the flasher's step order
   (the Walter's `flasher.cpp` at its `v0.1.0`) and from the 0.4.4 bootloader's
   own code, not from the desk. What only the desk knows: when the cable went
   in, was the `RAK4631` drive **already there**, or did it take a reset, or a
   double-tap? → ______. And afterwards, `get public.key` is the key the unit had
-  before → ______ (if it was written down; if not, that the node is still the
-  one MeshMaster knows). If the drive needed a hand, §3a's four steps are in the
-  wrong order and the page says so.
+  before → ______ (it was not: meshmaster.dk's audit log has
+  `agent.companion_changed`, which is p3.9-01's whole subject). If the drive
+  needed a hand, §3a's four steps are in the wrong order and the page says so.
 
 - [ ] **p3.4-01** **The base boots, and the port after the reset.** The
   release's `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex` (`use: provision`;
@@ -267,6 +268,45 @@ verified here*, as before the tool existed.
   `repeater-v1.17.0`). A red one is still the first test of
   `tasks/sync/TEMPLATE.md`; what the first real one found is that the click
   nobody made is the only thing between a bump and its verdict.
+- [ ] **p3.9-01** **A torn file system is a refusal, not a new node.** Only with
+  `"identity": "disposable"`, and only with a debug probe or the Walter's
+  `rak swd mem` to write one word: on a provisioned board (`get public.key`
+  written down → ______), write `0x00000000` over the first word of the file
+  system's first page, `0xED000` (the superblock pair's first block;
+  `docs/ARCHITECTURE.md` §9), and reset. The console prints `IDENTITY LOST: the
+  file system at 0xED000 would not mount and is not blank. …` within a second
+  and again every ten seconds (→ ______); there is **no** `Repeater ID:` line
+  and nothing on the air; `ver` and every other console line answer the same
+  `IDENTITY LOST` text. Over the link: `linkcli.py hello` answers with
+  `capabilities 0x21` (`CLI`, `ATTENTION`) → ______, `linkcli.py identity` is
+  refused with `ERR_STATE` (4) → ______, and a `linkcli.py status` shows
+  `attention 6` pending. Then `erase` on the console → `File system erase: OK -
+  'reboot' makes a new node`, `reboot`, and the next boot is a first boot:
+  `Repeater ID:` with a **new** key, both `First boot:` lines,
+  `firstboot.state` → `done`. (The write at `0xED000` on a board with a probe
+  is the one line of this page that touches the file system by hand; it is
+  what the 6 November reset did by accident.)
+- [ ] **p3.9-01** **Settings without a key is a refusal too.** With
+  `"identity": "disposable"`: on a provisioned board, over the link,
+  `cli "erase"` is upstream's format and takes everything, so this case cannot
+  be made from the console; it needs the file `/_main.id` removed alone, which
+  only a probe writing LittleFS can do. **Needs a person with a probe, or stays
+  a native test** (`test/test_identity`, `SettingsWithoutAKeyIsARefusal`).
+  Recorded here so that the line exists; nothing to tick without the probe.
+- [ ] **p3.9-01** **A blank region is still a first boot.** After the Walter's
+  `rak provision` (the chip erased, the base written; `docs/flashing.md` §4) and
+  `rak update --first-install` of a release at `v0.1.2` or later, the radio's
+  first boot prints `Repeater ID:` and both `First boot:` lines as before, and
+  `IDENTITY LOST` never → ______. The same after a `.uf2` on a freshly
+  provisioned radio by cable. (A region that is all `0xFF` is the one case the
+  firmware formats by itself.)
+- [ ] **p3.9-01** **§3a walked on the first unit, with the key written down
+  first.** `get public.key` → ______ before. Then the recovery as §3a has it:
+  `rak update status` on the Walter (→ ______: the last run's state), the cable,
+  the drive (already there / after a reset / after a double-tap → ______), the
+  `.uf2`, and afterwards `agent id` on the Walter and `get public.key` at the
+  console → ______ the same key as before, or `IDENTITY LOST`. **Never with a
+  Walter whose journal says *flashing-candidate*, *booting* or *proving*.**
 
 ## 1. The repeater alone on USB
 

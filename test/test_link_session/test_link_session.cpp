@@ -1335,6 +1335,7 @@ TEST(TheClock, WithNoClockInterfaceBothAreUnsupported) {
   EXPECT_EQ(0u, uint32_t(capsOf(h.services) & kCapTimePersist));
 }
 
+
 TEST(TheClock, AMalformedTimeSetIsMalformedAndTheClockIsNotAsked) {
   Harness h;
   h.feed(frameOf(kMsgTimeSet, 13, {0x01, 0x02, 0x03}));  // five bytes short of a payload
@@ -1368,6 +1369,38 @@ std::string answeredCliText(Harness& h) {
   EXPECT_EQ(kOk, r.u8());
   const Bytes text = r.rest();
   return std::string(reinterpret_cast<const char*>(text.ptr), text.len);
+}
+
+// ----------------------------------------------------------------------------- IDENTITY
+
+TEST(Identity, WithNoIdentityInterfaceItIsErrState) {
+  // A node that refused to make itself a key (src/roles/repeater/app/IdentityGuard.h) runs the
+  // link without an identity: IDENTITY is answered kErrState - "not possible now" - and not 32
+  // bytes that are not a key. Everything that needs no identity still answers: HELLO's caps are
+  // unchanged (identity has no bit), PING and STATUS are as before.
+  Harness h;
+  h.services.identity = nullptr;
+
+  h.feed(frameOf(kMsgIdentity, 21, {}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(frameOf(responseType(kMsgIdentity), 21, {kErrState})), h.lastFrame());
+
+  h.feed(frameOf(kMsgPing, 22, {0x78, 0x56, 0x34, 0x12}));
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(kOk, answeredStatus(h, type, seq));
+  EXPECT_EQ(responseType(kMsgPing), type);
+  EXPECT_EQ(22, seq);
+
+  // And with the interface back, the same request is the key again.
+  h.services.identity = &h.identity;
+  h.feed(frameOf(kMsgIdentity, 23, {}));
+  h.run();
+  ASSERT_EQ(3u, h.sent.size());
+  EXPECT_EQ(kOk, answeredStatus(h, type, seq));
+  EXPECT_EQ(responseType(kMsgIdentity), type);
 }
 
 std::vector<uint8_t> cliFrame(uint8_t seq, const std::string& line) {

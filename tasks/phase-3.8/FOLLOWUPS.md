@@ -42,7 +42,7 @@ UF2 block inside the application region with family 0xADA52840. Verdicts:
 - **02:** v0.1.1 is real and verifies. The tag is at 3d81536, the merge of #39. One gap in the recovery
   text matters (the first item below).
 
-- [ ] **[next repeater docs task; Thomas today] *A radio left half-written* never mentions the Walter's
+- [x] **[done by p3.9-01, 7 November: §3a's step 0 is `rak update status` and the box powered] *A radio left half-written* never mentions the Walter's
   journal.**
   - An unfinished *flashing-candidate* entry is resumed at the Walter's next boot (its `docs/update.md`,
     *After a power cut*). The section's own "power the box down and up" reboots the Walter. So a radio
@@ -51,13 +51,13 @@ UF2 block inside the application region with family 0xADA52840. Verdicts:
     run ended *stuck*, not in progress.
   - Add that on the production adapter the RAK's USB-C does not power the radio: the box must be on
     (the hardware repository's `BENCH-BREADBOARD.md` §6 item 7).
-- [ ] **[same task] Step 3 overstates what cannot be written.**
+- [x] **[done by p3.9-01: step 3 names the Walter's install and the `.uf2` of family 0xADA52840, and what each can write] Step 3 overstates what cannot be written.**
   - *Neither the Walter nor a `.uf2` can reach where the bootloader lives* is not true in general:
     `rak provision` writes the bootloader, and the bootloader's UF2 handler has a bootloader-family
     branch that stages a new one.
   - Narrow it to *the Walter's install, and this release's `.uf2` (family 0xADA52840)*.
   - The conclusion holds: neither writes 0xED000–0xF4000, so the key survives.
-- [ ] **[same task] Step 1 was read from the RAK bootloader 0.4.3's source**; the radio has 0.4.4,
+- [x] **[done by p3.9-01: `bootloader_app_is_valid` found in the 0.4.4 binary at 0xF5468, the same tests as 0.4.3's; the BLE OTA path noted as not read out] Step 1 was read from the RAK bootloader 0.4.3's source**; the radio has 0.4.4,
   whose one stated change is *BLE OTA recovery*, which may touch the invalid-application path. Check it
   in 0.4.4, or say what was checked.
 - [ ] **[Thomas] The published v0.1.1 notes say *The Walter it goes with: None yet … pile 8,
@@ -75,7 +75,7 @@ UF2 block inside the application region with family 0xADA52840. Verdicts:
   - Spec (the reviewer's): `FIRMWARE-MANIFEST.md` §4 still speaks of *the same three strings* in
     `HELLO`; the band is a fourth.
   - Report 02's stale p3.7-01 bench sentence belongs here as an item.
-- [ ] **[first, before any other repeater docs task] The first radio did *not* keep its key.**
+- [x] **[done by p3.9-01: the cause is the core's `InternalFS.begin()` formatting a volume a torn page had made unmountable; the firmware now refuses and says so; §3a says what to expect and what to re-apply] The first radio did *not* keep its key.**
   - **What happened.** meshmaster.dk's audit log has `agent.companion_changed` for LTE test node from
     `ebf91b805ca34a50…9773174` to `776cdcd5ca758256…f0ef7ac2`. It arrived in the first heartbeat after
     Thomas recovered the half-written radio with v0.1.0's `.uf2` on 6 November (Walter 0.1.0+1f4e7f8,

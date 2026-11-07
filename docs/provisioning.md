@@ -427,7 +427,11 @@ MeshMaster, and one of them exists nowhere else:
    `python3 tools/linkcli.py --port COM7 identity` prints it (`pubkey`, with the
    advert `name` beside it), and `get public.key` on the console prints the same
    64 hex digits. It is stable as long as the file system is: an `erase` makes a
-   new one.
+   new one. A file system that is **torn** - a page lost to a reset in the
+   middle of a write - no longer makes one by itself: since pile 3.9 the radio
+   refuses, prints `IDENTITY LOST` and waits for `erase` and `reboot`
+   (`docs/flashing.md` §3a), so MeshMaster is never told a new key that nobody
+   decided to make.
 2. **The admin password that was just set.** MeshMaster's agent logs in to a
    repeater with it, and **the copy set in §2 or §3 is the only copy there is**.
    Nothing in this firmware can read it back out — `get` has no branch for it,

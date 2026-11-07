@@ -35,6 +35,7 @@ src/
     repeater/
       main.cpp          ours: setup() and loop(), replacing upstream's example main
       app/              TwinOakMesh (the subclass), FirstBoot (the one test and the one write),
+                        IdentityGuard (a key is made only where no node was; the lost mode),
                         Settings (our keys on upstream's CLI, portable), RoleHooks.cpp (this
                         role's half of them)
       firstboot/        the first-boot profile: a table of console command lines, the runner that
@@ -734,6 +735,29 @@ The Walter flashes the application region over SWD: it erases exactly the pages 
 covers and writes them. It never erases the chip, the file system or UICR. A firmware change that
 moves the end of the application region is a change to the manifest's `app_region` and is checked
 by the release tooling against the linker script (`spec/FIRMWARE-MANIFEST.md` §2).
+
+**The file system** is the Adafruit core's `InternalFS`: LittleFS 1.7 in 128-byte blocks over
+seven 4096-byte pages, `0xED000`..`0xF4000` (`libraries/InternalFileSytem/src/InternalFileSystem.cpp`
+at the pinned core d541301). Two facts of that layer decide what a reset can do to a node. The
+core rewrites a page by **erasing it and programming it again** through a one-page cache
+(`flash_cache.c`, `flash_cache_flush`), so a reset, a halt over SWD or a power dip inside that
+window takes 32 blocks at once - and the first page holds the superblock pair and the root
+directory, so a torn first page is a volume that will not mount. And `InternalFileSystem::begin()`
+answers a volume that will not mount by **erasing the region and formatting it**. Upstream's
+`setup()` calls that and then draws a new key when `/_main.id` is missing, which is how the first
+radio became a new node on 6 November 2026 (pile 3.9, task 01). This firmware mounts with the base
+class's `begin()` instead - the mount alone - and decides from what it finds
+(`src/roles/repeater/app/IdentityGuard.h`): a blank region (the base just written) is formatted
+and is a first boot; a mounted volume with neither a key file nor settings is a first boot; the
+saved key is the node; and everything else - a torn volume, a key file that does not read,
+settings without a key - is a **lost identity**, on which no key is made, nothing is written, the
+mesh is not started, and the console and the link say so until a person types `erase` and
+`reboot`. The link in that mode is `linkBeginIdentityLost` (section 4): `IDENTITY` is `ERR_STATE`,
+`caps` is `CLI | ATTENTION`, and attention reason 6 carries detail 1. The firmware's own writes
+to the volume are few and known: the clock file (`src/roles/repeater/clock/`), about once an hour
+and **twice in the first seconds of a boot** that restored a clock - the hour's margin, and the
+Walter's time set bringing it down - and `/prefs.json` on every `set`; each is one page erased
+and programmed.
 
 **The base** - the MBR, the SoftDevice and the bootloader, with the two UICR words the MBR reads -
 is not this firmware's and is not built here. A factory RAK4630 does not have it (it carries RAK's

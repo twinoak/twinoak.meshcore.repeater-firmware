@@ -9,6 +9,7 @@
 #include "common/link/session/Session.h"
 #include "common/power/BoardPower.h"
 #include "common/version/Version.h"
+#include "roles/repeater/app/IdentityGuard.h"  // kFaultCodeIdentityLost
 #include "roles/repeater/clock/BoardClock.h"
 #include "roles/repeater/clock/LinkClock.h"
 #include "roles/repeater/meshclient/LinkObservations.h"
@@ -182,26 +183,34 @@ meshclient::LinkMeshClient* g_mesh_client = nullptr;
 
 }  // namespace
 
-void linkBegin(TwinOakMesh& mesh) {
-  g_system.drawBootId();
-  g_identity.attach(&mesh);
-  g_cli.attach(&mesh);
-  g_mesh_client = &mesh.meshClient();
+namespace {
 
-  // What this image is, read out of the image's own descriptor (spec/FIRMWARE-MANIFEST.md
-  // section 4) and not from the defines a second time: the bytes the Walter will check against
-  // the manifest are the bytes HELLO answers from, so the two cannot drift. Reading them here is
-  // also the reference that keeps the linker from discarding the descriptor.
-  //
-  // `slot` is the only field that is not the descriptor's: the descriptor says which radio
-  // positions this image may go in (0xFF, any, on a single-RAK board) and HELLO says which
-  // position this unit *is* (src/common/board/Boards.h, spec/LINK-PROTOCOL.md 5.1).
+// What this image is, read out of the image's own descriptor (spec/FIRMWARE-MANIFEST.md
+// section 4) and not from the defines a second time: the bytes the Walter will check against
+// the manifest are the bytes HELLO answers from, so the two cannot drift. Reading them here is
+// also the reference that keeps the linker from discarding the descriptor.
+//
+// `slot` is the only field that is not the descriptor's: the descriptor says which radio
+// positions this image may go in (0xFF, any, on a single-RAK board) and HELLO says which
+// position this unit *is* (src/common/board/Boards.h, spec/LINK-PROTOCOL.md 5.1).
+void fillFirmware() {
   g_firmware.role = fwdesc::imageRole();
   g_firmware.slot = fwdesc::imageSlot();
   g_firmware.version = fwdesc::imageVersion();  // "0.0.0-dev" unless the release says otherwise
   g_firmware.board = fwdesc::imageBoard();      // "rak4630-single"
   g_firmware.band = fwdesc::imageBand();        // "868", HELLO's `band` in link 1.1
   g_firmware.upstream = upstreamString();       // "<tag>+<pin8>"
+}
+
+}  // namespace
+
+void linkBegin(TwinOakMesh& mesh) {
+  g_system.drawBootId();
+  g_identity.attach(&mesh);
+  g_cli.attach(&mesh);
+  g_mesh_client = &mesh.meshClient();
+
+  fillFirmware();
 
   g_services.firmware = &g_firmware;
   g_services.system = &g_system;
@@ -234,6 +243,31 @@ void linkBegin(TwinOakMesh& mesh) {
   // board nothing does (tasks/phase-1/reports/04.md, "Where the surviving RAM would live"), so
   // the answer here is false and the call is the seam a board that can answer it would fill in.
   g_attention.noteBoot(g_system.resetReason(), /*walter_was_asleep=*/false, millis());
+}
+
+void linkBeginIdentityLost(CliAccess& cli) {
+  g_system.drawBootId();
+  fillFirmware();
+
+  // The four that are always there, less the identity, which this boot has not got; the lost
+  // mode's handler behind CLI; the attention machine, so that the fault reaches a sleeping
+  // Walter. Nothing else: no clock (nothing may write the file system this boot), no telemetry,
+  // no mesh client, no observations - and their bits are absent from HELLO's `caps` because the
+  // pointers are null (session/Interfaces.h, capsOf), so a Walter asking for them is answered
+  // ERR_UNSUPPORTED and not with something made up.
+  g_services.firmware = &g_firmware;
+  g_services.system = &g_system;
+  g_services.identity = nullptr;  // IDENTITY => ERR_STATE (Session.cpp)
+  g_services.cli = &cli;          // => kCapCli
+  g_services.attention = &g_attention;  // => kCapAttention
+
+  g_transport.begin();  // Serial1 up, and the session's EV_BOOT queued
+
+  g_attention.noteBoot(g_system.resetReason(), /*walter_was_asleep=*/false, millis());
+  // Section 8's reason 6, "a fault the node wants reported", with this firmware's code for the
+  // condition (docs/link.md's attention table). Once: the machine's hourly limit per reason makes
+  // the second raise a no-op anyway, and a boot that stays in this mode has nothing new to say.
+  g_attention.raise(kAttentionFault, identity::kFaultCodeIdentityLost, millis());
 }
 
 void linkLoop() {

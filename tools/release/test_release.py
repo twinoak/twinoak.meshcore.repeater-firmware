@@ -372,8 +372,14 @@ class TheManifest(ReleaseTestCase):
 
     def test_the_link_version_is_the_firmwares_own_constant(self):
         """`link` is read from src/common/link/codec/Numbers.h - what the firmware speaks - and
-        not from a fixture file's name (p3.8-01). The newest fixture file in spec/ must say the
-        same thing, or the firmware and the specification have drifted apart."""
+        not from a fixture file's name (p3.8-01). The specification must have a fixture file for
+        that version saying so, and the firmware may not speak a version the specification's
+        newest fixture does not have: that is the firmware ahead of the specification, which is
+        drift. The specification ahead of the firmware - a newer fixture in spec/ than the version
+        the firmware speaks - is a pile in progress (spec/LINK-PROTOCOL.md section 11 names the
+        newest file; the task that implements it moves the constant), not a red release: pile
+        3.9's 1.2 arrived in spec/ before its task 02 had run, and task 01 found every release of
+        the day red for it (p3.9-01)."""
         path = os.path.join(REPO, build_release.LINK_NUMBERS)
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
@@ -381,11 +387,26 @@ class TheManifest(ReleaseTestCase):
         minor = int(re.search(r"kProtoMinor\s*=\s*(\d+)", text).group(1))
         self.assertEqual(self.release()["link"], {"major": major, "minor": minor})
 
-        newest = max(glob.glob(os.path.join(REPO, "spec", "fixtures", "link", "link-v*.json")),
-                     key=lambda p: tuple(int(n) for n in os.path.basename(p)[6:-5].split(".")))
-        with open(newest, "r", encoding="utf-8") as fh:
+        def version_of(path):
+            return tuple(int(n) for n in os.path.basename(path)[6:-5].split("."))
+
+        files = glob.glob(os.path.join(REPO, "spec", "fixtures", "link", "link-v*.json"))
+        self.assertTrue(files, "no link fixture in spec/fixtures/link/")
+        # The fixture of the version the firmware speaks: `link-v1.json` is 1.0's and
+        # `link-v1.1.json` is 1.1's (section 11), so a minor of 0 is the file with no minor.
+        own_name = "link-v%d.json" % major if minor == 0 else "link-v%d.%d.json" % (major, minor)
+        own = os.path.join(REPO, "spec", "fixtures", "link", own_name)
+        self.assertTrue(os.path.exists(own),
+                        "%s: the firmware speaks %d.%d and the specification has no fixture for it"
+                        % (own_name, major, minor))
+        with open(own, "r", encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["link"], "%d.%d" % (major, minor),
-                             "%s is not the version the firmware speaks" % os.path.basename(newest))
+                             "%s does not say the version its name does" % own_name)
+        newest = max(files, key=version_of)
+        self.assertGreaterEqual(version_of(newest), (major, minor),
+                                "the firmware speaks %d.%d and the newest fixture is %s: the "
+                                "firmware is ahead of the specification" % (major, minor,
+                                                                           os.path.basename(newest)))
 
     def test_the_link_version_is_refused_when_the_constants_are_gone(self):
         """A rename of either constant is a release that stops, not a release that guesses."""
