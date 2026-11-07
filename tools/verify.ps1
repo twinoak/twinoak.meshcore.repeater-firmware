@@ -7,7 +7,10 @@
 
     1. spec     python spec/tools/specsync.py verify spec        - the copy of the specification
                                                                    is byte for byte its manifest's
-    2. link     python spec/tools/linkref.py check <fixture>     - the link fixture is well formed
+    2. link     python spec/tools/linkref.py check <fixture>     - every link fixture of
+                                                                   spec/fixtures/link/ is well
+                                                                   formed (read off the
+                                                                   directory, not a list here)
     3. build    pio run -e <env> for every board environment of platformio.ini (every [env:*]
                 but native - read from the file, so there is no second list to forget); the
                 images are copied to out/build/<env>/
@@ -167,12 +170,20 @@ if (Step-Wanted 'spec') {
 
 # 2. link ------------------------------------------------------------------------------------
 if (Step-Wanted 'link') {
-    # Both files of spec/fixtures/link/, which is what the codec and session suites run:
+    # **Every** file of spec/fixtures/link/, which is what the codec and session suites run:
     # link-v1.json is 1.0's and its bytes never change, link-v1.1.json is 1.0's cases and the four
-    # 1.1 adds (spec/LINK-PROTOCOL.md section 11). Checking only the newest would let a
-    # regenerated 1.0 file through, and firmware that speaks 1.0 has been released. One row and
-    # one log per file, because Invoke-Logged writes a log rather than appending to one.
-    $files = @('link-v1.json', 'link-v1.1.json')
+    # 1.1 adds, link-v1.2.json is 1.1's and the fourteen 1.2 adds (spec/LINK-PROTOCOL.md
+    # section 11). Checking only the newest would let a regenerated older file through, and
+    # firmware that speaks 1.0 has been released. Read off the directory and not written out
+    # here, so that the next minor's file is checked without this script changing - the same
+    # habit as the board environments, which are read off platformio.ini. One row and one log per
+    # file, because Invoke-Logged writes a log rather than appending to one; the order is
+    # immaterial.
+    $files = @(Get-ChildItem -Path (Join-Path $root 'spec\fixtures\link') -Filter 'link-v*.json' |
+               Sort-Object Name | ForEach-Object { $_.Name })
+    if ($files.Count -eq 0) {
+        Add-Result 'link' $false (Join-Path $logDir 'link.log') 'no fixture in spec/fixtures/link'
+    }
     foreach ($f in $files) {
         $log = Join-Path $logDir ('link-' + $f.Replace('.json', '') + '.log')
         Write-Line "`n== link: the fixture checks of $f"

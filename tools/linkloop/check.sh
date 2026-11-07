@@ -164,6 +164,45 @@ echo "   and with base permission alone, which is what a guest gets:"
 $cli lpp 1
 
 echo
+echo "== local (5.9, link 1.2): the node's own status, neighbours, access list and owner info,"
+echo "   answered with no air at all. On a board these are upstream's own handler's bytes; here"
+echo "   they are the miniature of it in linkloop.cpp, read back through the firmware's own"
+echo "   session and codec."
+$cli local status
+$cli local neighbours
+$cli local neighbours --count 1 --offset 1 --order 2 --prefix-len 8
+$cli local access-list
+$cli local owner-info
+
+echo
+echo "== and its refusals: telemetry is LPP_GET's (ERR_RANGE, and the node is never asked), a"
+echo "   neighbours request of a version the handler does not know and an access-list request"
+echo "   whose reserved bytes are not zero are answered nothing, which is ERR_RANGE too. And"
+echo "   33 bytes of data this tool will not build at all, because the reference implementation"
+echo "   will not - so a Walter at 1.2 cannot send one; the node's own ERR_MALFORMED for a frame"
+echo "   that carried more anyway is held in test/test_link_session."
+for pair in "0x03||telemetry" \
+            "0x06|09000000000600112233|a neighbours version it does not know" \
+            "0x05|0100|reserved bytes that are not zero" \
+            "0x02||keep-alive, which belongs to a login session"; do
+  type="${pair%%|*}"; rest="${pair#*|}"; data="${rest%%|*}"; why="${rest##*|}"
+  if $cli local raw --type "$type" --data "$data" > "$out/local-refused.log" 2>&1; then
+    cat "$out/local-refused.log"
+    echo "$why should have been refused" >&2
+    exit 1
+  fi
+  cat "$out/local-refused.log"
+done
+long_data=$(printf 'aa%.0s' $(seq 33))
+if $cli local raw --type 0x06 --data "$long_data" > "$out/local-long.log" 2>&1; then
+  cat "$out/local-long.log"
+  echo "33 bytes of data should have been refused" >&2
+  exit 1
+fi
+cat "$out/local-long.log"
+echo "   refused, as they should be"
+
+echo
 echo "== power with the B-board unplugged: valid 0, every channel 0, and the node still answers"
 python3 tools/linkcli.py --pipe "$out/linkloop --drop-ina" power
 

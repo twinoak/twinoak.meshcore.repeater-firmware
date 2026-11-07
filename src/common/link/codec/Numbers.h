@@ -1,4 +1,4 @@
-// The numbers of the box link, protocol 1.1: message types, status codes, roles, capability
+// The numbers of the box link, protocol 1.2: message types, status codes, roles, capability
 // bits, modes and the few limits the protocol fixes. One header that reads like the tables of
 // spec/LINK-PROTOCOL.md sections 2 to 10, so that no other file of the codec carries a magic
 // number and a reviewer can hold this file against that document line by line. Section 10's
@@ -20,12 +20,13 @@ namespace link {
 
 // LINK-PROTOCOL.md section 2, "Frames".
 constexpr uint8_t kProtoMajor = 1;
-// 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with `band` (LINK-PROTOCOL.md 5.1). This
+// 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with `band` (LINK-PROTOCOL.md 5.1).
+// 1.2 (2026-11-07): LOCAL_REQUEST and its capability bit (LINK-PROTOCOL.md 5.9). This
 // constant is the one place the firmware says which minor it speaks: the image descriptor's
 // `link_minor` is built from it (src/common/fwdesc/ImageDescriptor.cpp), the release manifest's
 // `link` is read out of this header (tools/release/build_release.py's link_version), and the
 // session answers HELLO at the highest minor both ends know.
-constexpr uint8_t kProtoMinor = 1;
+constexpr uint8_t kProtoMinor = 2;
 constexpr uint16_t kMaxPayload = 240;              // bytes of payload in one packet
 constexpr uint16_t kMinPacket = 4;                 // type + seq + crc16, with no payload
 constexpr uint16_t kMaxPacket = kMaxPayload + 4;   // type + seq + payload + crc16: 244
@@ -59,6 +60,7 @@ enum MsgType : uint8_t {
   kMsgPowerGet = 0x0A,
   kMsgEnvGet = 0x0B,
   kMsgLppGet = 0x0C,
+  kMsgLocalRequest = 0x0D,
   kMsgJobBegin = 0x20,
   kMsgJobEnd = 0x21,
   kMsgPathSet = 0x22,
@@ -134,6 +136,7 @@ enum Capability : uint32_t {
   kCapObservations = 0x10,
   kCapAttention = 0x20,
   kCapTimePersist = 0x40,
+  kCapLocalRequest = 0x80,  // 1.2
 };
 
 // ----------------------------------------------------------------------------- section 5.3
@@ -218,6 +221,43 @@ enum LppPerm : uint8_t {
   kLppLocation = 0x02,
   kLppEnvironment = 0x04,
 };
+
+// ----------------------------------------------------------------------------- section 5.9
+
+// LOCAL_REQUEST's `req_type`: the four of MeshCore's own request types this link carries, with
+// MeshCore's numbers (LINK-PROTOCOL.md 5.9's table). Upstream spells them out in
+// examples/simple_repeater/MyMesh.cpp:46-51 at the pin 81dbae59 - in the .cpp and not in a
+// header, so nothing of ours can include them and they are written again here, against that
+// table. **Every other value is kErrRange**, which is why there is a list and not a range:
+// 0x03 telemetry has a local form of its own (LPP_GET, section 5.8) and 0x02 keep-alive belongs
+// to a login session this link does not have.
+enum LocalRequestType : uint8_t {
+  kLocalReqStatus = 0x01,      // REQ_TYPE_GET_STATUS: the node's RepeaterStats
+  kLocalReqAccessList = 0x05,  // REQ_TYPE_GET_ACCESS_LIST: 6-byte key prefix + permissions, each
+  kLocalReqNeighbours = 0x06,  // REQ_TYPE_GET_NEIGHBOURS: a page of the neighbour table
+  kLocalReqOwnerInfo = 0x07,   // REQ_TYPE_GET_OWNER_INFO: version, node name, owner info
+};
+
+// Whether that is one of the four (section 5.9: "any other req_type is ERR_RANGE").
+inline bool isLocalRequestType(uint8_t req_type) {
+  return req_type == kLocalReqStatus || req_type == kLocalReqAccessList ||
+         req_type == kLocalReqNeighbours || req_type == kLocalReqOwnerInfo;
+}
+
+// "`data` over 32 bytes is ERR_MALFORMED" (section 5.9). An empty payload - not even a
+// `req_type` - is kErrMalformed too, and the decoder refuses both.
+constexpr uint8_t kLocalRequestMaxData = 32;
+
+// The four bytes every one of upstream's replies begins with, which are the reflected sender
+// timestamp used as a tag and are **not** on this link: "the response's `data` is that answer
+// after its four tag bytes" (section 5.9). The handler's return value counts them.
+constexpr uint8_t kLocalRequestTagBytes = 4;
+
+// What LocalRequestAccess::localRequest() returns when the node's handler answered nothing at
+// all - a request type it does not know, a neighbours request of a version it does not know, an
+// access-list request whose reserved bytes are not zero. Over the mesh that is silence; here it
+// is kErrRange (section 5.9).
+constexpr int kLocalRequestNoAnswer = -1;
 
 // ----------------------------------------------------------------------------- section 6.1
 

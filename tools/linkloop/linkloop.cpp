@@ -16,9 +16,9 @@
 //   out/linkloop/linkloop --bench 2000     # the worst-case pass, timed
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
-// a session with a board that has what phase 1's tasks 03 to 06 and phase 2's tasks 01 to 03
-// implement: caps 0x7f (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST).
-// Six things in it are the firmware's own code and not a stub:
+// a session with a board that has what phase 1's tasks 03 to 06, phase 2's tasks 01 to 03 and
+// pile 3.9's task 02 implement: caps 0xff (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION,
+// TIME_PERSIST, LOCAL_REQUEST). Six things in it are the firmware's own code and not a stub:
 //
 //   - the **ClockKeeper** (src/roles/repeater/clock/), with out/linkloop/clock where the board has its flash
 //     file, so `time` and `time set` exercise the rules the firmware will run; one run of this
@@ -47,6 +47,11 @@
 //     runs at startup the way a board with no saved preferences does - the shipped table through
 //     the `set` miniature below - so that `sensor get firstboot.state` and
 //     `linkcli.py provision` are watched with no board at all.
+//
+// What cannot be here either is upstream's **request handler**, which link 1.2's LOCAL_REQUEST
+// answers from (src/roles/repeater/link/LocalRequest.h): LoopLocalRequest below builds the four
+// answers of section 5.9 in upstream's own layouts, so that `linkcli.py local ...` is exercised
+// through the firmware's real session and codec with no board.
 //
 // What cannot be here is upstream's interpreter itself, so every other command line is answered
 // by the handful of canned lines below - plus a miniature of its `set` branch and its `password`
@@ -404,6 +409,169 @@ class LoopCli : public CliAccess {
 
 LoopCli g_cli;
 
+// --- LOCAL_REQUEST (spec/LINK-PROTOCOL.md 5.9, link 1.2) ---------------------------------------
+
+// A miniature of the node's own request handler, for the same reason LoopCli is a miniature of
+// upstream's console: the real one **is** upstream's `MyMesh::handleRequest`, reached through
+// src/common/cxx/PrivateMember.h (src/roles/repeater/link/LocalRequest.h), and a host build has
+// no MeshCore. So the four answers are built here in upstream's own layouts - the status block
+// field for field, a neighbour table of three with the request's count, offset, order and prefix
+// length honoured, an access list of two, and the three lines of owner info - and
+// `linkcli.py local ...` then reads them back with the firmware's own session and codec in
+// between. What a real repeater answers is upstream's and is on the bench list
+// (tasks/phase-3.9/reports/02.md).
+//
+// The refusals are the interesting part and are upstream's own shape: a neighbours request of a
+// version it does not know and an access-list request whose reserved bytes are not zero answer
+// **nothing**, which the session turns into ERR_RANGE (section 5.9).
+class LoopLocalRequest : public LocalRequestAccess {
+ public:
+  int localRequest(uint8_t req_type, Bytes data, uint8_t* out, size_t cap) override {
+    switch (req_type) {
+      case kLocalReqStatus:
+        return status(out, cap);
+      case kLocalReqAccessList:
+        // Upstream's `if (res1 == 0 && res2 == 0)`: anything else falls through to `return 0`.
+        if (data.len < 2 || data.ptr[0] != 0 || data.ptr[1] != 0) return kLocalRequestNoAnswer;
+        return accessList(out, cap);
+      case kLocalReqNeighbours:
+        return neighbours(data, out, cap);
+      case kLocalReqOwnerInfo:
+        return ownerInfo(out, cap);
+      default:
+        // The session refuses every other type before this call; a miniature says so too.
+        return kLocalRequestNoAnswer;
+    }
+  }
+
+ private:
+  // `RepeaterStats` as examples/simple_repeater/MyMesh.h declares it at the pin 81dbae59: 56
+  // bytes, little-endian, naturally aligned and therefore unpadded. The numbers are the ones
+  // spec/fixtures/link/link-v1.2.json's own status case carries, so that what comes back through
+  // the pipe is the fixture's bytes.
+  int status(uint8_t* out, size_t cap) {
+    uint8_t s[56] = {0};
+    size_t at = 0;
+    putU16(s, at, 4012);        // batt_milli_volts
+    putU16(s, at, 0);           // curr_tx_queue_len
+    putU16(s, at, 0xFF90);      // noise_floor: -112
+    putU16(s, at, 0xFF9F);      // last_rssi: -97
+    putU32(s, at, 12345);       // n_packets_recv
+    putU32(s, at, 6789);        // n_packets_sent
+    putU32(s, at, 1834);        // total_air_time_secs
+    putU32(s, at, 86400);       // total_up_time_secs
+    putU32(s, at, 2100);        // n_sent_flood
+    putU32(s, at, 840);         // n_sent_direct
+    putU32(s, at, 9800);        // n_recv_flood
+    putU32(s, at, 1500);        // n_recv_direct
+    putU16(s, at, 0);           // err_events
+    putU16(s, at, 25);          // last_snr: 6.25 dB x 4
+    putU16(s, at, 12);          // n_direct_dups
+    putU16(s, at, 3400);        // n_flood_dups
+    putU32(s, at, 5400);        // total_rx_air_time_secs
+    putU32(s, at, 7);           // n_recv_errors
+    return copyOut(s, sizeof(s), out, cap);
+  }
+
+  // Upstream's access-list answer: a six-byte public-key prefix and a permissions byte per entry
+  // (PERM_ACL_* of src/helpers/ClientACL.h). An admin and a read-only client.
+  int accessList(uint8_t* out, size_t cap) {
+    const uint8_t s[14] = {0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x03,
+                           0x7f, 0x3a, 0x9c, 0x02, 0xe1, 0xb4, 0x01};
+    return copyOut(s, sizeof(s), out, cap);
+  }
+
+  // Upstream's neighbours answer: the table's total and this page's count, each an i16, then one
+  // entry per neighbour - `pubkey_prefix_length` bytes of its key, `heard_seconds_ago` as a u32
+  // and its SNR as one signed byte.
+  int neighbours(Bytes data, uint8_t* out, size_t cap) {
+    // Upstream reads these out of its own `payload`, whose byte 0 is the req_type this link
+    // carries separately: payload[1] version, [2] count, [3..4] offset, [5] order, [6] the key
+    // prefix length, and four random bytes after them that it never reads
+    // (examples/simple_repeater/MyMesh.cpp:277-290 at the pin). So in this link's `data` they are
+    // one lower, and the four random bytes are optional.
+    if (data.len < 6 || data.ptr[0] != 0) return kLocalRequestNoAnswer;  // a version it knows
+    const uint8_t count = data.ptr[1];
+    const uint16_t offset = uint16_t(uint16_t(data.ptr[2]) | (uint16_t(data.ptr[3]) << 8));
+    const uint8_t order = data.ptr[4];
+    uint8_t prefix = data.ptr[5];
+    if (prefix > kPubKeyLen) prefix = kPubKeyLen;  // upstream clamps it too
+
+    struct Neighbour {
+      uint8_t key[kPubKeyLen];
+      uint32_t heard_ago;
+      int8_t snr_q4;
+    };
+    Neighbour table[3];
+    const uint32_t ago[3] = {41, 3600, 120};
+    const int8_t snr[3] = {29, -10, 4};
+    for (uint8_t i = 0; i < 3; i++) {
+      for (uint8_t j = 0; j < kPubKeyLen; j++) table[i].key[j] = uint8_t(0x11 * (i + 1) + j);
+      table[i].heard_ago = ago[i];
+      table[i].snr_q4 = snr[i];
+    }
+    // The four orders of section 5.9's table, newest meaning least long ago.
+    uint8_t order_of[3] = {0, 1, 2};
+    for (uint8_t i = 0; i < 3; i++) {
+      for (uint8_t j = uint8_t(i + 1); j < 3; j++) {
+        const Neighbour& a = table[order_of[i]];
+        const Neighbour& b = table[order_of[j]];
+        bool swap = false;
+        if (order == 0) swap = b.heard_ago < a.heard_ago;
+        if (order == 1) swap = b.heard_ago > a.heard_ago;
+        if (order == 2) swap = b.snr_q4 > a.snr_q4;
+        if (order == 3) swap = b.snr_q4 < a.snr_q4;
+        if (swap) {
+          const uint8_t t = order_of[i];
+          order_of[i] = order_of[j];
+          order_of[j] = t;
+        }
+      }
+    }
+
+    uint8_t s[4 + 3 * (kPubKeyLen + 5)] = {0};
+    size_t at = 0;
+    putU16(s, at, 3);  // the whole table
+    size_t count_at = at;
+    putU16(s, at, 0);  // this page's count, filled in below
+    uint16_t given = 0;
+    for (uint16_t i = 0; i < count && i + offset < 3; i++) {
+      const Neighbour& n = table[order_of[i + offset]];
+      for (uint8_t j = 0; j < prefix; j++) s[at++] = n.key[j];
+      putU32(s, at, n.heard_ago);
+      s[at++] = uint8_t(n.snr_q4);
+      given++;
+    }
+    size_t put_at = count_at;
+    putU16(s, put_at, given);
+    return copyOut(s, at, out, cap);
+  }
+
+  // Upstream's owner-info answer: the firmware version, the node's name and its owner info, one
+  // per line.
+  int ownerInfo(uint8_t* out, size_t cap) {
+    const char* text = "v1.18.0\nTwinOak linkloop\nThomas|twinoak.dk";
+    size_t n = 0;
+    while (text[n] != 0) n++;
+    return copyOut(reinterpret_cast<const uint8_t*>(text), n, out, cap);
+  }
+
+  static void putU16(uint8_t* s, size_t& at, uint16_t v) {
+    s[at++] = uint8_t(v & 0xFF);
+    s[at++] = uint8_t(v >> 8);
+  }
+  static void putU32(uint8_t* s, size_t& at, uint32_t v) {
+    for (int i = 0; i < 4; i++) s[at++] = uint8_t((v >> (8 * i)) & 0xFF);
+  }
+  static int copyOut(const uint8_t* from, size_t len, uint8_t* out, size_t cap) {
+    const size_t n = len > cap ? cap : len;
+    if (n > 0) memcpy(out, from, n);
+    return int(n);
+  }
+};
+
+LoopLocalRequest g_local_request;
+
 // --- power and environment (src/common/power/) ---------------------------------------------------------
 
 // A fake I2C bus that answers the registers a B-board with a panel in the sun and a pack on
@@ -595,8 +763,9 @@ void wire() {
   g_services.power = &g_link_power;
   g_services.env = &g_link_power;
   g_services.lpp = &g_link_power;
+  g_services.local_request = &g_local_request;  // => kCapLocalRequest (link 1.2)
   g_services.mesh = &g_mesh_client;  // => kCapMeshClient
-  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0x7f
+  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0xff
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule

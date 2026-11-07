@@ -45,7 +45,7 @@ it, and the pull request is already open, so CI runs on every push.
    is the signal you want: start from the failing job rather than from a
    literal. The comments that cite the old pin are item 5 below, and they fail
    nothing by themselves.
-3. **Re-read the eight places a bump re-reads.** The table in
+3. **Re-read the nine places a bump re-reads.** The table in
    `docs/upstream.md` is the list; each row says what it depends on upstream
    for. In short:
    1. the flag blocks copied into `platformio.ini` — `diff` our `[nrf52_base]`
@@ -129,7 +129,7 @@ gets quietly lost:
 ## Acceptance criteria
 
 - [ ] `tools/verify.ps1` green at `{{NEW_PIN}}` on the machine the session ran on, and then in CI on the pull request.
-- [ ] Each of the eight places of `docs/upstream.md` read at the new tag, and the report says for each: *unchanged*, or *changed: was X, is now Y*.
+- [ ] Each of the nine places of `docs/upstream.md` read at the new tag, and the report says for each: *unchanged*, or *changed: was X, is now Y*.
 - [ ] Every test written from upstream's source re-checked against the new tag's source, and the rails above each named in the report with the test or the grep that holds it.
 - [ ] The report says what upstream changed **that mattered** — not "the pin moved", but which of their commits this session had to answer.
 - [ ] If the application region moved: its own paragraph in the report, and the new `app_region` named, because the Walter has to be told (`spec/SYSTEM.md` S-5).

@@ -1,12 +1,14 @@
 // src/common/link/session/: the whole box-link session, driven the way src/common/link/SerialTransport.cpp
 // drives it, against fakes - and held against **both** files of spec/fixtures/link/ for every
 // request this firmware answers today (HELLO, PING, STATUS, TIME_SET, TIME_GET, IDENTITY, REBOOT,
-// CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL) and for EV_BOOT and EV_ATTENTION.
+// CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, LOCAL_REQUEST, OBS_PULL) and for EV_BOOT and
+// EV_ATTENTION.
 //
 // link-v1.json is 1.0's and its bytes never change; link-v1.1.json is every case of 1.0 and the
-// four 1.1 adds (spec/LINK-PROTOCOL.md section 11). Both are run, in that order and not one in
-// place of the other: the Walter on the bench speaks 1.0 and must still be answered the bytes it
-// has always been answered, which is only checkable while 1.0's file is still run.
+// four 1.1 adds; link-v1.2.json is every case of 1.1 and the fourteen 1.2 adds
+// (spec/LINK-PROTOCOL.md section 11). All three are run, in that order and not one in place of
+// another: the Walter on the bench speaks 1.0 and must still be answered the bytes it has always
+// been answered, which is only checkable while 1.0's file is still run.
 //
 // The fixtures are read at run time from FIXTURES_DIR (platformio.ini's [env:native]). For each
 // request case the suite finds the response case of the same type and seq **in the same file**,
@@ -102,8 +104,9 @@ std::vector<uint8_t> frameOf(uint8_t type, uint8_t seq, const std::vector<uint8_
 
 // ----------------------------------------------------------------------------- the fixture file
 
-// The two files, and how many of the requests this firmware answers each one has a request case
-// for: 1.0's thirteen, and 1.1's the same thirteen plus its second HELLO.
+// The files, and how many of the requests this firmware answers each one has a request case for:
+// 1.0's thirteen; 1.1's the same thirteen plus its second HELLO; 1.2's those fourteen plus its
+// third HELLO and the four LOCAL_REQUESTs of section 5.9.
 struct FixtureFile {
   const char* file;
   const char* link;
@@ -112,6 +115,7 @@ struct FixtureFile {
 const FixtureFile kFixtures[] = {
     {"link-v1.json", "1.0", 13},
     {"link-v1.1.json", "1.1", 14},
+    {"link-v1.2.json", "1.2", 19},
 };
 constexpr size_t kFixtureCount = sizeof(kFixtures) / sizeof(kFixtures[0]);
 
@@ -167,7 +171,7 @@ const std::vector<Case>& casesOf(size_t which) {
   return mine;
 }
 
-// Every case of both files, 1.0's first.
+// Every case of every file, 1.0's first.
 const std::vector<Case>& cases() {
   static std::vector<Case> all;
   if (all.empty()) {
@@ -178,10 +182,10 @@ const std::vector<Case>& cases() {
   return all;
 }
 
-// The case of that kind, type and seq in one file, or nullptr. Which file matters where 1.1 added
-// a case: a request must be paired with the answer its own file gives it. Everything 1.1 did not
-// touch is the same case in both, so the default is 1.0's file - the one every test written
-// before 1.1 means.
+// The case of that kind, type and seq in one file, or nullptr. Which file matters where a minor
+// added a case: a request must be paired with the answer its own file gives it. Everything a
+// later minor did not touch is the same case in every file, so the default is 1.0's - the one
+// every test written before 1.1 means.
 const Case* findCase(const char* kind, uint8_t type, uint8_t seq, size_t which = 0) {
   for (const Case& c : casesOf(which)) {
     if (c.kind == kind && c.type == type && c.seq == seq) return &c;
@@ -189,8 +193,8 @@ const Case* findCase(const char* kind, uint8_t type, uint8_t seq, size_t which =
   return nullptr;
 }
 
-// By name, in either file: a name is unique across the two, and the cases they share are the
-// same bytes (the codec suite's TheTwoFixtureFiles holds that).
+// By name, in any file: a name is unique across them, and the cases they share are the same
+// bytes (the codec suite's TheFixtureFiles holds that).
 const Case* findCaseNamed(const char* name) {
   for (const Case& c : cases()) {
     if (c.name == name) return &c;
@@ -374,6 +378,37 @@ class FakeLpp : public LppAccess {
   }
 };
 
+// LOCAL_REQUEST (section 5.9, link 1.2). The real one is upstream's own request handler reached
+// through src/common/cxx/PrivateMember.h (src/roles/repeater/link/LocalRequest.h), which needs
+// MeshCore and so cannot be here: **the native environment does not build MeshCore**, so what
+// this suite holds is the session's half of section 5.9 - which req_type reaches the node at all,
+// which refusal each shape gets, and that the answer's bytes go into the response after its
+// status byte. The real service is compiled by the board environments and its first walk is on
+// the bench (tasks/phase-3.9/reports/02.md).
+class FakeLocalRequest : public LocalRequestAccess {
+ public:
+  std::vector<uint8_t> answer;  // the node's answer, already past its four tag bytes
+  bool no_answer = false;       // "the handler gives no answer to it": kLocalRequestNoAnswer
+  int calls = 0;
+  uint8_t last_type = 0;
+  std::vector<uint8_t> last_data;
+  size_t last_cap = 0;
+
+  int localRequest(uint8_t req_type, Bytes data, uint8_t* out, size_t cap) override {
+    calls++;
+    last_type = req_type;
+    last_data.clear();
+    if (data.ptr != nullptr && data.len > 0) {
+      last_data.assign(data.ptr, data.ptr + data.len);
+    }
+    last_cap = cap;
+    if (no_answer) return kLocalRequestNoAnswer;
+    const size_t n = answer.size() > cap ? cap : answer.size();
+    if (n > 0) memcpy(out, answer.data(), n);
+    return int(n);
+  }
+};
+
 class FakeMeshClient : public MeshClientAccess {
  public:
   bool job = false;
@@ -549,6 +584,7 @@ class Harness {
     services.power = &power;
     services.env = &env;
     services.lpp = &lpp;  // no capability bit of its own (LINK-PROTOCOL.md section 4)
+    services.local_request = &local_request;  // => kCapLocalRequest (1.2)
     services.mesh = &mesh;
     services.observations = &observations;
   }
@@ -625,6 +661,7 @@ class Harness {
   FakePower power;
   FakeEnv env;
   FakeLpp lpp;
+  FakeLocalRequest local_request;
   FakeMeshClient mesh;
   FakeObservations observations;
   Services services;
@@ -642,6 +679,25 @@ class Harness {
   std::string band = "868";
 };
 
+// Gives the session exactly the interfaces a `caps` word says the radio has - which is the whole
+// of how this firmware decides that word (Interfaces.h, capsOf), so it is also how a fixture's
+// HELLO case is arranged. `lpp` has no bit of its own and follows CLI (LINK-PROTOCOL.md section
+// 4).
+void applyCaps(Harness& h, uint32_t caps) {
+  if ((caps & kCapCli) == 0) {
+    h.services.cli = nullptr;
+    h.services.lpp = nullptr;
+  }
+  if ((caps & kCapPower) == 0) h.services.power = nullptr;
+  if ((caps & kCapEnv) == 0) h.services.env = nullptr;
+  if ((caps & kCapMeshClient) == 0) h.services.mesh = nullptr;
+  if ((caps & kCapObservations) == 0) h.services.observations = nullptr;
+  if ((caps & kCapAttention) == 0) h.services.attention = nullptr;
+  if ((caps & kCapTimePersist) == 0) h.services.clock = nullptr;
+  if ((caps & kCapLocalRequest) == 0) h.services.local_request = nullptr;
+  EXPECT_EQ(caps, capsOf(h.services)) << "the fixture's caps and the interfaces present";
+}
+
 // Sets the fakes so that the session's answer to `request` is exactly `response`.
 void arrange(Harness& h, const Case& response) {
   JsonObject f = response.fields;
@@ -650,6 +706,11 @@ void arrange(Harness& h, const Case& response) {
       h.system.boot_id = f["boot_id"].as<uint32_t>();
       h.firmware.role = f["role"].as<uint8_t>();
       h.firmware.slot = f["slot"].as<uint8_t>();
+      // The radio of this case is the one whose `caps` the case carries: a 1.1 radio has no
+      // LOCAL_REQUEST interface and a 1.2 one has, and the word is built from the pointers and
+      // from nothing else. Which is also what makes the 1.1 file still checkable now that this
+      // firmware speaks 1.2 - the case is a 1.1 *radio*, and this gives the session one.
+      applyCaps(h, f["caps"].as<uint32_t>());
       // A 1.0 case has no `band` field: the radio still has a band, and the answer is what has
       // to leave it out. 868 is the band of every case of both files that carries one.
       h.setStrings(f["fw_version"].as<std::string>(), f["board"].as<std::string>(),
@@ -728,6 +789,11 @@ void arrange(Harness& h, const Case& response) {
     case kMsgLppGet:
       h.lpp.answer = fromHex(f["lpp"].as<std::string>());
       break;
+    case kMsgLocalRequest:
+      // Section 5.9: the node's own handler answered these bytes, past its four tag bytes. An
+      // empty `data` is a legal answer and not a refusal (the fixture's empty access list).
+      h.local_request.answer = fromHex(f["data"].as<std::string>());
+      break;
     case kMsgObsPull: {
       // Section 7, as a shape: the fixture's own two records, handed to the session by the fake
       // ring so that what this suite checks is the handler and the encoding. Which records a real
@@ -765,12 +831,12 @@ void arrange(Harness& h, const Case& response) {
 }
 
 // The request types this firmware answers: task 03's five, task 04's two, task 05's two,
-// task 06's three.
+// task 06's three, pile 3.9's task 02's one.
 bool handledHere(uint8_t type) {
   return type == kMsgHello || type == kMsgPing || type == kMsgStatus || type == kMsgIdentity ||
          type == kMsgReboot || type == kMsgTimeSet || type == kMsgTimeGet || type == kMsgCli ||
          type == kMsgSleepNotice || type == kMsgPowerGet || type == kMsgEnvGet ||
-         type == kMsgLppGet || type == kMsgObsPull;
+         type == kMsgLppGet || type == kMsgLocalRequest || type == kMsgObsPull;
 }
 
 }  // namespace
@@ -802,7 +868,8 @@ TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
     }
     EXPECT_EQ(kFixtures[which].requests_answered, n)
         << kFixtures[which].file << ": HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET,"
-           " CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL - and 1.1's second HELLO";
+           " CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL - and 1.1's second HELLO,"
+           " and 1.2's third with its four LOCAL_REQUESTs";
   }
 }
 
@@ -830,29 +897,43 @@ TEST(TheFixtures, AOnePointZeroRequestIsAnsweredAOnePointZeroBodyWithNoBand) {
   EXPECT_EQ(toHex(want->frame), h.lastFrame());
 }
 
-TEST(TheFixtures, TheBootEventIsTheFixturesFrame) {
+TEST(TheFixtures, TheBootEventIsTheNewestHelloBodyAfterAResetReason) {
   // EV_BOOT carries the body "as the RAK speaks it" (section 5.1): this firmware's own minor,
-  // band included, whatever the Walter knows - which is why the case it must match is 1.1's and
-  // not 1.0's. 1.0's EV_BOOT case is the same event from a 1.0 radio; its bytes are held by the
-  // codec suite, which encodes every event case of both files.
-  const Case* want = findCaseNamed("boot event, 1.1: the band at the end");
+  // band included, whatever the Walter knows. So the body it must carry is the one the newest
+  // fixture file's HELLO response at this firmware's minor carries, and its payload is
+  // `reset_reason` and then that body **without its status byte** - which is the whole of what
+  // section 5.1 says EV_BOOT is.
+  //
+  // It is held that way and not against an EV_BOOT case, because **1.2 added none**: the newest
+  // EV_BOOT case in spec/fixtures/link/ is 1.1's, and a 1.2 radio's boot event is not those
+  // bytes (its minor is 2 and its caps carry 0x80). The report's *Deviations* says so. 1.0's and
+  // 1.1's EV_BOOT cases are still held byte for byte by the codec suite, which encodes every
+  // event case of every file.
+  const Case* want = findCaseNamed("hello response, 1.2: it answers local requests");
   ASSERT_NE(nullptr, want);
   JsonObject f = want->fields;
   ASSERT_EQ(unsigned(kProtoMinor), f["proto_minor"].as<unsigned>())
-      << "the fixture's newest EV_BOOT is not at the minor this firmware speaks";
+      << "the fixture's newest HELLO response is not at the minor this firmware speaks";
 
   Harness h;
-  h.system.reset_reason = f["reset_reason"].as<uint8_t>();
+  h.system.reset_reason = kResetPowerOn;
   h.system.boot_id = f["boot_id"].as<uint32_t>();
   h.firmware.role = f["role"].as<uint8_t>();
   h.firmware.slot = f["slot"].as<uint8_t>();
   h.setStrings(f["fw_version"].as<std::string>(), f["board"].as<std::string>(),
                f["upstream"].as<std::string>(), f["band"].as<std::string>());
+  applyCaps(h, f["caps"].as<uint32_t>());
+
+  // The payload: the reset reason, then the fixture's own response payload past its status byte.
+  std::vector<uint8_t> payload;
+  payload.push_back(kResetPowerOn);
+  ASSERT_FALSE(want->payload.empty());
+  payload.insert(payload.end(), want->payload.begin() + 1, want->payload.end());
 
   EXPECT_EQ(0, h.session.nextEventSeq());
   h.session.begin(h.now);
   ASSERT_TRUE(h.takeOutgoing());
-  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << want->where();
+  EXPECT_EQ(toHex(frameOf(kMsgEvBoot, 0, payload)), h.lastFrame()) << want->where();
   EXPECT_TRUE(h.lastHadLeadingZero()) << "the first thing the link ever sends leads with 0x00";
   EXPECT_EQ(1, h.session.nextEventSeq()) << "events are counted from 0 and wrap (section 3)";
 
@@ -924,13 +1005,16 @@ TEST(Hello, AHigherMinorIsAnsweredWithTheHighestBothKnow) {
 TEST(Hello, ACapabilityWhoseInterfaceIsAbsentIsNotAdvertised) {
   Harness h;
   EXPECT_EQ(uint32_t(kCapCli | kCapPower | kCapEnv | kCapMeshClient | kCapObservations |
-                     kCapAttention | kCapTimePersist),
+                     kCapAttention | kCapTimePersist | kCapLocalRequest),
             capsOf(h.services));
+  EXPECT_EQ(0xffu, capsOf(h.services)) << "every bit the protocol defines, which 1.2 made eight";
 
   h.services.cli = nullptr;
   EXPECT_EQ(0u, capsOf(h.services) & kCapCli);
   h.services.clock = nullptr;
   EXPECT_EQ(0u, capsOf(h.services) & kCapTimePersist);
+  h.services.local_request = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapLocalRequest);
   h.services.power = nullptr;
   h.services.env = nullptr;
   h.services.mesh = nullptr;
@@ -967,6 +1051,7 @@ TEST(Status, WhatALaterTaskOwnsReadsZeroAndItsFlagBitIsClear) {
   h.services.env = nullptr;
   h.services.mesh = nullptr;
   h.services.observations = nullptr;
+  h.services.local_request = nullptr;
   h.system.uptime_s = 7;
   h.system.reset_reason = kResetPin;
 
@@ -1187,7 +1272,7 @@ TEST(TheByteStream, AFrameSplitOverThreeReads) {
 TEST(TheByteStream, TheFixturesStreamWithNoiseInIt) {
   // The fixture's own stream: two terminators, a good PING frame, seven bytes of garbage and a
   // terminator, another terminator, a good STATUS frame.
-  // The `stream` is the same in both files (the codec suite's TheTwoFixtureFiles holds that),
+  // The `stream` is the same in every file (the codec suite's TheFixtureFiles holds that),
   // so 1.0's is read here.
   JsonObject s = fixture(0)["stream"].as<JsonObject>();
   const std::vector<uint8_t> bytes = fromHex(s["bytes"].as<std::string>());
@@ -1901,6 +1986,283 @@ TEST(Telemetry, ARetriedRequestDoesNotAskTheReadersAgain) {
   ASSERT_EQ(2u, h.sent.size());
   EXPECT_EQ(first, h.lastFrame()) << "the remembered response, to the byte";
   EXPECT_EQ(1, h.power.calls);
+}
+
+// --------------------------------------------------------------------- 1.2's LOCAL_REQUEST
+
+// Section 5.9's rules, in its own order, against a fake LocalRequestAccess through the **real**
+// session: the native environment does not build MeshCore, so the node's own request handler
+// cannot be here (FakeLocalRequest says so where it is declared). What is held here is every rule
+// the session owns.
+
+namespace {
+
+// A LOCAL_REQUEST frame: `req_type` then its data.
+std::vector<uint8_t> localRequestFrame(uint8_t seq, uint8_t req_type,
+                                       const std::vector<uint8_t>& data) {
+  std::vector<uint8_t> body;
+  body.push_back(req_type);
+  body.insert(body.end(), data.begin(), data.end());
+  return frameOf(kMsgLocalRequest, seq, body);
+}
+
+// The one status byte of an answer, read back out of the frame.
+uint8_t statusOf(const std::string& frame_hex) {
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(frame_hex)) rx.feedByte(b);
+  EXPECT_TRUE(rx.hasPacket());
+  if (!rx.hasPacket() || rx.packet().body.len == 0) return 0xFF;
+  EXPECT_EQ(responseType(kMsgLocalRequest), rx.packet().type);
+  return rx.packet().body.ptr[0];
+}
+
+}  // namespace
+
+TEST(TheLocalRequest, WithNoInterfaceItIsUnsupported) {
+  // "A RAK without it answers ERR_UNSUPPORTED" (section 5.9) - the fixture's "local request
+  // refused: no handler in this role", which is the scanner's answer and the lost mode's.
+  const Case* want = findCaseNamed("local request refused: no handler in this role");
+  ASSERT_NE(nullptr, want);
+
+  Harness h;
+  h.services.local_request = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapLocalRequest);
+  h.feed(localRequestFrame(want->seq, kLocalReqStatus, {}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << "the fixture's refusal, byte for byte";
+  EXPECT_EQ(0, h.local_request.calls) << "the service was never asked";
+}
+
+TEST(TheLocalRequest, AnEmptyPayloadAndThirtyThreeBytesOfDataAreMalformed) {
+  // Section 5.9: "ERR_MALFORMED for an empty payload or more than 32 bytes of data". Neither
+  // reaches the node.
+  {
+    Harness h;
+    h.feed(frameOf(kMsgLocalRequest, 60, {}));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(kErrMalformed, statusOf(h.lastFrame())) << "not even a req_type";
+    EXPECT_EQ(0, h.local_request.calls);
+  }
+  {
+    // 32 bytes of data: legal, and the node is asked.
+    Harness h;
+    std::vector<uint8_t> data;
+    for (uint8_t i = 0; i < kLocalRequestMaxData; i++) data.push_back(i);
+    h.local_request.answer = {0xAA};
+    h.feed(localRequestFrame(61, kLocalReqNeighbours, data));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(kOk, statusOf(h.lastFrame()));
+    EXPECT_EQ(1, h.local_request.calls);
+    EXPECT_EQ(toHex(data), toHex(h.local_request.last_data));
+  }
+  {
+    // 33: malformed, and nothing is asked.
+    Harness h;
+    std::vector<uint8_t> data;
+    for (uint8_t i = 0; i <= kLocalRequestMaxData; i++) data.push_back(i);
+    ASSERT_EQ(size_t(kLocalRequestMaxData) + 1, data.size());
+    h.feed(localRequestFrame(62, kLocalReqNeighbours, data));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(kErrMalformed, statusOf(h.lastFrame()));
+    EXPECT_EQ(0, h.local_request.calls);
+  }
+}
+
+TEST(TheLocalRequest, ATypeOutsideTheTableIsErrRangeAndNeverReachesTheNode) {
+  // "Any other req_type is ERR_RANGE. That includes 0x03 telemetry, whose local form is LPP_GET,
+  // and 0x02 keep-alive, which belongs to a login session this link does not have."
+  const Case* want = findCaseNamed("local request refused: telemetry is lpp_get's");
+  ASSERT_NE(nullptr, want);
+
+  Harness h;
+  h.local_request.answer = {0x11, 0x22};  // there would have been an answer, if it were asked
+  h.feed(localRequestFrame(want->seq, 0x03, {}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << "the fixture's refusal of telemetry";
+  EXPECT_EQ(0, h.local_request.calls) << "LPP_GET is telemetry's local form; nothing was asked";
+
+  // And every other value outside the table, the one that belongs to a login session included.
+  const uint8_t outside[] = {0x00, 0x02, 0x04, 0x08, 0x7F, 0xFF};
+  uint8_t seq = 70;
+  for (uint8_t t : outside) {
+    Harness g;
+    g.feed(localRequestFrame(seq++, t, {}));
+    g.run();
+    ASSERT_EQ(1u, g.sent.size());
+    EXPECT_EQ(kErrRange, statusOf(g.lastFrame())) << "req_type " << unsigned(t);
+    EXPECT_EQ(0, g.local_request.calls) << "req_type " << unsigned(t);
+  }
+}
+
+TEST(TheLocalRequest, ARequestTheHandlerAnswersWithNothingIsErrRange) {
+  // "A request the handler gives no answer to is ERR_RANGE: a neighbours request of a version it
+  // does not know, an access-list request whose reserved bytes are not zero. Over the mesh it
+  // would have been silence." The access-list request of the fixture, with its two reserved
+  // bytes made non-zero - which is what upstream's `if (res1 == 0 && res2 == 0)` falls through.
+  Harness h;
+  h.local_request.no_answer = true;
+  h.feed(localRequestFrame(47, kLocalReqAccessList, {0x01, 0x00}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(kErrRange, statusOf(h.lastFrame()));
+  EXPECT_EQ(1, h.local_request.calls) << "the node was asked, and had nothing to say";
+  EXPECT_EQ("0100", toHex(h.local_request.last_data)) << "the reserved bytes reached it as sent";
+
+  // A neighbours request of a version the node does not know: the same refusal.
+  Harness g;
+  g.local_request.no_answer = true;
+  g.feed(localRequestFrame(48, kLocalReqNeighbours, {0x09, 0x0a, 0x00, 0x00, 0x00, 0x06}));
+  g.run();
+  ASSERT_EQ(1u, g.sent.size());
+  EXPECT_EQ(kErrRange, statusOf(g.lastFrame()));
+  EXPECT_EQ(1, g.local_request.calls);
+}
+
+TEST(TheLocalRequest, AnEmptyAnswerIsOkAndNotARefusal) {
+  // The fixture's "local request: an empty access list": a node whose access list has nobody on
+  // it answers kOk with no data, which is a different thing from the refusal above and must not
+  // be confused with it.
+  const Case* want = findCaseNamed("local request: an empty access list");
+  ASSERT_NE(nullptr, want);
+
+  Harness h;
+  arrange(h, *want);
+  ASSERT_TRUE(h.local_request.answer.empty());
+  h.feed(localRequestFrame(want->seq, kLocalReqAccessList, {0x00, 0x00}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << "status kOk and one byte of payload";
+  EXPECT_EQ(1, h.local_request.calls);
+}
+
+TEST(TheLocalRequest, NeighboursReachTheNodeWithTheirOffsetAndTheirOrderUntouched) {
+  // The request's `data` is "the request's version 0 lays it out: version, count, offset (u16),
+  // order, key-prefix length" (section 5.9) and the session re-encodes none of it: whatever the
+  // Walter sent is what the node's handler reads. Here: version 0, count 5, offset 300, order 2
+  // (strongest to weakest), an eight-byte prefix, and the four random bytes MeshCore's clients
+  // add after them, "which change nothing here".
+  const std::vector<uint8_t> data = {0x00, 0x05, 0x2c, 0x01, 0x02, 0x08, 0xde, 0xad, 0xbe, 0xef};
+  Harness h;
+  h.local_request.answer = {0x07, 0x00, 0x05, 0x00};
+  h.feed(localRequestFrame(80, kLocalReqNeighbours, data));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(kOk, statusOf(h.lastFrame()));
+  EXPECT_EQ(kLocalReqNeighbours, h.local_request.last_type);
+  EXPECT_EQ(toHex(data), toHex(h.local_request.last_data)) << "byte for byte, offset included";
+  EXPECT_EQ(300u, uint32_t(data[2]) | (uint32_t(data[3]) << 8)) << "the offset is little-endian";
+
+  // The answer is written into the response after its status byte, so the room the node is given
+  // is the payload's less that one byte.
+  EXPECT_EQ(size_t(kMaxPayload) - 1, h.local_request.last_cap);
+}
+
+TEST(TheLocalRequest, ARetryIsAnsweredFromMemoryAndTheNodeIsNotAskedAgain) {
+  // Section 3's one-entry memory. It matters here for the reason it matters for POWER_GET: a
+  // Walter that lost the response and asked again is comparing two readings of the same node.
+  Harness h;
+  h.local_request.answer = {0x01, 0x02, 0x03};
+  const std::vector<uint8_t> frame = localRequestFrame(90, kLocalReqStatus, {});
+
+  h.feed(frame);
+  h.run();
+  const std::string first = h.lastFrame();
+  EXPECT_EQ(1, h.local_request.calls);
+
+  h.local_request.answer = {0x09, 0x09, 0x09};  // the node moved on
+  h.feed(frame);
+  h.run();
+  ASSERT_EQ(2u, h.sent.size());
+  EXPECT_EQ(first, h.lastFrame()) << "the remembered response, to the byte";
+  EXPECT_EQ(1, h.local_request.calls) << "no second call to the node's handler";
+
+  // A different seq is a new request and is executed.
+  h.feed(localRequestFrame(91, kLocalReqStatus, {}));
+  h.run();
+  ASSERT_EQ(3u, h.sent.size());
+  EXPECT_EQ(2, h.local_request.calls);
+  EXPECT_NE(first, h.lastFrame());
+}
+
+TEST(TheLocalRequest, AJobInProgressIsUntouched) {
+  // "Nothing goes on the air and no job is needed. The mesh client is not involved, a job in
+  // progress is untouched, and client_tx does not move" (section 5.9). The real mesh client
+  // behind a real session, with a job begun and a reply awaited - the state a local request must
+  // not disturb.
+  Harness h;
+  twinoak::meshclient::Job job;
+  FakeMeshPort port;
+  twinoak::meshclient::LinkMeshClient client(job, port);
+  h.services.mesh = &client;
+
+  JobBegin begin;
+  const std::vector<uint8_t> key(kPubKeyLen, 0xA7);
+  begin.pubkey = key.data();
+  begin.path.mode = kPathHops;
+  begin.path.hash_size = 2;
+  begin.path.hop_count = 1;
+  const std::vector<uint8_t> hops = {0xa1, 0xb2};
+  begin.path.hashes = bytesOf(hops.data(), hops.size());
+  ASSERT_EQ(kOk, client.beginJob(begin, h.now));
+
+  SendRequest send;
+  send.timeout_ms = 5000;
+  send.req_type = 0x01;
+  SendResponse sent;
+  ASSERT_EQ(kOk, client.sendRequest(send, sent, h.now));
+  ASSERT_TRUE(client.jobBegun());
+  ASSERT_TRUE(client.replyAwaited());
+  const size_t packets_before = port.sent.size();
+
+  MeshCountersResponse before;
+  client.getCounters(before);
+
+  h.local_request.answer = {0x42};
+  h.sent.clear();
+  h.feed(localRequestFrame(92, kLocalReqStatus, {}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(kOk, statusOf(h.lastFrame())) << "answered while a reply is awaited: not ERR_BUSY";
+  EXPECT_EQ(1, h.local_request.calls);
+
+  EXPECT_TRUE(client.jobBegun()) << "the job is still begun";
+  EXPECT_TRUE(client.replyAwaited()) << "and its reply is still awaited";
+  EXPECT_EQ(packets_before, port.sent.size()) << "nothing went on the air";
+  MeshCountersResponse after;
+  client.getCounters(after);
+  EXPECT_EQ(before.client_tx, after.client_tx) << "client_tx did not move";
+
+  // The job's path is the one it was given, and a LOCAL_REQUEST did not touch it.
+  Path path;
+  ASSERT_EQ(kOk, client.getPath(path));
+  EXPECT_EQ(kPathHops, path.mode);
+  EXPECT_EQ(2, path.hash_size);
+  EXPECT_EQ(1, path.hop_count);
+}
+
+TEST(TheLocalRequest, TheAnswersBytesGoIntoTheResponseAfterItsStatusByte) {
+  // What the fixture's four answers are, seen as the shape they share: `status` and then the
+  // node's own bytes, nothing re-encoded. The largest answer upstream's reply buffer can hold is
+  // 180 bytes (MAX_PACKET_PAYLOAD less its four tag bytes), which still fits in one payload.
+  Harness h;
+  std::vector<uint8_t> big;
+  for (size_t i = 0; i < 180; i++) big.push_back(uint8_t(i));
+  h.local_request.answer = big;
+  h.feed(localRequestFrame(93, kLocalReqStatus, {}));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+
+  FrameReceiver rx;
+  for (uint8_t b : fromHex(h.lastFrame())) rx.feedByte(b);
+  ASSERT_TRUE(rx.hasPacket());
+  ASSERT_EQ(big.size() + 1, size_t(rx.packet().body.len));
+  EXPECT_EQ(kOk, rx.packet().body.ptr[0]);
+  EXPECT_EQ(toHex(big), toHex(rx.packet().body.ptr + 1, rx.packet().body.len - 1));
 }
 
 // ----------------------------------------------------------------------------- the mesh client

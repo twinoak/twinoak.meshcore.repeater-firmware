@@ -12,6 +12,7 @@
 #include "roles/repeater/app/IdentityGuard.h"  // kFaultCodeIdentityLost
 #include "roles/repeater/clock/BoardClock.h"
 #include "roles/repeater/clock/LinkClock.h"
+#include "roles/repeater/link/LocalRequest.h"
 #include "roles/repeater/meshclient/LinkObservations.h"
 
 namespace twinoak {
@@ -156,6 +157,12 @@ BoardIdentity g_identity;
 BoardCli g_cli;
 AttentionMachine g_attention;
 
+// LOCAL_REQUEST (link 1.2, spec/LINK-PROTOCOL.md 5.9): the node's status, access list,
+// neighbours or owner info, answered by upstream's own request handler with nothing on the air
+// (src/roles/repeater/link/LocalRequest.h). It carries its own buffers, so it is a global for the
+// same reason the ring below is.
+BoardLocalRequest g_local_request;
+
 // The clock keeper as ClockAccess: twenty lines in src/roles/repeater/clock/LinkClock.h, and what puts
 // TIME_PERSIST in HELLO's caps. It binds a reference to the keeper of another translation unit,
 // whose constructor may not have run yet - which is safe because that is all it does with it;
@@ -225,13 +232,18 @@ void linkBegin(TwinOakMesh& mesh) {
   g_services.power = &power::linkPower();  // => kCapPower
   g_services.env = &power::linkPower();    // => kCapEnv
   g_services.lpp = &power::linkPower();
+  // LOCAL_REQUEST (section 5.9, link 1.2): the repeater has a request handler of its own -
+  // upstream's - so it is the one role that advertises this bit. The scanner speaks no link at
+  // all, and the lost mode below has no mesh to ask.
+  g_local_request.attach(&mesh);
+  g_services.local_request = &g_local_request;  // => kCapLocalRequest
   // The job of 6.1, the five sends of 6.2, the reply of 6.3, the counters of 6.4 and STATUS's two
   // job bits (spec/LINK-PROTOCOL.md section 6; phase 2's task 04 is the backstop over them).
   g_services.mesh = g_mesh_client;  // => kCapMeshClient
   // OBS_PULL, STATUS's obs_pending and obs_dropped, and MESH_COUNTERS' three advert counts
   // (spec/LINK-PROTOCOL.md section 7). The ring is filled from TwinOakMesh::onAdvertRecv through
   // noteAdvert() below, not from here.
-  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0x7f
+  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0xff
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 

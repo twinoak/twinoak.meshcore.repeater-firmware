@@ -167,6 +167,25 @@ struct LppAccess {
   virtual size_t readLpp(uint8_t perm_mask, uint8_t* out, size_t cap) = 0;
 };
 
+// LOCAL_REQUEST (link 1.2, spec/LINK-PROTOCOL.md 5.9; pile 3.9's task 02). Present =>
+// kCapLocalRequest. It is the capability of a role with a request handler of its own - the
+// repeater's, through upstream's MyMesh::handleRequest
+// (src/roles/repeater/link/LocalRequest.h). The scanner has none and does not advertise the bit.
+struct LocalRequestAccess {
+  virtual ~LocalRequestAccess() {}
+
+  // Runs `req_type` with `data` through the node's own request handler, exactly as that handler
+  // answers an admin over the mesh, and writes the answer **after its four tag bytes** into
+  // `out` (section 5.9). Nothing goes on the air.
+  //
+  // Returns the number of bytes written, which may be 0 - an access list with nobody on it is a
+  // legal, empty answer - or kLocalRequestNoAnswer when the handler answered nothing at all,
+  // which the session answers kErrRange. Which `req_type` values reach here is the session's
+  // business (section 5.9's table): an implementation is never asked for one outside it, and
+  // 0x03 telemetry in particular is refused before this call, because LPP_GET is its local form.
+  virtual int localRequest(uint8_t req_type, Bytes data, uint8_t* out, size_t cap) = 0;
+};
+
 // The mesh client (phase 2; src/roles/repeater/meshclient/LinkMeshClient.h implements it over the job of
 // src/roles/repeater/meshclient/Job.h and the reply record of src/roles/repeater/meshclient/Reply.h). Present => kCapMeshClient.
 //
@@ -257,6 +276,7 @@ struct Services {
   PowerAccess* power = nullptr;
   EnvAccess* env = nullptr;
   LppAccess* lpp = nullptr;
+  LocalRequestAccess* local_request = nullptr;
   MeshClientAccess* mesh = nullptr;
   ObservationAccess* observations = nullptr;
 };
@@ -271,6 +291,7 @@ inline uint32_t capsOf(const Services& s) {
   if (s.observations != nullptr) caps |= kCapObservations;
   if (s.attention != nullptr) caps |= kCapAttention;
   if (s.clock != nullptr) caps |= kCapTimePersist;
+  if (s.local_request != nullptr) caps |= kCapLocalRequest;  // 1.2
   return caps;
 }
 

@@ -11,6 +11,6 @@ reviewer reads.
 on `origin/main` and nothing else counts, so an unfinished report belongs in
 `tasks/sync/logs/` (git-ignored) until it is one.
 
-What a sync report has that others do not: the eight places of
+What a sync report has that others do not: the nine places of
 [`docs/upstream.md`](../../../docs/upstream.md), each one *unchanged* or
 *changed: was X, is now Y*.

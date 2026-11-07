@@ -368,6 +368,46 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       break;
     }
 
+    case kMsgLocalRequest: {
+      // Section 5.9 (link 1.2), its four rules in its own order. The answer is the node's own
+      // request handler's - the repeater reaches upstream's MyMesh::handleRequest for it
+      // (src/roles/repeater/link/LocalRequest.h) - and nothing here knows how it is produced.
+      if (s_.local_request == nullptr) {
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      LocalRequest m;
+      if (!decodeLocalRequest(pkt.body, m)) {
+        // An empty payload, or more than 32 bytes of data (decodeLocalRequest).
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
+        break;
+      }
+      // "Any other req_type is ERR_RANGE" - 0x03 telemetry included, whose local form is
+      // LPP_GET, and 0x02 keep-alive, which belongs to a login session this link does not have
+      // (Numbers.h). Refused here, before the node's handler is asked for anything.
+      if (!isLocalRequestType(m.req_type)) {
+        n = encodeStatus(kErrRange, resp_, sizeof(resp_));
+        break;
+      }
+      // As for LPP_GET, the answer is written **into the response payload, after its status
+      // byte** - which is the payload encodeLocalResponse() builds, and this way without a
+      // second buffer of 180 bytes on a 2 KB stack. The status byte is written first and
+      // overwritten with kErrRange below if there turns out to be no answer, which costs one
+      // byte and keeps the handler to one buffer.
+      n = encodeStatus(kOk, resp_, sizeof(resp_));  // one byte: kOk
+      const int answer =
+          s_.local_request->localRequest(m.req_type, m.data, resp_ + n, sizeof(resp_) - n);
+      if (answer < 0) {
+        // "A request the handler gives no answer to is ERR_RANGE: a neighbours request of a
+        // version it does not know, an access-list request whose reserved bytes are not zero.
+        // Over the mesh it would have been silence."
+        n = encodeStatus(kErrRange, resp_, sizeof(resp_));
+        break;
+      }
+      n += size_t(answer);
+      break;
+    }
+
     case kMsgSleepNotice: {
       // Section 8: the Walter's last request before it sleeps. From here until the next valid
       // request this node sends no events but EV_BOOT and EV_ATTENTION (eventAllowed), and

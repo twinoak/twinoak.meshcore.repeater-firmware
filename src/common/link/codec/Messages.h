@@ -1,4 +1,4 @@
-// Every message of protocol 1.1 as a plain struct and the one function this firmware needs for
+// Every message of protocol 1.2 as a plain struct and the one function this firmware needs for
 // it: a decoder for every request, an encoder for every response and every event
 // (spec/LINK-PROTOCOL.md sections 5 to 8). Only the Walter sends requests and only the RAK sends
 // events, so the other half of each pair is the Walter's firmware's and is not here.
@@ -132,6 +132,14 @@ struct LppGet {
   uint8_t perm_mask = 0;
 };
 
+// LOCAL_REQUEST (section 5.9, new in 1.2). `data` is 0 to kLocalRequestMaxData bytes and points
+// into the payload; which `req_type` values are legal is section 5.9's table and the session's
+// to refuse (isLocalRequestType), as REBOOT's mode is.
+struct LocalRequest {
+  uint8_t req_type = 0;
+  Bytes data;
+};
+
 struct JobBegin {
   const uint8_t* pubkey = nullptr;  // kPubKeyLen bytes, into the payload
   Path path;
@@ -180,6 +188,7 @@ bool decodeReboot(Bytes payload, Reboot& out);
 bool decodeSleepNotice(Bytes payload, SleepNotice& out);
 bool decodeCli(Bytes payload, Cli& out);
 bool decodeLppGet(Bytes payload, LppGet& out);
+bool decodeLocalRequest(Bytes payload, LocalRequest& out);
 bool decodeJobBegin(Bytes payload, JobBegin& out);
 bool decodePathSet(Bytes payload, Path& out);
 bool decodeSendLogin(Bytes payload, SendLogin& out);
@@ -248,6 +257,12 @@ struct LppResponse {
   Bytes lpp;  // the Cayenne-LPP bytes a mesh client would have been told
 };
 
+// LOCAL_REQUEST's answer (section 5.9): the bytes the node's own request handler produced, after
+// its four tag bytes. Empty is a legal answer - an access list with nobody on it.
+struct LocalResponse {
+  Bytes data;
+};
+
 // The answer to every one of the five sends (section 6.2).
 struct SendResponse {
   uint8_t send = kSendNothing;
@@ -294,6 +309,7 @@ size_t encodeCliResponse(const CliResponse& in, uint8_t* out, size_t cap);
 size_t encodePowerResponse(const PowerResponse& in, uint8_t* out, size_t cap);
 size_t encodeEnvResponse(const EnvResponse& in, uint8_t* out, size_t cap);
 size_t encodeLppResponse(const LppResponse& in, uint8_t* out, size_t cap);
+size_t encodeLocalResponse(const LocalResponse& in, uint8_t* out, size_t cap);
 size_t encodePathGetResponse(const Path& in, uint8_t* out, size_t cap);
 size_t encodeSendResponse(const SendResponse& in, uint8_t* out, size_t cap);
 size_t encodeReplyGetResponse(const ReplyRecord& in, uint8_t* out, size_t cap);
