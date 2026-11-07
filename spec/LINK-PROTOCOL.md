@@ -1,8 +1,8 @@
-# The box link — protocol 1.1
+# The box link — protocol 1.2
 
 The UART between the LoRa box and the LTE box of a TwinOak standard repeater v2: the RAK4630 on one
 end, the Walter on the other. This document is the specification. `tools/linkref.py` is the same
-thing as code, and `fixtures/link/link-v1.1.json` is what it generates; both firmware repositories
+thing as code, and `fixtures/link/link-v1.2.json` is what it generates; both firmware repositories
 carry a copy of the fixtures and test their codecs against every case in it.
 
 **Status:** 1.0, written 2026-10-11, before either firmware exists. It changes only here, and a
@@ -13,6 +13,14 @@ why: a Walter with no golden image yet could tell meshmaster.dk its radio's role
 `HELLO`, never its band, and the server picks a release's image by all three, so a radio could
 never be offered its first image over LTE. Nothing else changed. `link-v1.json` is 1.0's and keeps
 its bytes; `link-v1.1.json` is every case of 1.0 and the four of 1.1.
+
+**1.2, 2026-11-07:** `LOCAL_REQUEST` (§5.9) and its capability bit `0x80`. A unit's Walter reads its
+own repeater over this link and never over the air. Until 1.2 the link carried that repeater's CLI
+lines and its telemetry, and nothing that yields its status, its neighbour list, its access list or
+its owner info. So the first unit's repeater stayed *stale* on meshmaster.dk and had none of the
+graphs a status read feeds. `LOCAL_REQUEST` answers those four with the bytes MeshCore's own handler
+answers them with over the mesh. Nothing else changed. `link-v1.1.json` is 1.1's and keeps its
+bytes; `link-v1.2.json` is every case of 1.1 and the ones 1.2 adds.
 
 Words used: **RAK** is the radio firmware in the LoRa box (a repeater, later a bridge), **Walter**
 is the management firmware in the LTE box. *Must* and *never* are requirements; everything else is
@@ -137,6 +145,7 @@ also be fetched with a request.
 | `0x0A` | `POWER_GET` | `POWER` | 5.8 |
 | `0x0B` | `ENV_GET` | `ENV` | 5.8 |
 | `0x0C` | `LPP_GET` | `CLI` | 5.8 |
+| `0x0D` | `LOCAL_REQUEST` | `LOCAL_REQUEST` | 5.9 |
 | `0x10`–`0x1F` | *reserved: provisioning* | | |
 | `0x20` | `JOB_BEGIN` | `MESH_CLIENT` | 6.1 |
 | `0x21` | `JOB_END` | `MESH_CLIENT` | 6.1 |
@@ -166,7 +175,7 @@ Request:
 | Field | Type | |
 |---|---|---|
 | `proto_major` | u8 | 1 |
-| `proto_minor` | u8 | 0 |
+| `proto_minor` | u8 | the highest minor the sender speaks: 2 for a sender of 1.2 |
 | `peer_kind` | u8 | 1 = Walter firmware, 2 = a bench tool |
 | `max_payload` | u8 | the largest payload the sender accepts; 240 |
 | `fw_version` | str8 | the sender's own version string |
@@ -188,7 +197,7 @@ Response body (after `status`):
 | `band` | str8 | **1.1.** The band the running image was built for, as its descriptor says it (`FIRMWARE-MANIFEST.md`): `868`. Present when this body's `proto_minor` is 1 or more, absent in a 1.0 body |
 
 Capability bits: `0x01 CLI`, `0x02 POWER`, `0x04 ENV`, `0x08 MESH_CLIENT`, `0x10 OBSERVATIONS`,
-`0x20 ATTENTION`, `0x40 TIME_PERSIST`. Unknown bits are ignored.
+`0x20 ATTENTION`, `0x40 TIME_PERSIST`, `0x80 LOCAL_REQUEST` (1.2). Unknown bits are ignored.
 
 **Versions.** A RAK that speaks the request's major answers with the highest minor both ends know.
 A RAK that does not speak that major answers `ERR_UNSUPPORTED`, and the Walter may try another
@@ -316,6 +325,47 @@ pressure), `temp_centi : i16` (°C × 100), `rh_centi : u16` (% × 100), `pressu
 location, `0x04` environment); response: the Cayenne-LPP bytes the node would answer a mesh
 telemetry request with at those permissions. It is how the Walter reports exactly what a mesh
 client would have been told.
+
+### 5.9 `LOCAL_REQUEST` (1.2)
+
+Request: `req_type : u8`, then `data` : rest, 0 to 32 bytes. Response body: `data` : rest.
+
+The node answers it the way it answers the same request arriving over the mesh in a request datagram
+from a client logged in as **admin**. Its own request handler runs, with `req_type` and `data` where
+the datagram's plaintext holds them after the timestamp, and every byte past `data` reads as zero.
+The response's `data` is that answer **after its four tag bytes**: what a mesh client finds after the
+reflected timestamp, and what a `SEND_REQUEST` to another node delivers as a reply record's `data`
+(§6.3, state 3). So the Walter can hand it on exactly as a mesh exchange would have. Admin, for the
+reason §5.7 runs a line as the console: the Walter already holds the SWD lines.
+
+| `req_type` | MeshCore's name | The answer |
+|---:|---|---|
+| `0x01` | `REQ_TYPE_GET_STATUS` | the node's `RepeaterStats`, packed as the pinned MeshCore packs it |
+| `0x05` | `REQ_TYPE_GET_ACCESS_LIST` | the access list: per entry a 6-byte key prefix and the permissions byte. `data` is the request's two reserved bytes, which must be zero |
+| `0x06` | `REQ_TYPE_GET_NEIGHBOURS` | a page of the neighbour table, chosen and ordered by `data` as the request's version 0 lays it out: version, count, offset (u16), order, key-prefix length. The four random bytes MeshCore's clients add after them change nothing here |
+| `0x07` | `REQ_TYPE_GET_OWNER_INFO` | the firmware version, the node's name and its owner info, one per line |
+
+- Any other `req_type` is `ERR_RANGE`. That includes `0x03` telemetry, whose local form is
+  `LPP_GET` (§5.8), and `0x02` keep-alive, which belongs to a login session this link does not have.
+- `data` over 32 bytes is `ERR_MALFORMED`.
+- A request the handler gives no answer to is `ERR_RANGE`: a neighbours request of a version it does
+  not know, an access-list request whose reserved bytes are not zero. Over the mesh it would have been
+  silence.
+- Nothing goes on the air and no job is needed. The mesh client (§6) is not involved, a job in
+  progress is untouched, and `client_tx` does not move.
+- The answer is at most what MeshCore's own reply buffer holds, which is smaller than this link's
+  payload.
+
+`LOCAL_REQUEST` is the capability of a role with a request handler: the repeater's. A RAK without it
+answers `ERR_UNSUPPORTED` (§3).
+
+**Why it is here** (1.2). A unit's Walter reads its own repeater over this link, at a console's
+privileges, and never over the air (meshmaster.dk's *local door*). Until 1.2 the link carried that
+repeater's CLI lines and its telemetry, and nothing that yields these four answers, so meshmaster.dk
+could not read the repeater's status or neighbours through its own unit. The CLI's `stats-*` and
+`neighbors` lines say much the same as text, and parsing them was the other way. It was not taken:
+this request returns MeshCore's own bytes from MeshCore's own handler, and nothing is re-encoded at
+either end.
 
 ## 6. The mesh client
 
@@ -521,9 +571,10 @@ Text is never mixed with frames in one session.
 
 ## 11. The fixtures
 
-`fixtures/link/link-v1.1.json`, generated by `tools/linkref.py gen` (1.1: every case of 1.0, and
-the four 1.1 adds). `fixtures/link/link-v1.json` is 1.0's, generated by `tools/linkref.py gen
-<file> 0`, and never changes: firmware that speaks 1.0 has been released. Each holds:
+`fixtures/link/link-v1.2.json`, generated by `tools/linkref.py gen` (1.2: every case of 1.1, and
+the ones 1.2 adds). The older ones never change, because firmware that speaks them has been
+released: `fixtures/link/link-v1.1.json` is 1.1's (`tools/linkref.py gen <file> 1`) and
+`fixtures/link/link-v1.json` is 1.0's (`gen <file> 0`). Each holds:
 
 - `crc16` — data and its CRC.
 - `cobs` — raw bytes and their encoding.

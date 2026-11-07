@@ -148,8 +148,8 @@ and the image is refused. The firmware's build places it (a `const` structure th
 keep); the release tooling checks it is there and that it agrees with the manifest before anything
 is published.
 
-The same three strings — `version`, `board`, role — are what the running firmware reports in the
-link's `HELLO`. After a flash, the Walter's health check holds the `HELLO` it gets against the
+The same strings — `version`, `board`, role and, since link 1.1, `band` — are what the running
+firmware reports in the link's `HELLO` (`LINK-PROTOCOL.md` §5.1). After a flash, the Walter's health check holds the `HELLO` it gets against the
 descriptor it flashed.
 
 ## 4a. The base: a `provision` file

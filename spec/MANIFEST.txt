@@ -1,12 +1,13 @@
 # The system specification, copied - never edited here.
-# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 80abba16870a0826068d24cfdc32596560f2c575 plus uncommitted changes
+# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 204210b3b1a09c90c6fbd617eefff9b082d0a7aa plus uncommitted changes
 # written by spec/tools/specsync.py; README.md in this directory says how
 #
 # sha256                                                           bytes  name
-f16aafa20c4ffc07da943a895c9f34befd17e9b3f87e06c7357bef07fa4b5e94    13082  FIRMWARE-MANIFEST.md
-1f30ae8a58361b71e1bc50931839528e2bae5fdf68e6ac3abc149bf4ca6fea33    28912  LINK-PROTOCOL.md
-6a93378991dc43343e9212e5eb41fe7aff0e7e4369de3261849010a30f93410a    22055  SYSTEM.md
+f288836468f8f8108310b36fa31c9aeac432426e15b95fd6fb63927c04406782    13131  FIRMWARE-MANIFEST.md
+3ffbb59a8c86721021dc54c397cf8dc14a17a66976923ae61c426ac26db9dedd    32771  LINK-PROTOCOL.md
+ec1bed7da7b982b30dfd4363cfb1201979d8e26de68133b1a2e61e4b6a984976    22368  SYSTEM.md
 2b1ffc693b046ad6ec520b8645dd9ab31103a80a84da0d30544c63b1a6781fd6    38736  fixtures/link/link-v1.1.json
+6d500f13a3204da72b1b0de86fd5cfc98c60c906a8add963d1f8a4f57f6be18f    45743  fixtures/link/link-v1.2.json
 ad03e70fe6e6081641eab336397f16e37d6b41b2ff4dd6c2db29cd911d058776    35303  fixtures/link/link-v1.json
 46292a69beece337ec8fa3ca4716a9999cbba624474feeb3eff4e27bf2e1f2e6      322  fixtures/manifest/TEST-KEY.txt
 d8c255fbfded576993b49bcf90a4d2f514358917904caf14b24561a699c539d7     1524  fixtures/manifest/base-after-the-end.hex
@@ -41,6 +42,6 @@ b5f8c150015905204eb6b8e2f7f1978fc90f4459267cc4635773974bc51d0f9d     5836  fixtu
 16dac826780fce1345832f7d346e5b5c13413e053b3044f32f3e9ba731aef0a4     5201  proposals/02-firmware-catalogue-and-updates.md
 e775af04946609e6263661c204d9dd3c84cc784077e1c1fbd91bd9223f5d8f68     4842  proposals/03-agent-core-as-a-library.md
 7049056c063ebe7ad0eecf9724f1c191a3b7eab818d2ff99cd0c7f830e1cffd4     2800  proposals/04-the-walter-provisions-a-new-radio.md
-5eff09b544b2e06b08fd7143a3ce6fbccafcb3b6c215d98938571b442dfb357b    34031  tools/linkref.py
+e640b08ab1eb69905dfd8788b8ade61267f8296159b1e00a55777a23ad699eca    38706  tools/linkref.py
 f2c1ec5ed41bf1d86ab62125fea07d03c3c57454dec1e886bc2d1c6fd287a031    31599  tools/manifestref.py
 650b352a0fa6fae3b66bd5c168a3ad8c622d66fe04b053511a4590802ef5fb6f     4895  tools/specsync.py

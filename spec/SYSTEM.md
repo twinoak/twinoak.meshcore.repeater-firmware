@@ -69,7 +69,10 @@ a fork to merge by hand. *How it is possible:* the three calls a mesh client nee
 (`searchPeersByHash`, `getPeerSharedSecret`, `onPeerDataRecv`, with `onPeerPathRecv` and
 `onTraceRecv`) are virtual and protected, and everything local management needs is public
 (`handleCommand`, the `sensors` settings seam). The first task of the repeater's phase 1 proves it
-by building it, and says so if it is wrong.
+by building it, and says so if it is wrong. *The exception (2026-11-07):* link 1.2's `LOCAL_REQUEST`
+answers with upstream's own `handleRequest`, which is private at the pin (`MyMesh.h`). The repeater
+firmware's pile 3.9 reaches it without editing upstream, writes in `docs/upstream.md` how, and drafts
+the request to upstream that would make it protected.
 
 **S-3 · A purpose-built link, not the companion protocol.** The two boxes speak
 [`LINK-PROTOCOL.md`](LINK-PROTOCOL.md): framed, checksummed, request/response from the Walter with

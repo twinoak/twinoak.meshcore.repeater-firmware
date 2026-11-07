@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Reference implementation of the TwinOak box link, protocol 1.1.
+"""Reference implementation of the TwinOak box link, protocol 1.2.
 
 The link is the UART between the LoRa box (RAK4630) and the LTE box (Walter); LINK-PROTOCOL.md
 is the specification and this file is the same thing as code. It is the source of the fixtures
 both firmware repositories test against:
 
-    python3 linkref.py gen   ../fixtures/link/link-v1.1.json    write the fixtures of 1.1
-    python3 linkref.py gen   ../fixtures/link/link-v1.json 0   1.0's, which never change: the same bytes
-    python3 linkref.py check ../fixtures/link/link-v1.1.json   re-derive every case and compare
+    python3 linkref.py gen   ../fixtures/link/link-v1.2.json      write the fixtures of 1.2
+    python3 linkref.py gen   ../fixtures/link/link-v1.1.json 1    1.1's, which never change: the same bytes
+    python3 linkref.py gen   ../fixtures/link/link-v1.json 0      1.0's, likewise
+    python3 linkref.py check ../fixtures/link/link-v1.2.json      re-derive every case and compare
     python3 linkref.py decode 0003010203...00                  print what one frame says
 
 Standard library only. Nothing here talks to a serial port: it is a codec, on purpose.
@@ -18,7 +19,8 @@ import struct
 import sys
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 1  # 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with the band
+PROTO_MINOR = 2  # 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with the band
+                 # 1.2 (2026-11-07): LOCAL_REQUEST, the node's own answer to a mesh request
 MAX_PAYLOAD = 240          # bytes of payload in one packet
 MAX_PACKET = MAX_PAYLOAD + 4  # type + seq + payload + crc16
 
@@ -107,7 +109,7 @@ def parse_frame(frame: bytes):
 
 # Requests (Walter -> RAK in 1.0). A response is the request's type with bit 7 set.
 HELLO, PING, STATUS, TIME_SET, TIME_GET, REBOOT, IDENTITY, SLEEP_NOTICE = 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
-CLI, POWER_GET, ENV_GET, LPP_GET = 0x09, 0x0A, 0x0B, 0x0C
+CLI, POWER_GET, ENV_GET, LPP_GET, LOCAL_REQUEST = 0x09, 0x0A, 0x0B, 0x0C, 0x0D
 JOB_BEGIN, JOB_END, PATH_SET, PATH_GET = 0x20, 0x21, 0x22, 0x23
 SEND_LOGIN, SEND_REQUEST, SEND_CLI, SEND_DISCOVERY, SEND_TRACE = 0x24, 0x25, 0x26, 0x27, 0x28
 REPLY_GET, OBS_PULL, MESH_COUNTERS = 0x29, 0x2A, 0x2B
@@ -119,7 +121,7 @@ RESPONSE_BIT = 0x80
 NAMES = {
     HELLO: "HELLO", PING: "PING", STATUS: "STATUS", TIME_SET: "TIME_SET", TIME_GET: "TIME_GET",
     REBOOT: "REBOOT", IDENTITY: "IDENTITY", SLEEP_NOTICE: "SLEEP_NOTICE", CLI: "CLI",
-    POWER_GET: "POWER_GET", ENV_GET: "ENV_GET", LPP_GET: "LPP_GET",
+    POWER_GET: "POWER_GET", ENV_GET: "ENV_GET", LPP_GET: "LPP_GET", LOCAL_REQUEST: "LOCAL_REQUEST",
     JOB_BEGIN: "JOB_BEGIN", JOB_END: "JOB_END", PATH_SET: "PATH_SET", PATH_GET: "PATH_GET",
     SEND_LOGIN: "SEND_LOGIN", SEND_REQUEST: "SEND_REQUEST", SEND_CLI: "SEND_CLI",
     SEND_DISCOVERY: "SEND_DISCOVERY", SEND_TRACE: "SEND_TRACE", REPLY_GET: "REPLY_GET",
@@ -133,7 +135,12 @@ OK, ERR_UNSUPPORTED, ERR_MALFORMED, ERR_BUSY, ERR_STATE, ERR_RANGE, ERR_FAILED, 
 # HELLO: role
 ROLE_UNKNOWN, ROLE_REPEATER, ROLE_BRIDGE, ROLE_SCANNER = 0, 1, 2, 3
 # HELLO: caps
-CAP_CLI, CAP_POWER, CAP_ENV, CAP_MESH_CLIENT, CAP_OBSERVATIONS, CAP_ATTENTION, CAP_TIME_PERSIST = (1 << n for n in range(7))
+CAP_CLI, CAP_POWER, CAP_ENV, CAP_MESH_CLIENT, CAP_OBSERVATIONS, CAP_ATTENTION, CAP_TIME_PERSIST, CAP_LOCAL_REQUEST = (
+    1 << n for n in range(8))
+
+# LOCAL_REQUEST: the request types it answers (LINK-PROTOCOL.md section 5.9), MeshCore's numbers
+REQ_STATUS, REQ_ACCESS_LIST, REQ_NEIGHBOURS, REQ_OWNER_INFO = 0x01, 0x05, 0x06, 0x07
+LOCAL_REQUEST_MAX_DATA = 32
 
 # path_mode
 PATH_NONE, PATH_DIRECT, PATH_HOPS = 0, 1, 2
@@ -287,6 +294,7 @@ def encode(kind: str, msg_type: int, f: dict) -> bytes:
             return out
         if t == ENV_GET: return out + u8(f["valid"]) + i16(f["temp_centi"]) + u16(f["rh_centi"]) + u32(f["pressure_pa"])
         if t == LPP_GET: return out + bytes.fromhex(f["lpp"])
+        if t == LOCAL_REQUEST: return out + bytes.fromhex(f["data"])
         if t == PATH_GET: return out + enc_path(f)
         if t in (SEND_LOGIN, SEND_REQUEST, SEND_CLI, SEND_DISCOVERY, SEND_TRACE):
             return out + u8(f["send"]) + u32(f["tag"]) + u32(f["sender_ts"])
@@ -311,6 +319,11 @@ def encode(kind: str, msg_type: int, f: dict) -> bytes:
         if t == SLEEP_NOTICE: return u32(f["expect_back_s"])
         if t == CLI: return f["text"].encode("utf-8")
         if t == LPP_GET: return u8(f["perm_mask"])
+        if t == LOCAL_REQUEST:
+            data = bytes.fromhex(f["data"])
+            if len(data) > LOCAL_REQUEST_MAX_DATA:
+                raise ValueError("local request data over %d bytes" % LOCAL_REQUEST_MAX_DATA)
+            return u8(f["req_type"]) + data
         if t == JOB_BEGIN: return bytes.fromhex(f["pubkey"]) + enc_path(f)
         if t == PATH_SET: return enc_path(f)
         if t == SEND_LOGIN: return u32(f["timeout_ms"]) + bytes.fromhex(f["password"])
@@ -347,6 +360,7 @@ def decode(kind: str, msg_type: int, payload: bytes) -> dict:
             f["channels"] = [{"bus_mv": r.u16(), "current_ma": r.i16()} for _ in range(3)]
         elif t == ENV_GET: f["valid"], f["temp_centi"], f["rh_centi"], f["pressure_pa"] = r.u8(), r.i16(), r.u16(), r.u32()
         elif t == LPP_GET: f["lpp"] = r.rest().hex()
+        elif t == LOCAL_REQUEST: f["data"] = r.rest().hex()
         elif t == PATH_GET: dec_path(r, f)
         elif t in (SEND_LOGIN, SEND_REQUEST, SEND_CLI, SEND_DISCOVERY, SEND_TRACE):
             f["send"], f["tag"], f["sender_ts"] = r.u8(), r.u32(), r.u32()
@@ -368,6 +382,7 @@ def decode(kind: str, msg_type: int, payload: bytes) -> dict:
         elif t == SLEEP_NOTICE: f["expect_back_s"] = r.u32()
         elif t == CLI: f["text"] = r.rest().decode("utf-8")
         elif t == LPP_GET: f["perm_mask"] = r.u8()
+        elif t == LOCAL_REQUEST: f["req_type"], f["data"] = r.u8(), r.rest().hex()
         elif t == JOB_BEGIN:
             f["pubkey"] = r.take(32).hex()
             dec_path(r, f)
@@ -539,6 +554,59 @@ CASES_1_1 = [
 ]
 
 
+# What 1.2 adds (LINK-PROTOCOL.md section 5.9). In link-v1.2.json only.
+#
+# The answers below are MeshCore's own layouts at the repeater firmware's pin (repeater-v1.18.0,
+# examples/simple_repeater/MyMesh.h and MyMesh.cpp's handleRequest). To the link they are bytes:
+# these helpers only make the examples readable, and nothing on either end re-encodes them.
+
+
+def repeater_stats(batt_mv, txq, noise_floor, last_rssi, recv, sent, air_s, up_s, sent_flood, sent_direct,
+                   recv_flood, recv_direct, err_events, last_snr_q4, direct_dups, flood_dups, rx_air_s, recv_errors):
+    """MeshCore's RepeaterStats, packed: 56 bytes, little-endian, no padding."""
+    return struct.pack("<HHhhIIIIIIIIHhHHII", batt_mv, txq, noise_floor, last_rssi, recv, sent, air_s, up_s,
+                       sent_flood, sent_direct, recv_flood, recv_direct, err_events, last_snr_q4, direct_dups,
+                       flood_dups, rx_air_s, recv_errors).hex()
+
+
+def neighbours_answer(total, entries):
+    """A page of the neighbour table: the table's count (i16), this page's count (i16), then per entry the
+    key prefix, the seconds since it was heard (u32) and its SNR in quarter-decibels (i8)."""
+    out = struct.pack("<hh", total, len(entries))
+    for prefix, heard_s_ago, snr_q4 in entries:
+        out += bytes.fromhex(prefix) + u32(heard_s_ago) + i8(snr_q4)
+    return out.hex()
+
+
+HELLO_FIELDS_1_2 = dict(HELLO_FIELDS_1_1, proto_minor=2, caps=HELLO_FIELDS_1_1["caps"] | CAP_LOCAL_REQUEST,
+                        fw_version="0.1.2+abc1234")
+
+CASES_1_2 = [
+    ("hello request, 1.2", "w2r", "request", HELLO, 43,
+     {"proto_major": 1, "proto_minor": 2, "peer_kind": 1, "max_payload": 240, "fw_version": "0.1.2+def5678"}),
+    ("hello response, 1.2: it answers local requests", "r2w", "response", HELLO, 43, dict(status=OK, **HELLO_FIELDS_1_2)),
+    ("hello response from a 1.1 radio to a 1.2 request: no local requests", "r2w", "response", HELLO, 44,
+     dict(status=OK, **HELLO_FIELDS_1_1)),
+    ("local request: status", "w2r", "request", LOCAL_REQUEST, 45, {"req_type": REQ_STATUS, "data": ""}),
+    ("local request: the status, as the node packs it", "r2w", "response", LOCAL_REQUEST, 45,
+     {"status": OK, "data": repeater_stats(4012, 0, -112, -97, 12345, 6789, 1834, 86400, 2100, 840, 9800, 1500,
+                                           0, 25, 12, 3400, 5400, 7)}),
+    ("local request: neighbours, ten newest first, six-byte prefixes", "w2r", "request", LOCAL_REQUEST, 46,
+     {"req_type": REQ_NEIGHBOURS, "data": "000a0000000611223344"}),
+    ("local request: two neighbours", "r2w", "response", LOCAL_REQUEST, 46,
+     {"status": OK, "data": neighbours_answer(2, [(KEY_A[:12], 41, 29), (KEY_B[:12], 3600, -10)])}),
+    ("local request: the access list", "w2r", "request", LOCAL_REQUEST, 47, {"req_type": REQ_ACCESS_LIST, "data": "0000"}),
+    ("local request: one admin on the access list", "r2w", "response", LOCAL_REQUEST, 47,
+     {"status": OK, "data": KEY_A[:12] + "03"}),
+    ("local request: an empty access list", "r2w", "response", LOCAL_REQUEST, 48, {"status": OK, "data": ""}),
+    ("local request: owner info", "w2r", "request", LOCAL_REQUEST, 49, {"req_type": REQ_OWNER_INFO, "data": ""}),
+    ("local request: version, name and owner info", "r2w", "response", LOCAL_REQUEST, 49,
+     {"status": OK, "data": "v1.18.0\nTwinOak Risskov\nbench unit".encode().hex()}),
+    ("local request refused: telemetry is lpp_get's", "r2w", "response", LOCAL_REQUEST, 50, {"status": ERR_RANGE}),
+    ("local request refused: no handler in this role", "r2w", "response", LOCAL_REQUEST, 51, {"status": ERR_UNSUPPORTED}),
+]
+
+
 def reject_reason(frame: bytes) -> str:
     """Why parse_frame refuses a frame: 'cobs', 'short', 'oversize' or 'crc'. Informative - a receiver
     has to refuse the frame and count it; it does not have to agree on the word."""
@@ -568,7 +636,8 @@ def invalid_frames():
 
 def build_fixtures(minor=PROTO_MINOR):
     cases = []
-    for name, direction, kind, t, seq, fields in CASES + (CASES_1_1 if minor >= 1 else []):
+    for name, direction, kind, t, seq, fields in (CASES + (CASES_1_1 if minor >= 1 else [])
+                                                  + (CASES_1_2 if minor >= 2 else [])):
         payload = encode(kind, t, fields)
         wire_type = t | RESPONSE_BIT if kind == "response" else t
         cases.append({
