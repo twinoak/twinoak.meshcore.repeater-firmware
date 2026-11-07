@@ -10,6 +10,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common/link/session/Interfaces.h"  // CliAccess, for the lost mode's handler
 #include "roles/repeater/app/TwinOakMesh.h"  // the node's identity, its advert name, and the mesh client's job
 #include "roles/repeater/meshclient/ObservationRing.h"
 
@@ -19,6 +20,16 @@ namespace link {
 // Serial1 up, EV_BOOT queued. After radio_init() and the_mesh.begin(), because the boot
 // identifier is drawn from the radio's RNG and the advert name comes from the loaded preferences.
 void linkBegin(TwinOakMesh& mesh);
+
+// The link on a node that has **refused to make itself a key** (src/roles/repeater/app/IdentityGuard.h,
+// pile 3.9's task 01): HELLO, PING, STATUS and REBOOT as always; IDENTITY answered ERR_STATE,
+// because there is no identity (spec/LINK-PROTOCOL.md 5.6); `CLI` run by the handler given here
+// - the lost mode's two words and its explanation - and not by upstream's interpreter, which has
+// no mesh behind it on this boot; attention reason 6 raised once with
+// identity::kFaultCodeIdentityLost so that a sleeping Walter wakes and reports it. No clock, no
+// telemetry, no mesh client, no observations: their capability bits are absent from HELLO by
+// construction (session/Interfaces.h, capsOf). After radio_init(), for the boot identifier.
+void linkBeginIdentityLost(CliAccess& cli);
 
 // One bounded pass of the link. Once per loop().
 void linkLoop();

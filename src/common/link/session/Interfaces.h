@@ -13,7 +13,10 @@
 //     run the whole session against fakes.
 //
 // `firmware`, `system` and `identity` arrived with phase 1's task 03, and `clock` with its task
-// 04 (src/roles/repeater/clock/LinkClock.h is what implements it). The rest are declared here with the methods
+// 04 (src/roles/repeater/clock/LinkClock.h is what implements it). `firmware` and `system` are
+// always present; `identity` is absent on the one boot that found a node's settings without its
+// key and refused to make a new one (src/roles/repeater/app/IdentityGuard.h, pile 3.9's task
+// 01), and IDENTITY then answers kErrState. The rest are declared here with the methods
 // STATUS and `caps` need of them today; the task that implements one adds the methods its own
 // messages need (05 the console and attention, 06 power and environment, phase 2 the mesh client
 // and the observation ring).

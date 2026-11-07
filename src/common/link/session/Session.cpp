@@ -255,7 +255,16 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
     }
 
     case kMsgIdentity: {
-      // Section 5.6: the node's MeshCore public key and its advert name.
+      // Section 5.6: the node's MeshCore public key and its advert name. A node that has refused
+      // to make itself a key (src/roles/repeater/app/IdentityGuard.h: its file system would not
+      // mount, or its key file is gone while its settings are not) has no identity to answer
+      // with, and says so with kErrState - "not possible now" - rather than with 32 bytes that
+      // are not a key. The Walter's heartbeat then carries no radio key, which is what puts the
+      // condition in front of a person on meshmaster.dk.
+      if (s_.identity == nullptr) {
+        n = encodeStatus(kErrState, resp_, sizeof(resp_));
+        break;
+      }
       IdentityResponse out;
       out.pubkey = s_.identity->publicKey();
       out.name = bytesOfText(s_.identity->nodeName());

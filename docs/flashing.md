@@ -102,46 +102,164 @@ against the descriptor it wrote. **No chip erase, ever.**
 
 **6 November 2026.** A Walter at `v0.1.0` began a first install over SWD and
 its own watchdog reset it part-way through, leaving the radio's application
-region partly written and the radio with nothing it could start. It came back
-over its own USB-C, with its key, and this is the whole of it:
+region partly written and the radio with nothing it could start. The radio came
+back over its own USB-C with `v0.1.0`'s `.uf2` — **and as a new node.** Its
+next `HELLO` carried a new key, meshmaster.dk logged
+`agent.companion_changed`, its repeater had to be registered again (41, where it
+was 12), and its admin password was a random one nobody knows (`spec/SYSTEM.md`
+S-13). The first version of this section promised the key would survive; it
+did not, and `tasks/phase-3.9/reports/01.md` is the reading of why. What
+follows is the recovery as it should be done, and what to expect at the end
+of it.
 
-1. **Plug a cable into the adapter's USB-C and look for the `RAK4631` drive.**
-   An interrupted install leaves the radio in its bootloader by itself, so the
-   drive is very likely there with nothing pressed. The flasher writes *bank 0
-   holds nothing* into the bootloader's settings page **before** its first
-   erase and *bank 0 holds a valid application* only **after** the whole image
-   has been read back and its SHA-256 checked, and the vector-table page is the
-   first it erases — so between those two points the bootloader refuses the
-   application on both of its counts, and a bootloader that refuses the
-   application comes up in its own DFU and stays there.
-2. **If no drive appears, reset the radio once** — the adapter's reset button,
-   or power the box down and up. A flash that was interrupted can have left the
-   core halted over SWD, and only a reset puts it back on its own feet.
-3. **If there is still no drive, double-tap the reset button.** That works
-   whatever is in the application region: the double tap is the bootloader's
-   own — two resets on the pin within half a second — and neither the Walter
-   nor a `.uf2` can reach where the bootloader lives.
-4. **Copy the release's `.uf2` onto the drive.** §2, the ordinary way in. The
-   board reboots by itself when the copy finishes, on this release.
+**0. On the Walter first: `rak update status`, and keep the box powered.**
 
-**And it keeps its key.** The node's identity, its settings, its ACL and its
-clock file are in the file system *above* the application, from `0xED000` up,
-and neither path may write there. The Walter's flasher writes the application
-region (`0x26000`–`0xED000`) and exactly one page outside it — the bootloader's
-settings page at `0xFF000`, which is what makes an interrupted install announce
-itself as above. The bootloader's own UF2 handler writes a block only below
-`0xEA000` and refuses one above, so a `.uf2` cannot reach the file system even
-if it named an address in it; and this release's `.uf2` names none — every block
-of it is inside the application region. **No chip erase, ever.** That is
-`rak provision`'s alone (§4), and it is the one thing here that does take the
-identity with it.
+- An update that stopped in *flashing-candidate* is **resumed at the Walter's
+  next boot** (the Walter's `docs/update.md`, *After a power cut*): a Walter
+  that reboots — and "power the box down and up" reboots it — flashes the
+  journalled image over whatever you have just put on the radio by hand.
+  `rak update status` says which state the last run ended in. *stuck*, *done*
+  and *rolled back* are terminal and resume nothing; *flashing-candidate*,
+  *booting* and *proving* are not, and the Walter has to finish or abandon
+  that run before the radio is touched by hand. (The first unit's run ended
+  *stuck*, so nothing resumed there.)
+- **On the production adapter the radio's USB-C does not power the radio**
+  (the hardware repository's `BENCH-BREADBOARD.md` §6, item 7): the box must
+  be on. A dead-looking radio on a cable alone is a radio with no power.
+
+**1. Plug a cable into the adapter's USB-C and look for the `RAK4631` drive.**
+An interrupted install leaves the radio in its bootloader by itself, so the
+drive is very likely there with nothing pressed. The Walter's flasher writes
+*bank 0 holds nothing* into the bootloader's settings page **before** its first
+erase and *bank 0 holds a valid application* only **after** the whole image has
+been read back and its SHA-256 checked, and the vector-table page is the first
+it erases — so between those two points the bootloader refuses the application
+on both of its counts and comes up in its own DFU with no timeout.
+
+*What was checked, and in which bootloader.* The radio runs RAK's **0.4.4**, of
+which RAK publishes no source; the 0.4.3 source it publishes beside it says
+`bootloader_app_is_valid()` refuses an application whose first two words are
+blank or whose settings page does not say `BANK_VALID_APP`, and
+`check_dfu_mode()` then starts DFU with no timeout. The same function was found
+in the **0.4.4 binary** vendored at `boards/base/rak4630/`
+(`out/p3.4-01/rak-0.4.4_s140_6.1.1.dis.txt`, at `0xF5468`): the same two-word
+blank test, the same `bank_0 == 1` test and the same optional CRC, instruction
+for instruction, and the call that starts DFU keeps both of its shapes (a
+3-second timeout only for a single tap or a UF2/serial magic, none otherwise).
+0.4.4's one stated change, *BLE OTA recovery*, is a path that runs when the
+application is invalid and brings the BLE stack up; what it does to the USB
+drive could not be read out of the binary with certainty, which is why steps 2
+and 3 are there.
+
+**2. If no drive appears, reset the radio once** — the adapter's reset button,
+or the Walter's `rak reset` (not a power cycle of the box: step 0). A flash that
+was interrupted can have left the core halted over SWD, and only a reset puts
+it back on its own feet.
+
+**3. If there is still no drive, double-tap the reset button.** That works
+whatever is in the application region: the double tap is the bootloader's own —
+two resets on the pin within half a second.
+
+What each path can write, and no more:
+
+- **the Walter's install** writes the application region (`0x26000`–`0xED000`:
+  the pages the image covers, and only those) and exactly one page outside it,
+  the bootloader's settings page at `0xFF000`. Its flash layer refuses every
+  other address (the Walter's `flasher.cpp` at its `v0.1.0`, `FlashRegion`).
+- **this release's `.uf2`** (family `0xADA52840`) is written by the bootloader's
+  UF2 handler, which takes a block of that family only below `0xEA000` and
+  refuses one above; every block of the file is inside the application region.
+
+Neither path can reach the bootloader at `0xF4000`, and neither writes the
+file system at `0xED000`–`0xF4000` where the node's key, its settings, its ACL
+and its clock live. `rak provision` can — it erases the chip whole and writes
+the base, bootloader included — and so can the bootloader's own
+bootloader-family UF2 branch; neither is part of a recovery.
+
+**4. Copy the release's `.uf2` onto the drive.** §2, the ordinary way in. The
+board reboots by itself when the copy finishes.
+
+### The key
+
+**A recovery may give the radio a new identity, as the first one did.** Not
+because either path above writes the file system — neither does — but because
+of what the firmware did with that file system on its next boot. Up to
+`v0.1.1`, the first boot after the `.uf2` called the Adafruit core's
+`InternalFS.begin()`, which **erases the whole region and formats it when the
+volume will not mount**, and then found no key file and drew a new key: a new
+node, with no word said. A volume stops mounting when one of its seven 4 KB
+pages is torn: the core keeps LittleFS in 128-byte blocks on 4096-byte pages
+and rewrites a page by erasing it and programming it again, so a reset, a
+halt over SWD or a power dip inside that window takes 32 blocks at once — the
+first page holds the superblock and the root directory. This firmware writes
+that page twice in the first seconds of every boot (the clock's lower bound,
+and again when the Walter sets the time), which is when a second reset is most
+likely. Which of the evening's resets did it to the first radio cannot be told
+now: the region was erased by the format.
+
+**From `v0.1.2` the radio refuses instead.** It mounts without the format, and
+makes a key only where no node was: a region that is blank (the base just
+written) or a volume with neither a key file nor settings. A torn volume, or
+settings without a key, is a **lost identity**: no key is made, nothing is
+written, the mesh is not started, and the radio says so on its USB console
+every ten seconds and on the link —
+
+```
+IDENTITY LOST: the file system at 0xED000 would not mount and is not blank. No key was made
+and the mesh is not started. 'erase' then 'reboot' makes this radio a new node; the old key
+cannot be recovered (docs/flashing.md 3a)
+```
+
+— `HELLO` answers as always, `IDENTITY` answers `ERR_STATE`, and an
+`EV_ATTENTION` of reason 6 with detail 1 wakes a sleeping Walter. The way out
+is the person's: `erase` (the core's erase-and-format, now on your word) and
+`reboot`, at the USB console or as `rak cli erase` and `rak cli reboot` on the
+Walter. The old key is gone either way — nothing keeps a copy of a private key
+— but the radio does not become somebody else by itself, and the mesh and
+MeshMaster are not told a new key until you have decided to make one.
+
+**How to tell**, after any recovery:
+
+- on the Walter, `rak hello` says which firmware answered (`firmware 0.1.2+…`),
+  and `agent id` prints the repeater's key as `IDENTITY` returned it — compare
+  it with the key MeshMaster knows for the unit. On a radio in the lost mode
+  `agent id` has no key to print and `rak cli ver` answers the `IDENTITY LOST`
+  line;
+- on meshmaster.dk, the unit's exit-node page shows **the companion key
+  changed** and the audit log has `agent.companion_changed` with the old and
+  the new key (its `docs/ops/exit-nodes.md`); on a radio in the lost mode the
+  heartbeat carries no radio key at all;
+- at the USB console, `get public.key` is the node's key, and the boot prints
+  `IDENTITY LOST` or `Repeater ID:`.
+
+**What then**, when the key is new:
+
+1. **Confirm the key on meshmaster.dk** — *This is the right companion* on the
+   exit node's page, which lifts the suspension of admin routing through it and
+   re-grants the pairs it can.
+2. **Register the unit's repeater again** from that key: the old repeater
+   record is another node's now.
+3. **Re-apply what a person had set**, through the Walter's `rak cli <line>`
+   or at the USB port, each line as `docs/provisioning.md` §2 gives it: the
+   `name`, `lat` and `lon`, `owner.info`, the **admin password** (`password
+   <new>` — the first boot drew a random one nobody knows), the **guest
+   password**, the regions (`region default dk`, `region save`), and anything
+   else that was not the profile's: the three delays, `flood.max`, a lower duty
+   cycle, the ACL (`setperm`). Then tell MeshMaster the admin password
+   (`docs/provisioning.md` §5).
+
+   **What the profile restores by itself**, on the first boot, so there is no
+   need to type it: `path.hash.mode 1`, `dutycycle 10`, `agc.reset.interval 4`,
+   `loop.detect moderate`, `flood.max.unscoped 15` and `flood.advert.interval`
+   (60–85 hours, derived from the new key, so it will differ from the old
+   unit's). The radio channel is the build's and needs no line.
 
 **The one line that shows it worked**, on the Walter's console:
 
 ```
 > rak hello
 hello: protocol 1.0, role 1 (repeater), slot 0, max payload 240, boot_id 0x5eed1234
-  firmware 0.1.1+<sha7>, board rak4630-single, upstream repeater-v1.18.0+81dbae59
+  firmware 0.1.2+<sha7>, board rak4630-single, upstream repeater-v1.18.0+81dbae59
   capabilities 0x7f: CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST
 ```
 
@@ -153,9 +271,11 @@ python3 tools/linkcli.py --port COM7 hello    # protocol 1.1, and band 868 at th
 ```
 
 `firmware` is the reading that matters: the version is *inside* the image, so
-`0.1.1+<sha7>` is this release running and `0.0.0-dev` would be a build
-somebody made by hand. A **0.1.0** Walter says `protocol 1.0` and prints no
-band — correct, and all it ever said ([`docs/link.md`](link.md) §1).
+`0.1.2+<sha7>` is this release running and `0.0.0-dev` would be a build
+somebody made by hand. `capabilities 0x7f` is a node with its key; a node in
+the lost mode advertises `0x21` (`CLI`, `ATTENTION`) and nothing else. A
+**0.1.0** Walter says `protocol 1.0` and prints no band — correct, and all it
+ever said ([`docs/link.md`](link.md) §1).
 
 ## 4. A radio fresh from the factory: the base, once
 
