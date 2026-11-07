@@ -510,12 +510,12 @@ switch, a minute without power, a companion or a part nobody has.
 
 ## 4. Management over the link
 
-`docs/link.md` §2b and §2c are the pages: the console over the link, our
-settings, and attention. Every rule below has a native test against fakes and
-most of them ran against the firmware's own session behind a pipe
-(`tools/linkloop/`); what no session could do is run **upstream's own
-interpreter**, which is the thing these lines are really checking, and hear a
-mesh admin.
+`docs/link.md` §2b, §2c and §2i are the pages: the console over the link, our
+settings, attention, and the node's own answers. Every rule below has a native
+test against fakes and most of them ran against the firmware's own session
+behind a pipe (`tools/linkloop/`); what no session could do is run **upstream's
+own interpreter** and **upstream's own request handler**, which is the thing
+these lines are really checking, and hear a mesh admin.
 
 - [ ] **p1-05** `linkcli.py --port <port> cli "get radio"` answers
   `> 869.618,62.5,8,8`, exactly as the USB console does; `cli "neighbors"` and
@@ -571,6 +571,79 @@ mesh admin.
   send**: it leaves upstream's interpreter waiting for a blank line, which this
   link cannot send. `cli " "` (one space) is the way out, and worth confirming
   once, because the alternative is a reboot.
+
+### `LOCAL_REQUEST`: the node's own answers, without the air (link 1.2)
+
+`docs/link.md` §2i. The four lines below are the ones no session can walk: the
+answer is **upstream's own `handleRequest`** writing into **upstream's own
+`reply_data`**, both private at the pin and reached by the idiom of
+`src/common/cxx/PrivateMember.h`. The session's rules are native tests
+(`test/test_link_session`, `TheLocalRequest.*`), the mechanism is one too
+(`test/test_private_member`), and the shapes ran through a miniature of the
+handler behind a pipe (`tools/linkloop/`) — but whether the real handler answers
+at all, and whether its bytes are the ones `docs/upstream.md` place 9 says they
+are, is a board. Needs the radio's v0.1.2 and the link dongle; a second radio
+within earshot makes the neighbour lines worth reading.
+
+- [ ] **p3.9-02** **`linkcli.py --port <port> hello` says `protocol 1.2` and
+  `caps 0xff`**, with `LOCAL_REQUEST` in the list → ______. A 1.1 request is
+  still answered 1.1: there is no 1.1 asker on the bench, so the way to see it
+  is `-v` on the frame above and the fixture's own bytes.
+- [ ] **p3.9-02** **`local status` answers, and the numbers are the node's.**
+  `linkcli.py --port <port> local status` → 56 bytes, read out as battery, tx
+  queue, noise floor, last RSSI, last SNR, uptime, packets and air time. Hold
+  three of them against the console in the same minute, which is the whole point
+  of the line: `cli "stats-core"`'s uptime and received/sent counts, and
+  `cli "stats-radio"`'s noise floor. They must agree (→ ______). **56 bytes
+  exactly**: a different length is `RepeaterStats` having moved upstream, which
+  is tier three and not a bench finding (`docs/upstream.md` place 9).
+- [ ] **p3.9-02** **`local neighbours` is the node's own table.** With a second
+  radio adverting within earshot: `local neighbours` → the count in the table
+  and the page, with a 6-byte key prefix, a heard-seconds-ago and an SNR per
+  entry (→ ______). Hold it against `cli "neighbors"`, which prints the same
+  table as text — the keys and the ages must be the same nodes. Then
+  `local neighbours --count 1 --offset 1 --order 2 --prefix-len 8`: one entry,
+  eight bytes of key, and the *second* strongest — the request's own fields
+  reaching upstream untouched.
+- [ ] **p3.9-02** **`local access-list` is the real ACL, and asking does not
+  change it.** On a node a phone has logged into as admin: `local access-list` →
+  one entry per client, a 6-byte prefix and `permissions 0x03 (admin)` for the
+  phone (→ ______). Run it **twice** and compare: the same entries, no new one —
+  the admin this link tells upstream about is a local object and is never added
+  (`src/roles/repeater/link/LocalRequest.h`). `cli "get acl"` on the USB console
+  is the other view of the same list. On a freshly erased node it is `0 byte(s)`
+  with status `OK`, which is not a refusal.
+- [ ] **p3.9-02** **`local owner-info` is three lines**: `v1.18.0` (upstream's
+  `FIRMWARE_VERSION`, **not** this firmware's version), the node's name and its
+  owner info (→ ______) — the same strings `get name` and `get owner.info`
+  answer.
+- [ ] **p3.9-02** **The refusals, from the real handler.**
+  `local raw --type 0x03` → `ERR_RANGE` (telemetry's local form is `lpp`, §2d,
+  and this one never reaches the node at all); `local raw --type 0x02` →
+  `ERR_RANGE`; `local raw --type 0x05 --data 0100` → `ERR_RANGE`, because
+  upstream's access-list branch wants both reserved bytes zero and otherwise
+  answers nothing; `local raw --type 0x06 --data 09000000000600112233` →
+  `ERR_RANGE`, a neighbours version it does not know. Each must be the one status
+  byte and nothing else.
+- [ ] **p3.9-02** **Nothing went on the air, and no job was disturbed.** With a
+  job begun and a send awaiting its reply (§6's lines): `counters` before,
+  `local status` three times, `counters` after — `tx` and `client_tx` unchanged
+  (→ ______ / ______), `status` still showing flag bits 0 and 1, and the awaited
+  reply still arriving. A second radio listening should hear nothing at all
+  during the three.
+- [ ] **p3.9-02** **And the repeater is undisturbed.** Run `local status` and
+  `local neighbours` once a second for a minute while the node is repeating
+  traffic from the second radio: no packet lost, `link.errors` unchanged, and
+  `sensor get walter.seen` reading 0 throughout. The answer is built inside one
+  turn of the main loop, so what this looks for is the loop's worst pass
+  (§2's line) not growing.
+- [ ] **p3.9-02** **From the Walter, once its pile 9 task 06 has the command.**
+  `rak local status` and `rak local neighbours` on the Walter's console answer
+  the same bytes this laptop just read, and meshmaster.dk's scheduled `status`
+  and `neighbours` jobs for the unit's own repeater stop answering *Failed* —
+  which is the reason link 1.2 exists (`tasks/phase-3.8/FOLLOWUPS.md`). Needs
+  the Walter's v0.1.2 and is that repository's bench, not this one's; the line is
+  here because the radio's half is what this task shipped.
 
 ## 5. Power
 

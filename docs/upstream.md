@@ -36,7 +36,7 @@ a checkout of MeshCore's own tree gets, and some things had to be arranged by
 hand. `tasks/phase-0/reports/01.md` has the whole list of ten with what each
 cost; what follows is the shorter list that matters here.
 
-## The eight places a bump re-reads
+## The nine places a bump re-reads
 
 Each of these depends on upstream in a way a compiler may not catch, so each is
 read again at the new tag — by the session of a red bump
@@ -54,6 +54,8 @@ merges a green one: that reading is what the review of a green bump *is*
 | 6 | **`build_as_lib.py`'s defines** | it is upstream's own script, run by its `library.json`, and it decides which of MeshCore's sources are compiled. We set `BUILD_EXAMPLE=simple_repeater` (which adds `examples/simple_repeater/*.cpp`) and, after it — the script reads the defines in order — `EXCLUDE_FROM_EXAMPLE=main.cpp`. We deliberately set neither `MC_VARIANT` (it would compile upstream's `target.cpp`, the file `src/common/board/target.cpp` replaces; the two variant files we do need are place 4's) nor `DISPLAY_CLASS` nor `MC_UI_FLAVOR`. A rename there, or an example renamed, is a build that compiles the wrong set of files or none |
 | 7 | **the application region in the linker script** | `boards/rak4631.json` names `nrf52840_s140_v6.ld`, which the Adafruit core fork provides, and its `FLASH` region (`ORIGIN = 0x26000, LENGTH = 0xED000 - 0x26000`) is where an image may live and nothing else. `tools/pio/buildinfo.py` copies the script the link used and the release tooling reads `app_region` out of that copy, with tests that refuse a byte outside it — so a move is caught. But the manifest's `app_region` then **changes**, and the Walter writes images at that address: a bump that moves the region is a bump whose report says so, loudly, because the other box has to be told |
 | 8 | **what our sources take from upstream's headers** | `src/common/board/CoreHeaders.h` (the Arduino core's own two, which `UpstreamHeaders.h` includes and a file that needs no MeshCore stops at), `src/common/board/UpstreamHeaders.h`, `src/roles/repeater/app/UpstreamMyMesh.h` and `src/roles/scanner/ScannerHeaders.h` (RadioLib, SPI, the watchdog registers and Semtech's spectral-scan patch, for the role that compiles no MeshCore) are the only files of ours that include an upstream header - with one more that is not upstream's at all and is read on a **RadioLib** bump rather than a MeshCore one: `src/roles/scanner/vendor/sx126x_spectrum/SX126xSpectrumScanner.h`, the vendored host class of the `scope` sweep plugin, which reaches four members of `SX126x` that are public only under `RADIOLIB_GODMODE` and are protected in 7.8.0 (`mod`, `readRegister`, `setRx`, `setBufferBaseAddress`; the subclass at the top of that file is the whole of the adaptation, and its own header comment says so), and calls `uploadPatch`, `calibrateImageRejection` and `setRxBandwidth` by their 7.8.0 signatures, and each does it as system headers, so that upstream's warnings do not fail our `-Werror` (`docs/ARCHITECTURE.md` §11). A bump that adds a header we need is a line in one of them — `<Adafruit_BME280.h>` is there because this firmware drives that part itself, and `<CayenneLPP.h>` arrives through upstream's own `SensorManager.h`. Two more are named there because `src/common/` may not include a role's header and so no longer reaches them through `MyMesh.h`: `<helpers/IdentityStore.h>` for the `FILESYSTEM` macro and the core's `<InternalFileSystem.h>` for `InternalFS` — a bump that moves either is a compile error in `src/common/power/` and `src/common/board/target.cpp`. And upstream's `MyMesh.h` includes `<target.h>` *unqualified*, which is what lets ours shadow theirs by include order — a bump that qualifies that include, or adds a `target.h` of its own earlier on the path, is a build that constructs two boards |
+
+| 9 | **the two private members of `MyMesh` that link 1.2 answers `LOCAL_REQUEST` from**, and the three reply layouts the link's fixtures were written from | `MyMesh::handleRequest` and `MyMesh::reply_data` are **private** at the pin (`examples/simple_repeater/MyMesh.h:124` and `:90`: the class body opens with no access specifier). `spec/SYSTEM.md` S-2's *exception* of 7 November 2026 is what allows reaching them, and `src/roles/repeater/link/LocalRequest.cpp` is the one file of ours that names either, through the explicit-instantiation idiom of `src/common/cxx/PrivateMember.h` (`test/test_private_member` holds the mechanism natively). What a bump re-reads: **the two names**, because a rename is a link error on the bump's own pull request and a *move to `protected:` or `public:`* makes the idiom unnecessary - delete it and call the member; **`handleRequest`'s signature**, `int(ClientInfo*, uint32_t, uint8_t*, size_t)`, because the tag's typedef spells it out and a change is a compile error; **that it does not read `payload_len`** - its neighbours branch reads `payload[1]`..`payload[6]` whatever the length was, which is why `LocalRequest.h` hands it a buffer `MAX_PACKET_PAYLOAD` wide and zeroed, and a branch that read further still finds zero; **that `reply_data` is used and released inside one handler** (`handleLoginReq`, the three anonymous handlers and `handleRequest`, each reached from `Mesh::onRecvPacket` and each copying the buffer into a packet before returning), which is what makes a call from the link's turn of `loop()` safe; **that a reply of 0 means "no answer"**, which section 5.9 turns into `ERR_RANGE`; and `MAX_PACKET_PAYLOAD` itself, held by a `static_assert` against the link's payload. And the **three layouts on the wire**: `RepeaterStats` (`MyMesh.h`, 56 bytes), the neighbours page (`MyMesh.cpp`'s `REQ_TYPE_GET_NEIGHBOURS` branch: two `int16_t` counts, then per entry a key prefix, `heard_seconds_ago` and one SNR byte) and the access list (a 6-byte key prefix and a permissions byte per entry). Our code re-encodes none of the three - they are upstream's own bytes, carried - so a bump that changes one is not a compile error anywhere: it is **tier three**, below |
 
 And the rails that must survive a bump, because a bump is exactly when one gets
 quietly lost: nothing the mesh says logged as text (`MESH_PACKET_LOGGING` and
@@ -82,6 +84,21 @@ makes too, because ours is a copy of theirs (place 5). Three of those entries ar
 that cannot fail loudly: the **order** `Mesh::onRecvPacket` tries matched peers
 in, which our extra peer sits in front of. A comment above that override cites
 the function and the pin, which is what place 5 of the table is for.
+
+**And two members that are private**, which is the one place this firmware does
+not get by on public and protected virtuals: `MyMesh::handleRequest` and
+`MyMesh::reply_data`, which link 1.2's `LOCAL_REQUEST` answers the node's own
+status, access list, neighbours and owner info from
+(`spec/LINK-PROTOCOL.md` §5.9). `spec/SYSTEM.md` S-2's *exception* of
+7 November 2026 allows it, `src/common/cxx/PrivateMember.h` is how — the
+standard's own `[temp.explicit]`, not a cast and not `#define private public` —
+and place 9 of the table above is what a bump re-reads. The alternative was
+re-implementing the four answers, and it was refused: the neighbour table and
+the ACL are private too, so a copy would be four reply layouts drifting at every
+pin, noticed on the air rather than in a build. **The request that would end
+this** is one word in `MyMesh.h`, `handleRequest` moved below `protected:`;
+`tasks/phase-3.9/reports/02.md` drafts it, and a pin that grants it turns place 9
+into two deleted template tags.
 
 ## What a bump costs today
 
@@ -121,10 +138,10 @@ fails nothing by itself.
 compiled for every board, the native tests still pass, `spec/` still matches
 its manifest and the release still assembles. It does not say that a define
 upstream renamed, a library range they moved or a flag they added has been
-brought across — the eight places of the table above are exactly the things a
+brought across — the nine places of the table above are exactly the things a
 compiler may not catch, and `tasks/sync/TEMPLATE.md` is that list as a
 checklist. So the review of a green bump is: read the pull request body (it is
-upstream's own commit list between the two pins) against those eight places,
+upstream's own commit list between the two pins) against those nine places,
 and merge. Anything it turns up that matters is a follow-up of the phase that
 owns it — or, if upstream moved the wire, tier three, which is a reading task
 before it is a code change.
@@ -192,7 +209,7 @@ delete both branches afterwards — a rehearsal is a test, not a bump.
 It writes `tasks/sync/NN-meshcore-<tag>.md` from
 [`tasks/sync/TEMPLATE.md`](../tasks/sync/TEMPLATE.md) — the tag, the pull
 request, the failing log, and the standing instructions: read what upstream
-changed, re-read the eight places, bring the code to the new API, keep the
+changed, re-read the nine places, bring the code to the new API, keep the
 rails, verify locally, and say in the report what upstream changed that
 mattered. It adds the row the driver's table needs and changes nothing else:
 the pin was already moved by the branch the workflow pushed, and the session
@@ -212,6 +229,20 @@ that has to be brought across:
 2. so the order is **meshmaster.dk first** — where the new reading is
    established and tested — then `twinoak/meshmaster-agent-firmware`, then
    here. `spec/proposals/03` is the shared half of it.
+
+And since link 1.2 there is a third thing in the same tier, and it is the box
+link's own wire: **`LOCAL_REQUEST` carries three of upstream's reply layouts
+unchanged** (place 9 of the table — `RepeaterStats`, the neighbours page, the
+access list). Our code does not read those bytes and does not re-encode them, so
+a bump that changes one compiles green here and changes **what the Walter and
+meshmaster.dk are handed**. That is a change to a wire this project
+specifies, so it is a **new link minor**: `spec/LINK-PROTOCOL.md` §5.9 gets the
+new layout, `spec/tools/linkref.py` regenerates `link-v1.<next>.json`, and both
+firmwares and the server are brought across in the order of 1 and 2 above. A bump must not
+be merged with a changed layout and the same link minor: a Walter would then
+read one node's bytes as another's. (A layout upstream changes *silently* —
+a field widened, two reordered — is exactly what the fixtures cannot catch,
+which is why the layouts are written out in place 9 for a person to compare.)
 
 Which means tier three is a **reading task before it is a code change**: what
 moved, who else reads it, and what the server already says about it. The

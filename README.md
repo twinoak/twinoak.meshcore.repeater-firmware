@@ -25,7 +25,7 @@ is [`docs/flashing.md`](docs/flashing.md), and how a board becomes a unit is
 [`tasks/`](tasks/README.md); how it gets released is
 [`docs/release.md`](docs/release.md); how it keeps up with MeshCore — the weekly
 pull request that moves the pin, the one command for a bump that needs a
-session, and the eight places a bump re-reads — is
+session, and the nine places a bump re-reads — is
 [`docs/upstream.md`](docs/upstream.md).
 
 ## State

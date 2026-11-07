@@ -162,6 +162,19 @@ bool decodeLppGet(Bytes payload, LppGet& out) {
   return r.ok();
 }
 
+bool decodeLocalRequest(Bytes payload, LocalRequest& out) {
+  Reader r(payload);
+  out.req_type = r.u8();
+  out.data = r.rest();
+  // Section 5.9's two malformed shapes, and the only two: an empty payload - the Reader is not
+  // ok() when there was not even a req_type to read - and more than 32 bytes of data. A
+  // `req_type` this firmware does not know is **not** malformed: it is kErrRange, and the
+  // session decides that from section 5.9's table (isLocalRequestType), the way REBOOT's mode is
+  // decided by the board.
+  if (!r.ok() || out.data.len > kLocalRequestMaxData) return false;
+  return true;
+}
+
 bool decodeJobBegin(Bytes payload, JobBegin& out) {
   Reader r(payload);
   const Bytes key = r.take(kPubKeyLen);
@@ -319,6 +332,13 @@ size_t encodeLppResponse(const LppResponse& in, uint8_t* out, size_t cap) {
   Writer w(out, cap);
   w.u8(kOk);
   w.bytes(in.lpp);
+  return w.ok() ? w.size() : 0;
+}
+
+size_t encodeLocalResponse(const LocalResponse& in, uint8_t* out, size_t cap) {
+  Writer w(out, cap);
+  w.u8(kOk);
+  w.bytes(in.data);
   return w.ok() ? w.size() : 0;
 }
 

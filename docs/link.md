@@ -5,24 +5,27 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-**This firmware speaks 1.1** (`kProtoMinor` in
+**This firmware speaks 1.2** (`kProtoMinor` in
 [`src/common/link/codec/Numbers.h`](../src/common/link/codec/Numbers.h), which is
 also the image descriptor's `link_minor` and the release manifest's `link`).
-1.1 added one field and changed nothing else: `HELLO`'s answer and `EV_BOOT`
-end with **`band`**, the band the running image was built for. A Walter that
-asks in 1.0 is answered in 1.0, without it — so the 0.1.0 Walter on the bench
-sees exactly the bytes it always saw.
+Each minor added one thing and changed nothing else. 1.1: `HELLO`'s answer and
+`EV_BOOT` end with **`band`**, the band the running image was built for. 1.2:
+**`LOCAL_REQUEST`** (§2i), the node's own status, access list, neighbour page or
+owner info over this link with nothing on the air, and the capability bit `0x80`
+that says it is there. A Walter that asks in 1.0 is answered in 1.0 and one that
+asks in 1.1 is answered in 1.1 — so the 0.1.0 Walter on the bench sees exactly
+the bytes it always saw.
 
 What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's
 four): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
-`REBOOT`, `CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`, the four job
+`REBOOT`, `CLI`, `SLEEP_NOTICE`, `POWER_GET`, `ENV_GET`, `LPP_GET`,
+`LOCAL_REQUEST`, the four job
 requests `JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, the five sends
 `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY` and `SEND_TRACE`, the
 reply with `REPLY_GET`, `OBS_PULL` and `MESH_COUNTERS`, and `EV_BOOT`,
 `EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type the
 protocol defines** outside its two reserved ranges (provisioning, phase 3's
-task 03; the bridge role, later): 1.1 added no type and no capability bit, only
-`band` at the end of two payloads. `HELLO`'s `caps` is `0x7f`, every bit of it,
+task 03; the bridge role, later). `HELLO`'s `caps` is `0xff`, every bit of it,
 because a capability is an interface that is there
 (`src/common/link/session/Interfaces.h`).
 `LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
@@ -68,6 +71,8 @@ python3 tools/linkcli.py --port COM7 cli "get radio"   # a console command line
 python3 tools/linkcli.py --port COM7 power        # panel, battery and load
 python3 tools/linkcli.py --port COM7 env          # the air inside the box
 python3 tools/linkcli.py --port COM7 lpp          # what a phone's telemetry view gets
+python3 tools/linkcli.py --port COM7 local status      # its own stats, over the link
+python3 tools/linkcli.py --port COM7 local neighbours  # ... and who it hears
 python3 tools/linkcli.py --port COM7 sleep 600    # "this end is asleep for 10 min"
 python3 tools/linkcli.py --port COM7 listen 30    # the events, for 30 s
 python3 tools/linkcli.py --port COM7 reboot 0     # and then `listen` for EV_BOOT
@@ -88,11 +93,12 @@ is how you learn what you are talking to:
 
 ```
 HELLO
-  protocol      1.1
+  protocol      1.2
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0x7f (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST)
+  caps          0xff (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST,
+                LOCAL_REQUEST)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -106,13 +112,16 @@ HELLO
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` is `0x7f` — every bit the protocol defines (1.1 added none). A
-  capability is an interface that is there, so a build that left one out would
-  simply not advertise it and would answer `ERR_UNSUPPORTED` for its requests.
+- `caps` is `0xff` — every bit the protocol defines (1.1 added none; 1.2 added
+  `LOCAL_REQUEST` `0x80`). A capability is an interface that is there, so a build
+  that left one out would simply not advertise it and would answer
+  `ERR_UNSUPPORTED` for its requests.
 - `protocol` is the version **this session** speaks: the highest minor both ends
-  know (§5.1, *Versions*). `linkcli.py` asks in 1.1, so it is answered 1.1 and
-  the `band` line is there. A 1.0 Walter asks in 1.0, is answered 1.0, and gets
-  no `band` line — which is the whole of what 1.1 changed.
+  know (§5.1, *Versions*). `linkcli.py` asks in 1.2, so it is answered 1.2. A
+  1.1 Walter asks in 1.1 and is answered 1.1 — the same bytes it has always been
+  answered, with `caps` carrying one bit it does not know, which §5.1 says it
+  ignores. A 1.0 Walter asks in 1.0, is answered 1.0, and gets no `band` line —
+  which is the whole of what 1.1 changed.
 - `band` is `role` and `board`'s third: the three together are what a release's
   image is chosen by (`spec/FIRMWARE-MANIFEST.md`), and `HELLO` is where the
   Walter reads them until its first install through itself commits. It is read
@@ -141,8 +150,8 @@ into a report when a frame is refused.
 
 A capability is an interface that is there (`src/common/link/session/Interfaces.h`), so
 this table is `caps` read the other way round: what each bit buys, and what a
-build without it would answer. `0x7f` is every bit the protocol defines (1.1
-added none), which is what this role has.
+build without it would answer. `0xff` is every bit the protocol defines, which is
+what this role has.
 
 | Request | Capability bit | Where it is walked |
 |---|---|---|
@@ -153,6 +162,7 @@ added none), which is what this role has.
 | `POWER_GET` | `POWER` `0x02` | §2d |
 | `ENV_GET` | `ENV` `0x04` | §2d |
 | `LPP_GET` | — (gated on `CLI` by §4) | §2d |
+| `LOCAL_REQUEST` | `LOCAL_REQUEST` `0x80` | §2i |
 | `JOB_BEGIN`, `JOB_END`, `PATH_SET`, `PATH_GET` | `MESH_CLIENT` `0x08` | §2e |
 | `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY`, `SEND_TRACE`, `REPLY_GET`, `MESH_COUNTERS` | `MESH_CLIENT` `0x08` | §2f, §2h |
 | `OBS_PULL` | `OBSERVATIONS` `0x10` | §2g |
@@ -161,7 +171,8 @@ One exception among the five that are always there: a node that has **refused to
 itself a key** (`src/roles/repeater/app/IdentityGuard.h`: its file system would not mount,
 or its settings are there and its key file is not — pile 3.9's task 01) answers `IDENTITY`
 with `ERR_STATE`, because it has no identity to answer with, and advertises `0x21` (`CLI`,
-`ATTENTION`) and nothing else. `CLI` then runs the lost mode's handler, which knows `erase`
+`ATTENTION`) and nothing else — `LOCAL_REQUEST` included, because that boot has no mesh
+behind it to ask. `CLI` then runs the lost mode's handler, which knows `erase`
 and `reboot` and answers every other line with the `IDENTITY LOST` explanation
 (`docs/flashing.md` §3a).
 
@@ -174,7 +185,7 @@ and `reboot` and answers every other line with the `IDENTITY LOST` explanation
 A request whose bit is absent is answered **`ERR_UNSUPPORTED`** and nothing
 else; a request type this protocol version does not define at all is
 `ERR_UNSUPPORTED` too. Nothing in the firmware keeps a second list of what a
-build can do, so a `caps` of `0x7f` and this table cannot drift apart.
+build can do, so a `caps` of `0xff` and this table cannot drift apart.
 
 ## 2a. The clock
 
@@ -701,6 +712,92 @@ own airtime and no more — about 1.7 s for the largest, and six times a minute
 at the very most. §7 of `docs/ARCHITECTURE.md` has the priorities and the lines
 they come from.
 
+## 2i. The node's own answers, without the air
+
+`LOCAL_REQUEST` (§5.9, **link 1.2**) asks the node's own request handler the four
+questions a mesh admin asks it, and answers with the bytes that handler produces.
+Nothing goes on the air: no job, no packet, no `client_tx`. It exists because a
+unit's Walter reads its *own* repeater over this link (meshmaster.dk's *local
+door*), and until 1.2 the link carried that repeater's CLI lines and its
+telemetry and nothing that yielded its status or its neighbour list — so the
+first unit's repeater stayed *stale* on the server, with none of the graphs a
+status read feeds.
+
+```
+$ python3 tools/linkcli.py --port COM7 local status
+LOCAL_REQUEST type 0x01 (status), 0 byte(s) of data
+  56 byte(s): ac0f000090ff9fff39300000851a00002a07000080510100...
+  battery       4012 mV
+  tx queue      0
+  noise floor   -112
+  last rssi     -97 dBm
+  last snr      6.25 dB
+  uptime        86400 s (1.0 days)
+  packets       12345 received, 6789 sent
+    flood       9800 received, 2100 sent
+    direct      1500 received, 840 sent
+    duplicates  12 direct, 3400 flood
+    errors      7 receive errors, 0 err_events
+  air time      1834 s sent, 5400 s received
+
+$ python3 tools/linkcli.py --port COM7 local neighbours --count 5 --order 2
+LOCAL_REQUEST type 0x06 (neighbours), 10 byte(s) of data
+  37 byte(s): 03000300111213141516290000001d...
+  neighbours    3 in the table, 3 in this page
+    0  111213141516      heard     41 s ago   snr  +7.25 dB
+    1  333435363738      heard    120 s ago   snr  +1.00 dB
+    2  222324252627      heard   3600 s ago   snr  -2.50 dB
+
+$ python3 tools/linkcli.py --port COM7 local access-list
+    a1b2c3d4e5f6  permissions 0x03 (admin)
+    7f3a9c02e1b4  permissions 0x01 (read-only)
+
+$ python3 tools/linkcli.py --port COM7 local owner-info
+  v1.18.0
+  TwinOak Risskov
+  bench unit
+```
+
+The four, with MeshCore's own numbers (§5.9's table):
+
+| `local …` | `req_type` | What comes back |
+|---|---:|---|
+| `status` | `0x01` | the node's `RepeaterStats`, packed as the pinned MeshCore packs it |
+| `access-list` | `0x05` | a 6-byte key prefix and a permissions byte per entry; nothing at all when nobody is on it |
+| `neighbours` | `0x06` | a page of the neighbour table — `--count`, `--offset`, `--order` and `--prefix-len` are the request's own fields |
+| `owner-info` | `0x07` | the firmware version, the node's name and its owner info, one per line |
+
+- **The bytes are the node's.** The firmware re-encodes none of them: the answer
+  is what upstream's `handleRequest` wrote, minus the four tag bytes a mesh reply
+  carries (`src/roles/repeater/link/LocalRequest.cpp`). `linkcli.py` reads them
+  here on the laptop, which is why the raw hex is printed above the reading — a
+  layout this tool cannot read is still visible. `docs/upstream.md`'s place 9 is
+  what a MeshCore bump re-reads for them, and a bump that changes one of the
+  three layouts is a new link minor.
+- **It answers at a console's privileges.** The handler is told the asker is an
+  admin — for the reason §5.7 runs a CLI line as the console runs it: the Walter
+  already holds the SWD lines. That admin is a local object and is **not** added
+  to the access list, so `local access-list` twice in a row says the same thing.
+- **Telemetry is not one of the four.** `req_type` `0x03` is answered
+  `ERR_RANGE`: `lpp` (§2d) is its local form, and two ways to the same bytes is
+  one too many. `0x02`, keep-alive, belongs to a login session this link does not
+  have. Every other value is `ERR_RANGE` too.
+- **A question the node has no answer to is `ERR_RANGE`**, not an empty answer: a
+  neighbours request of a version it does not know, or an access-list request
+  whose two reserved bytes are not zero. Over the mesh those would have been
+  silence. An access list with *nobody on it* is a different thing and is `OK`
+  with no bytes.
+- `local raw --type <n> --data <hex>` sends any `req_type` and any bytes, which is
+  how a refusal is watched from the bench. `data` is at most 32 bytes; the tool
+  will not build a longer one, because the reference implementation will not.
+- **Reading it from the Walter.** Its own console gets a command for this in its
+  pile 9, task 06; until that lands, the Walter's jobs for `status`,
+  `neighbours` and `owner-info` against the unit's own repeater are what use it,
+  and meshmaster.dk's pile 4.27 task 176 is the server half. A Walter older than
+  1.2 does not know the request at all and asks nothing: `HELLO` tells it so
+  (bit `0x80` absent), which is why those jobs answered *Failed* and not
+  *Unsupported* before.
+
 ## 3. When it says nothing
 
 - `linkcli.py` retries exactly as the protocol says: the same frame, the same
@@ -745,7 +842,8 @@ docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 ```
 
 That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
-`time set`, `cli`, `power`, `env`, `lpp`, the job, the five sends, `obs`,
+`time set`, `cli`, `power`, `env`, `lpp`, `local` and its four refusals, the
+job, the five sends, `obs`,
 `sleep`, an attention, the first-boot profile, `provision` and `reboot` against
 it, and times one pass of the link.
 **`tools/verify.ps1` runs it**, in the native step and with that step's own
@@ -755,6 +853,12 @@ verification. What it proves about the session itself is also a native test
 (`test/test_link_session`); what only it can show is the tool, the replies and
 the shipped first-boot profile running through something that answers like
 upstream.
+
+Upstream's **request handler** is the other thing a host build cannot have, so
+`local` (§2i) is answered by a miniature of it in `linkloop.cpp` that builds the
+four answers in upstream's own layouts; the session, the codec and the refusals
+around it are the firmware's own, and what a real repeater answers is on the
+bench list.
 
 Seven things in that program are the firmware's own code and not a stub - the
 clock keeper, the attention machine, the settings table, the power and
@@ -788,6 +892,7 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 | mesh client | `src/roles/repeater/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule; the five sends behind `MeshPort`; the reply record and its matching rules; `PeerSlot`, the index arithmetic of the extra peer; the observation ring, its pull and the RSSI note table. Portable; the peer overrides, the packet building and the advert capture are in `src/roles/repeater/app/TwinOakMesh.cpp`. |
 | transport | `src/common/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |
 | the board's half | `src/roles/repeater/link/BoardLink.*` | the uptime, the reset reason, the boot identifier, the restart, the identity, upstream's interpreter behind `CLI` — and the one call in `setup()` and one in `loop()`. |
+| the node's own answers | `src/roles/repeater/link/LocalRequest.*`, `src/common/cxx/PrivateMember.h` | §2i: upstream's own `handleRequest` called with an admin that is not in the ACL and a zeroed request buffer, and its answer copied out of upstream's own `reply_data`. Both are private at the pin; the header beside it is how they are reached without editing one file of MeshCore (`spec/SYSTEM.md` S-2's *exception*, `docs/upstream.md` place 9). |
 | the first boot | `src/roles/repeater/firstboot/`, `src/roles/repeater/app/FirstBoot.*` | the profile's table of console lines, the runner that judges each reply, and the one preferences write that makes running once exact. Portable but for `FirstBoot.cpp`. `docs/provisioning.md` is its page. |
 
 One pass of `loop()` reads what the UART has (bounded), handles **at most one**

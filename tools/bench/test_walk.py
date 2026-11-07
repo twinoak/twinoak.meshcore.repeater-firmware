@@ -70,14 +70,16 @@ WALK_NOW = 1792000000
 PASSWORD = "a-password-nobody-keeps"
 DONGLE = "A50285BI"
 
-# What `linkcli.py hello` prints against a 1.1 radio: `band` at the end of the body
-# (spec/LINK-PROTOCOL.md 5.1). The band here is the one the fake image's descriptor carries, so
-# section 8.2 compares the two and agrees.
-HELLO = """protocol 1.1
+# What `linkcli.py hello` prints against a 1.2 radio: `band` at the end of the body
+# (spec/LINK-PROTOCOL.md 5.1) and `LOCAL_REQUEST` in `caps` (5.9). The band here is the one the
+# fake image's descriptor carries, so section 8.2 compares the two and agrees. Nothing the walk
+# reads is the minor or the caps - it takes `role`, `board` and `band` - so this is what a radio
+# of the day prints and not something section 8 keys on.
+HELLO = """protocol 1.2
 role 1 (repeater)
 slot 0
 max_payload 240
-caps 0x7f
+caps 0xff
 boot_id 7
 fw_version 0.0.0-dev
 board rak4630-single

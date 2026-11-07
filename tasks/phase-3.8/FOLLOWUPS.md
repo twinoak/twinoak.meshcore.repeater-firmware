@@ -3,7 +3,8 @@
 Items for a later task of this phase are tagged with it. The review of 01–02 goes below them when it
 is written.
 
-- [ ] **[Thomas] Status, neighbours and owner-info of the unit's own repeater, through its Walter.**
+- [x] **[done by p3.9-02, 7 November: link 1.2's `LOCAL_REQUEST` implemented, with upstream's own
+  `handleRequest` and upstream unedited] Status, neighbours and owner-info of the unit's own repeater, through its Walter.**
   6 November: the Walter's *local door* (its `components/agent/include/walter_agent/link_mesh.h`)
   serves a job for the unit's own repeater without the air. The login is answered locally, a CLI line
   is the link's `CLI`, telemetry is `LPP_GET`. Status, neighbours, owner-info, discovery and trace have
@@ -21,6 +22,19 @@ is written.
   **Settled 7 November (Thomas): the first.** Link 1.2's `LOCAL_REQUEST` (`spec/LINK-PROTOCOL.md`
   §5.9) answers status, neighbours, the access list and the owner info with MeshCore's own bytes.
   Pile 3.9, task 02 (the Walter's pile 9 task 06 and meshmaster.dk's pile 4.27 task 176 use it).
+
+  **Done on the radio's side, 7 November (p3.9-02).** `LOCAL_REQUEST` (`0x0D`), the capability bit
+  `0x80`, `kProtoMinor` 2; the request answered by **upstream's own `MyMesh::handleRequest`** out
+  of upstream's own `reply_data`, with not one file of MeshCore edited — both members are private
+  at the pin and are reached by the explicit-instantiation idiom of
+  `src/common/cxx/PrivateMember.h` (`spec/SYSTEM.md` S-2's *exception* of 7 November;
+  `docs/upstream.md` place 9 is what a bump re-reads, and *Tier three* says a changed reply layout
+  is a new link minor). Discovery and trace are **not** in 1.2: they are mesh exchanges with
+  another node and have no local form, so those two Walter jobs for the unit's own repeater stay
+  *Failed* and that is now the whole of what 1.2 left out. Telemetry stays `LPP_GET`'s.
+  `docs/link.md` §2i is the page, `linkcli.py local …` reads it from a laptop, and the four lines
+  a board has to show are `docs/bench.md` §4. The other two halves are still open: the Walter's
+  pile 9 task 06 and meshmaster.dk's pile 4.27 task 176.
 
 ## Review of 01–02 (7 November)
 

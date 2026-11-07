@@ -22,6 +22,10 @@ cannot drift from the specification without the specification moving. It identif
     python3 tools/linkcli.py --port COM7 power
     python3 tools/linkcli.py --port COM7 env
     python3 tools/linkcli.py --port COM7 lpp 5
+    python3 tools/linkcli.py --port COM7 local status        # the node's own RepeaterStats
+    python3 tools/linkcli.py --port COM7 local neighbours    # a page of its neighbour table
+    python3 tools/linkcli.py --port COM7 local access-list
+    python3 tools/linkcli.py --port COM7 local owner-info
     python3 tools/linkcli.py --port COM7 sleep 600
     python3 tools/linkcli.py --port COM7 listen
 
@@ -75,6 +79,7 @@ import getpass
 import os
 import queue
 import shlex
+import struct
 import subprocess
 import sys
 import threading
@@ -103,6 +108,7 @@ CAP_NAMES = [
     (ref.CAP_CLI, "CLI"), (ref.CAP_POWER, "POWER"), (ref.CAP_ENV, "ENV"),
     (ref.CAP_MESH_CLIENT, "MESH_CLIENT"), (ref.CAP_OBSERVATIONS, "OBSERVATIONS"),
     (ref.CAP_ATTENTION, "ATTENTION"), (ref.CAP_TIME_PERSIST, "TIME_PERSIST"),
+    (ref.CAP_LOCAL_REQUEST, "LOCAL_REQUEST"),
 ]
 RESET_NAMES = {
     0: "unknown", 1: "power-on", 2: "reset pin", 3: "watchdog", 4: "software", 5: "lockup",
@@ -163,11 +169,24 @@ REPLY_STATE_NAMES = {
     0: "none", 1: "pending", 2: "timeout", 3: "response", 4: "text", 5: "trace",
 }
 SEND_CLI_SENSITIVE = 0x01  # SEND_CLI's flags, bit 0 (the line holds a password)
-# The repeater request types an exit node asks (examples/simple_repeater/MyMesh.cpp at the pin):
-# REQ_TYPE_GET_STATUS and REQ_TYPE_GET_NEIGHBOURS, the two `status-of-peer` and `neighbours-of-peer`
-# decode for the person at the bench.
+# The repeater request types an exit node asks (examples/simple_repeater/MyMesh.cpp:46-51 at the
+# pin): `status-of-peer` and `neighbours-of-peer` send the first and the third over the air, and
+# `local` sends all four over this link instead (LINK-PROTOCOL.md 5.9, link 1.2).
 REQ_TYPE_GET_STATUS = 0x01
+REQ_TYPE_GET_ACCESS_LIST = 0x05
 REQ_TYPE_GET_NEIGHBOURS = 0x06
+REQ_TYPE_GET_OWNER_INFO = 0x07
+LOCAL_REQUEST_NAMES = {
+    REQ_TYPE_GET_STATUS: "status", REQ_TYPE_GET_ACCESS_LIST: "access list",
+    REQ_TYPE_GET_NEIGHBOURS: "neighbours", REQ_TYPE_GET_OWNER_INFO: "owner info",
+}
+# `sizeof(RepeaterStats)` at the pin: the struct of examples/simple_repeater/MyMesh.h, packed as
+# the compiler packs it on both ends - every field is naturally aligned, so it is 56 bytes with no
+# padding anywhere (docs/upstream.md lists the struct as a place a bump re-reads).
+REPEATER_STATS_LEN = 56
+# An access-list entry's permissions byte: MeshCore's PERM_ACL_* (src/helpers/ClientACL.h).
+ACL_ROLE_MASK = 0x03
+ACL_ROLE_NAMES = {0: "guest", 1: "read-only", 2: "read-write", 3: "admin"}
 
 
 def utc(epoch):
@@ -487,6 +506,10 @@ def print_fields(msg_type, f, indent=""):
     elif msg_type == ref.LPP_GET:
         print("%s%d byte(s): %s" % (indent, len(f["lpp"]) // 2, f["lpp"]))
         print_lpp(f["lpp"], indent)
+    elif msg_type == ref.LOCAL_REQUEST:
+        # The node's own bytes. Which of section 5.9's four answers they are is the *request's*
+        # business, so cmd_local does the reading; here they are the bytes and nothing more.
+        print("%s%d byte(s): %s" % (indent, len(f["data"]) // 2, f["data"] or "(none)"))
     elif msg_type in (ref.SEND_LOGIN, ref.SEND_REQUEST, ref.SEND_CLI, ref.SEND_DISCOVERY,
                       ref.SEND_TRACE):
         print("%ssend          %d (%s)"
@@ -974,6 +997,153 @@ def cmd_lpp(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+def print_repeater_stats(data, indent=""):
+    """A `RepeaterStats` block as the pinned MeshCore packs it - what `LOCAL_REQUEST` type 1 and a
+    mesh `REQ_TYPE_GET_STATUS` both answer (`examples/simple_repeater/MyMesh.h`'s struct and
+    `MyMesh.cpp`'s `handleRequest` at the pin 81dbae59; `spec/LINK-PROTOCOL.md` 5.9). Fifty-six
+    bytes, little-endian, in the struct's own order. Nothing in the firmware re-encodes it: these
+    are the node's own bytes, read here on the laptop."""
+    raw = bytes.fromhex(data) if isinstance(data, str) else bytes(data)
+    if len(raw) < REPEATER_STATS_LEN:
+        print("%s%d byte(s): %s - not a RepeaterStats block" % (indent, len(raw), raw.hex()))
+        return
+    g = struct.unpack_from("<HHhhIIIIIIIIHhHHII", raw, 0)
+    (batt_mv, tx_queue, noise_floor, last_rssi, recv, sent, air_s, up_s, sent_flood, sent_direct,
+     recv_flood, recv_direct, err_events, snr_q4, direct_dups, flood_dups, rx_air_s,
+     recv_errors) = g
+    print("%sbattery       %d mV" % (indent, batt_mv))
+    print("%stx queue      %d" % (indent, tx_queue))
+    print("%snoise floor   %d" % (indent, noise_floor))
+    print("%slast rssi     %d dBm" % (indent, last_rssi))
+    print("%slast snr      %.2f dB" % (indent, snr_q4 / 4.0))
+    print("%suptime        %d s (%.1f days)" % (indent, up_s, up_s / 86400.0))
+    print("%spackets       %d received, %d sent" % (indent, recv, sent))
+    print("%s  flood       %d received, %d sent" % (indent, recv_flood, sent_flood))
+    print("%s  direct      %d received, %d sent" % (indent, recv_direct, sent_direct))
+    print("%s  duplicates  %d direct, %d flood" % (indent, direct_dups, flood_dups))
+    print("%s  errors      %d receive errors, %d err_events" % (indent, recv_errors, err_events))
+    print("%sair time      %d s sent, %d s received" % (indent, air_s, rx_air_s))
+    if len(raw) > REPEATER_STATS_LEN:
+        print("%s%d byte(s) past the block: %s"
+              % (indent, len(raw) - REPEATER_STATS_LEN, raw[REPEATER_STATS_LEN:].hex()))
+
+
+def print_neighbours(data, prefix_len, indent=""):
+    """A page of the neighbour table, as `LOCAL_REQUEST` type 6 answers it: the table's own total
+    and this page's count, then one entry per neighbour - `prefix_len` bytes of its public key,
+    how many seconds ago it was heard, and its SNR in quarter-decibels. The prefix length is the
+    requester's own (it is in the request, not in the answer), which is why it is passed in."""
+    raw = bytes.fromhex(data) if isinstance(data, str) else bytes(data)
+    if len(raw) < 4:
+        print("%s%d byte(s): %s - not a neighbours page" % (indent, len(raw), raw.hex()))
+        return
+    total, count = struct.unpack_from("<hh", raw, 0)
+    print("%sneighbours    %d in the table, %d in this page" % (indent, total, count))
+    at = 4
+    entry = prefix_len + 5
+    for i in range(count):
+        if at + entry > len(raw):
+            print("%s  the page ends mid-entry: %s" % (indent, raw[at:].hex()))
+            return
+        key = raw[at:at + prefix_len].hex()
+        heard_ago, = struct.unpack_from("<I", raw, at + prefix_len)
+        snr_q4 = struct.unpack_from("<b", raw, at + prefix_len + 4)[0]
+        at += entry
+        print("%s  %-2d %-16s  heard %6d s ago   snr %+6.2f dB"
+              % (indent, i, key, heard_ago, snr_q4 / 4.0))
+    if at != len(raw):
+        print("%s%d byte(s) left over: %s" % (indent, len(raw) - at, raw[at:].hex()))
+
+
+def print_access_list(data, indent=""):
+    """The access list, as `LOCAL_REQUEST` type 5 answers it: a six-byte public-key prefix and a
+    permissions byte per entry, and nothing at all when nobody is on it (which is `OK` with an
+    empty `data`, not a refusal)."""
+    raw = bytes.fromhex(data) if isinstance(data, str) else bytes(data)
+    if not raw:
+        print("%s(nobody on the access list)" % indent)
+        return
+    if len(raw) % 7 != 0:
+        print("%s%d byte(s): %s - not whole entries of seven" % (indent, len(raw), raw.hex()))
+        return
+    for i in range(0, len(raw), 7):
+        perms = raw[i + 6]
+        role = ACL_ROLE_NAMES.get(perms & ACL_ROLE_MASK, "?")
+        print("%s  %-12s  permissions 0x%02x (%s)" % (indent, raw[i:i + 6].hex(), perms, role))
+
+
+def print_owner_info(data, indent=""):
+    """Type 7's answer: the firmware version, the node's name and its owner info, one per line."""
+    raw = bytes.fromhex(data) if isinstance(data, str) else bytes(data)
+    text = raw.decode("utf-8", "replace")
+    if not text:
+        print("%s(nothing)" % indent)
+        return
+    for piece in text.split("\n"):
+        print("%s%s" % (indent, piece))
+
+
+def cmd_local(link, args):
+    """`LOCAL_REQUEST` (5.9): the node's own request handler answered over this link, with nothing
+    on the air. `status`, `neighbours`, `access-list` and `owner-info` build section 5.9's four
+    requests; `--type` and `--data` send any `req_type` and any bytes, which is how a refusal is
+    watched."""
+    if args.what == "raw":
+        if args.type is None:
+            print("usage: local raw --type <n> [--data <hex>]", file=sys.stderr)
+            return 2
+        req_type, data = args.type, args.data or ""
+    else:
+        req_type, data = LOCAL_REQUESTS[args.what](args)
+    try:
+        raw = bytes.fromhex(data)
+    except ValueError:
+        print("data is hex bytes, e.g. 000a0000000611223344", file=sys.stderr)
+        return 2
+    if len(raw) > ref.LOCAL_REQUEST_MAX_DATA:
+        # The reference implementation refuses to build it (spec/tools/linkref.py), which is the
+        # same thing as saying a Walter at 1.2 cannot send one. The node's own ERR_MALFORMED for
+        # a frame that carried more anyway is held by test/test_link_session.
+        print("data is at most %d bytes (5.9); a node would answer ERR_MALFORMED"
+              % ref.LOCAL_REQUEST_MAX_DATA, file=sys.stderr)
+        return 2
+    f = link.request(ref.LOCAL_REQUEST, {"req_type": req_type, "data": data})
+    print("LOCAL_REQUEST type 0x%02x (%s), %d byte(s) of data"
+          % (req_type, LOCAL_REQUEST_NAMES.get(req_type, "not one of section 5.9's four"),
+             len(data) // 2))
+    if f.get("status") != ref.OK:
+        print_fields(ref.LOCAL_REQUEST, f, indent="  ")
+        return 1
+    answer = f["data"]
+    print("  %d byte(s): %s" % (len(answer) // 2, answer or "(none)"))
+    if req_type == REQ_TYPE_GET_STATUS:
+        print_repeater_stats(answer, indent="  ")
+    elif req_type == REQ_TYPE_GET_NEIGHBOURS:
+        print_neighbours(answer, args.prefix_len, indent="  ")
+    elif req_type == REQ_TYPE_GET_ACCESS_LIST:
+        print_access_list(answer, indent="  ")
+    elif req_type == REQ_TYPE_GET_OWNER_INFO:
+        print_owner_info(answer, indent="  ")
+    return 0
+
+
+# The `data` each of section 5.9's four requests carries, built here the way MeshCore's own
+# clients build it. The neighbours request is the only one with parameters: version 0, a count, a
+# u16 offset, an order and how many bytes of each public key to send back - and then the four
+# random bytes MeshCore's clients add for packet uniqueness, which "change nothing here" (5.9)
+# and are sent all the same, so that what this tool asks is what a mesh client asks.
+LOCAL_REQUESTS = {
+    "status": lambda a: (REQ_TYPE_GET_STATUS, ""),
+    "access-list": lambda a: (REQ_TYPE_GET_ACCESS_LIST, "0000"),
+    "owner-info": lambda a: (REQ_TYPE_GET_OWNER_INFO, ""),
+    "neighbours": lambda a: (
+        REQ_TYPE_GET_NEIGHBOURS,
+        "00%02x%s%02x%02x11223344"
+        % (a.count, struct.pack("<H", a.offset).hex(), a.order, a.prefix_len),
+    ),
+}
+
+
 def cmd_sleep(link, args):
     """Tell the node this end is going to sleep (8): it then sends no events but EV_BOOT and
     EV_ATTENTION, and says so in STATUS's flag bit 2, until the next request."""
@@ -1237,7 +1407,7 @@ def cmd_listen(link, args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="linkcli.py",
-        description="Speak the TwinOak box link (spec/LINK-PROTOCOL.md 1.1) to a repeater.",
+        description="Speak the TwinOak box link (spec/LINK-PROTOCOL.md 1.2) to a repeater.",
         epilog="docs/link.md has the wiring and a worked session.",
     )
     where = p.add_mutually_exclusive_group(required=True)
@@ -1305,6 +1475,23 @@ def build_parser():
                      help="MeshCore's telemetry permissions: 0x01 base, 0x02 location, "
                           "0x04 environment; the default 0x05 is what an admin asks with")
     lpp.set_defaults(run=cmd_lpp)
+    local = subs.add_parser(
+        "local", help="the node's own status, neighbours, access list or owner info (5.9)")
+    local.add_argument("what", nargs="?", default="status",
+                       choices=["status", "neighbours", "access-list", "owner-info", "raw"])
+    local.add_argument("--count", type=int, default=10,
+                       help="neighbours: how many to fetch (0-255)")
+    local.add_argument("--offset", type=int, default=0,
+                       help="neighbours: how far into the ordered list to start (0-65535)")
+    local.add_argument("--order", type=int, default=0, choices=[0, 1, 2, 3],
+                       help="neighbours: 0 newest first, 1 oldest first, 2 strongest first, "
+                            "3 weakest first")
+    local.add_argument("--prefix-len", type=int, default=6,
+                       help="neighbours: how many bytes of each public key to send back")
+    local.add_argument("--type", type=lambda v: int(v, 0), default=None,
+                       help="raw: the req_type to send, section 5.9's four or any other")
+    local.add_argument("--data", help="raw: the data bytes, as hex")
+    local.set_defaults(run=cmd_local)
     sleep = subs.add_parser("sleep", help="say this end is going to sleep (8)")
     sleep.add_argument("seconds", type=int, nargs="?", default=0,
                        help="how long, for the node's information; 0 (the default) is unknown")

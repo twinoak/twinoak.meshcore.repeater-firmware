@@ -1,11 +1,11 @@
-// src/common/link/codec/: the box link as bytes, held against *both* files of
+// src/common/link/codec/: the box link as bytes, held against *every* file of
 // spec/fixtures/link/ - link-v1.json, which is 1.0's and whose bytes never change because
-// firmware that speaks 1.0 has been released, and link-v1.1.json, which is every case of 1.0 and
-// the four 1.1 adds (spec/LINK-PROTOCOL.md section 11). spec/tools/linkref.py generates them
-// from that document, and the Walter's firmware tests its own codec against the same files in
-// its own repository.
+// firmware that speaks 1.0 has been released; link-v1.1.json, which is every case of 1.0 and the
+// four 1.1 adds; and link-v1.2.json, which is every case of 1.1 and the fourteen 1.2 adds
+// (spec/LINK-PROTOCOL.md section 11). spec/tools/linkref.py generates them from that document,
+// and the Walter's firmware tests its own codec against the same files in its own repository.
 //
-// The two are read side by side and not one in place of the other: a 1.0 Walter - the one on the
+// They are read side by side and not one in place of another: a 1.0 Walter - the one on the
 // bench - must still be answered the bytes it has always been answered, and that is only
 // checkable while 1.0's file is still run.
 //
@@ -98,6 +98,7 @@ struct FixtureFile {
 const FixtureFile kFixtures[] = {
     {"link-v1.json", "1.0", 69},
     {"link-v1.1.json", "1.1", 73},
+    {"link-v1.2.json", "1.2", 87},
 };
 constexpr size_t kFixtureCount = sizeof(kFixtures) / sizeof(kFixtures[0]);
 
@@ -161,8 +162,8 @@ const std::vector<Case>& casesOf(size_t which) {
   return mine;
 }
 
-// Every case of both files, 1.0's first. The cases 1.1 repeats from 1.0 are run twice, which is
-// the point: the same bytes have to come out whichever file asked for them.
+// Every case of every file, 1.0's first. The cases a later minor repeats from an earlier one are
+// run again, which is the point: the same bytes have to come out whichever file asked for them.
 const std::vector<Case>& cases() {
   static std::vector<Case> all;
   if (all.empty()) {
@@ -342,6 +343,13 @@ bool exerciseRequest(const Case& c) {
       LppGet m;
       EXPECT_TRUE(decodeLppGet(in, m)) << c.where();
       expectNum(c, "perm_mask", m.perm_mask);
+      return true;
+    }
+    case kMsgLocalRequest: {
+      LocalRequest m;
+      EXPECT_TRUE(decodeLocalRequest(in, m)) << c.where();
+      expectNum(c, "req_type", m.req_type);
+      expectHex(c, "data", m.data);
       return true;
     }
     case kMsgJobBegin: {
@@ -545,6 +553,12 @@ bool exerciseOutgoing(const Case& c, std::vector<uint8_t>& out) {
       n = encodeLppResponse(m, buf, sizeof(buf));
       break;
     }
+    case kMsgLocalRequest: {
+      LocalResponse m;
+      m.data = store.blob(f, "data");
+      n = encodeLocalResponse(m, buf, sizeof(buf));
+      break;
+    }
     case kMsgPathGet:
       n = encodePathGetResponse(pathFromFields(f, store), buf, sizeof(buf));
       break;
@@ -655,19 +669,26 @@ std::vector<std::string> receiveAll(FrameReceiver& rx, const std::vector<uint8_t
 
 // ----------------------------------------------------------------------------- crc and cobs
 
-// `cases` is the one part of the two files that differs (section 11 lists the five parts). The
-// tests below therefore read `crc16`, `cobs`, `invalid` and `stream` from 1.0's file alone - and
-// this is what makes that sound: if the generator ever makes one of them depend on the minor,
-// this fails and says which part, and the test that reads it has to run both files instead.
-TEST(TheTwoFixtureFiles, DifferOnlyInTheirCases) {
+// `cases` is the one part the files differ in (section 11 lists the five parts). The tests below
+// therefore read `crc16`, `cobs`, `invalid` and `stream` from 1.0's file alone - and this is what
+// makes that sound: if the generator ever makes one of them depend on the minor, this fails and
+// says which part, and the test that reads it has to run every file instead.
+TEST(TheFixtureFiles, DifferOnlyInTheirCases) {
   for (const char* part : {"crc16", "cobs", "invalid", "stream"}) {
     std::string from_10;
-    std::string from_11;
     serializeJson(fixture(0)[part], from_10);
-    serializeJson(fixture(1)[part], from_11);
-    EXPECT_EQ(from_10, from_11) << part << ": the two files no longer agree on it";
+    for (size_t i = 1; i < kFixtureCount; i++) {
+      std::string from_newer;
+      serializeJson(fixture(i)[part], from_newer);
+      EXPECT_EQ(from_10, from_newer)
+          << part << ": " << kFixtures[i].file << " no longer agrees with " << kFixtures[0].file;
+    }
   }
-  EXPECT_LT(casesOf(0).size(), casesOf(1).size()) << "1.1 is 1.0's cases and four more";
+  // Each minor adds cases and removes none.
+  for (size_t i = 1; i < kFixtureCount; i++) {
+    EXPECT_LT(casesOf(i - 1).size(), casesOf(i).size())
+        << kFixtures[i].file << " is " << kFixtures[i - 1].file << "'s cases and more";
+  }
 }
 
 TEST(Crc16Vectors, EveryVectorOfTheFixture) {
@@ -841,15 +862,18 @@ TEST(CasesOfTheFixture, EveryCaseIsExercised) {
     EXPECT_EQ(size_t(kMaxPayload), fixture(i)["max_payload"].as<size_t>()) << kFixtures[i].file;
     EXPECT_EQ(kFixtures[i].link, fixture(i)["link"].as<std::string>()) << kFixtures[i].file;
   }
-  // 1.1's file is 1.0's plus what 1.1 adds: every case of 1.0, by name, is in it too. That is
-  // what makes running both files a check of 1.0 and not two copies of the same list.
-  for (const Case& old_case : casesOf(0)) {
-    bool found = false;
-    for (const Case& newer : casesOf(1)) {
-      if (newer.name == old_case.name && newer.frame == old_case.frame) found = true;
+  // Each file is the one before it plus what its minor adds: every case of the older file, by
+  // name and by frame, is in the newer one too. That is what makes running every file a check of
+  // the older minors and not three copies of one list.
+  for (size_t i = 1; i < kFixtureCount; i++) {
+    for (const Case& old_case : casesOf(i - 1)) {
+      bool found = false;
+      for (const Case& newer : casesOf(i)) {
+        if (newer.name == old_case.name && newer.frame == old_case.frame) found = true;
+      }
+      EXPECT_TRUE(found) << old_case.where() << " is not in " << kFixtures[i].file
+                         << " with the same frame";
     }
-    EXPECT_TRUE(found) << old_case.where() << " is not in " << kFixtures[1].file
-                       << " with the same frame";
   }
 }
 
@@ -909,6 +933,67 @@ TEST(TheBand, AnEmptyOneIsAZeroLengthStringAndNotAnOmission) {
   const size_t n = encodeHelloResponse(b, out, sizeof(out));
   ASSERT_GT(n, 0u);
   EXPECT_EQ(0x00, out[n - 1]) << "a zero-length str8 is one zero byte";
+}
+
+// ----------------------------------------------------------------------------- 1.2's request
+
+TEST(TheLocalRequest, ItsTableIsSectionFivePointNinesAndNothingElse) {
+  // "Any other req_type is ERR_RANGE. That includes 0x03 telemetry, whose local form is LPP_GET,
+  // and 0x02 keep-alive, which belongs to a login session this link does not have" (section 5.9).
+  // The four are MeshCore's own numbers, written out in Numbers.h against upstream's
+  // examples/simple_repeater/MyMesh.cpp:46-51 at the pin 81dbae59.
+  EXPECT_TRUE(isLocalRequestType(kLocalReqStatus));
+  EXPECT_TRUE(isLocalRequestType(kLocalReqAccessList));
+  EXPECT_TRUE(isLocalRequestType(kLocalReqNeighbours));
+  EXPECT_TRUE(isLocalRequestType(kLocalReqOwnerInfo));
+  EXPECT_EQ(0x01, kLocalReqStatus);
+  EXPECT_EQ(0x05, kLocalReqAccessList);
+  EXPECT_EQ(0x06, kLocalReqNeighbours);
+  EXPECT_EQ(0x07, kLocalReqOwnerInfo);
+  for (unsigned t = 0; t < 256; t++) {
+    const bool in_table = t == 0x01 || t == 0x05 || t == 0x06 || t == 0x07;
+    EXPECT_EQ(in_table, isLocalRequestType(uint8_t(t))) << "req_type 0x" << std::hex << t;
+  }
+  EXPECT_EQ(32, kLocalRequestMaxData);
+  EXPECT_EQ(4, kLocalRequestTagBytes);
+  EXPECT_EQ(0x80u, uint32_t(kCapLocalRequest));
+  EXPECT_EQ(0x0D, kMsgLocalRequest);
+}
+
+TEST(TheLocalRequest, AnEmptyPayloadAndMoreThanThirtyTwoBytesOfDataAreMalformed) {
+  // The two shapes section 5.9 calls ERR_MALFORMED, and the only two the codec judges.
+  LocalRequest m;
+  EXPECT_FALSE(decodeLocalRequest(bytesOf(nullptr, 0), m)) << "not even a req_type";
+
+  std::vector<uint8_t> at_the_limit;
+  at_the_limit.push_back(kLocalReqNeighbours);
+  for (uint8_t i = 0; i < kLocalRequestMaxData; i++) at_the_limit.push_back(i);
+  ASSERT_EQ(size_t(kLocalRequestMaxData) + 1, at_the_limit.size());
+  ASSERT_TRUE(decodeLocalRequest(viewOf(at_the_limit), m)) << "32 bytes of data is legal";
+  EXPECT_EQ(kLocalReqNeighbours, m.req_type);
+  EXPECT_EQ(size_t(kLocalRequestMaxData), m.data.len);
+
+  std::vector<uint8_t> one_too_many = at_the_limit;
+  one_too_many.push_back(0xFF);
+  EXPECT_FALSE(decodeLocalRequest(viewOf(one_too_many), m)) << "33 bytes of data is malformed";
+
+  // A req_type the table does not hold is **decoded**, not refused: it is kErrRange, and that is
+  // the session's answer to give (as REBOOT's mode is).
+  const std::vector<uint8_t> telemetry = {0x03};
+  ASSERT_TRUE(decodeLocalRequest(viewOf(telemetry), m));
+  EXPECT_EQ(0x03, m.req_type);
+  EXPECT_EQ(0u, m.data.len);
+  EXPECT_FALSE(isLocalRequestType(m.req_type));
+}
+
+TEST(TheLocalRequest, AnEmptyAnswerIsTheStatusByteAndNothingElse) {
+  // "An empty access list" in the fixture: status kOk and no data at all, which is a different
+  // thing from a refusal and has to encode to one byte.
+  LocalResponse m;
+  uint8_t out[kMaxPayload];
+  const size_t n = encodeLocalResponse(m, out, sizeof(out));
+  ASSERT_EQ(1u, n);
+  EXPECT_EQ(unsigned(kOk), unsigned(out[0]));
 }
 
 // ----------------------------------------------------------------------------- invalid and stream
@@ -1327,11 +1412,11 @@ TEST(TheNumbers, AreTheTablesOfTheSpecification) {
   EXPECT_EQ(244, kMaxPacket);
   EXPECT_EQ(246, kReceiveBuffer);
 
-  // The version this firmware speaks (section 5.1). 1.1 since 6 November 2026; the image
+  // The version this firmware speaks (section 5.1). 1.2 since 7 November 2026; the image
   // descriptor's link_minor and the release manifest's `link` are both this constant
   // (test/test_image, tools/release/build_release.py).
   EXPECT_EQ(1, kProtoMajor);
-  EXPECT_EQ(1, kProtoMinor);
+  EXPECT_EQ(2, kProtoMinor);
   EXPECT_EQ(kFixtures[kFixtureCount - 1].link,
             std::to_string(kProtoMajor) + "." + std::to_string(kProtoMinor))
       << "the newest fixture file is not the version this firmware speaks";
