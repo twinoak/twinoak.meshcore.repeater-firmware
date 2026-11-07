@@ -30,28 +30,37 @@ session, and the nine places a bump re-reads — is
 
 ## State
 
-**There is a release: [`v0.1.1`](../../releases/latest).** The images, the base,
+**There is a release: [`v0.1.2`](../../releases/latest).** The images, the base,
 a signed manifest and a body a person can read are a GitHub Release, signed with
 the key `73efdd383a957596` on a GitHub runner;
 [`docs/flashing.md`](docs/flashing.md) is the one page for getting it onto a
-board and [`release-notes/v0.1.1.md`](release-notes/v0.1.1.md) is what it says
+board and [`release-notes/v0.1.2.md`](release-notes/v0.1.2.md) is what it says
 about itself. `v0.1.0` of 5 November was the first;
 [`v0.1.1`](release-notes/v0.1.1.md) is the one whose `HELLO` says the radio's
 band (link 1.1), without which MeshMaster cannot pick a unit's first image over
-LTE. Before them, the only way to get this firmware onto a board was to build
-it.
+LTE; [`v0.1.2`](release-notes/v0.1.2.md) is the one that refuses to make a new
+key when the file system holding the old one will not mount, and that answers its
+own Walter's status, neighbours, access-list and owner-info requests with
+MeshCore's own bytes (link 1.2). Before them, the only way to get this firmware
+onto a board was to build it.
 
-The piles through 3.8 have landed. What the firmware does **today**:
+The piles through 3.9 have landed. What the firmware does **today**:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
   `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
   radio, the routing, the ACL, the console and the preferences are upstream's
   and behave exactly as a stock node's (`docs/ARCHITECTURE.md` §2).
-- **It speaks the box link** on `Serial1` at 115200, **protocol 1.1**: every
+- **It speaks the box link** on `Serial1` at 115200, **protocol 1.2**: every
   request and event the protocol defines outside its two reserved ranges,
-  `caps 0x7f`, and `HELLO`'s answer and `EV_BOOT` end with the image's `band`.
-  A Walter that asks in 1.0 is answered in 1.0. `tools/linkcli.py` from a laptop
-  is how a person walks it ([`docs/link.md`](docs/link.md)).
+  `caps 0xff`, and `HELLO`'s answer and `EV_BOOT` end with the image's `band`.
+  A Walter that asks in 1.0 or 1.1 is answered in 1.0 or 1.1.
+  `tools/linkcli.py` from a laptop is how a person walks it
+  ([`docs/link.md`](docs/link.md)).
+- **Its own Walter can read it without the air**: `LOCAL_REQUEST` (1.2) answers
+  the status, the neighbour table, the access list and the owner info from
+  upstream's own request handler, with upstream's own bytes and nothing
+  transmitted, so meshmaster.dk can read a repeater through its own unit
+  (`docs/link.md` §2i).
 - **It keeps time without an RTC**: the clock is restored across a restart from
   a file, adverts are held back until it is trustworthy, and a backwards set is
   refused once anything of ours has carried a timestamp (`docs/link.md` §2a).
@@ -86,6 +95,11 @@ The piles through 3.8 have landed. What the firmware does **today**:
   nobody knows, and a first-boot profile of console lines that runs exactly
   once — and one written procedure for making it *this* unit, at the USB port
   or over the link ([`docs/provisioning.md`](docs/provisioning.md)).
+- **It makes a key only where no node was.** A blank region is a first boot; a
+  saved key is the node; a file system that will not mount, or settings without
+  a key, is a **lost identity** — nothing is written, the mesh is not started,
+  `IDENTITY` answers `ERR_STATE` with `caps 0x21`, and the way out is a
+  person's `erase` and `reboot` ([`docs/flashing.md`](docs/flashing.md) §3a).
 
 Not done, and deliberately: the bridge role and the dual adapter
 (`docs/ARCHITECTURE.md` §8 has the seams).
@@ -98,7 +112,13 @@ radio came back over its own USB-C from **`v0.1.0`'s published `.uf2` — as a
 new node**: the file system holding its key had been torn and the firmware of
 the day formatted it without a word (pile 3.9's task 01 found the mechanism and
 makes the radio refuse instead; [`docs/flashing.md`](docs/flashing.md) §3a is
-what to do and what to expect). No board has run `v0.1.1`. 26 of the 102 lines of
+what to do and what to expect). The day after that, on 7 November, the same
+radio took **`v0.1.1`'s `.bin` over SWD from its own Walter** as a first install
+— 102 pages, read back whole, proving, committing, *is the golden image* — so the
+unit runs `0.1.1+3d81536` today, with a golden image to roll back to and a
+telemetry job of its own repeater already carried over the link (the Walter
+firmware's `tasks/phase-8/FOLLOWUPS.md`, 7 November). No board has run `v0.1.2`.
+26 of the 117 lines of
 [`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
 scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 

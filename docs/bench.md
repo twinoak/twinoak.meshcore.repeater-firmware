@@ -205,6 +205,28 @@ verified here*, as before the tool existed.
   before → ______ (it was not: meshmaster.dk's audit log has
   `agent.companion_changed`, which is p3.9-01's whole subject). If the drive
   needed a hand, §3a's four steps are in the wrong order and the page says so.
+- [ ] **p3.9-03** **The published `v0.1.2` on a board, and link 1.2 off its own
+  file.** The radio runs `0.1.1+3d81536`, installed over SWD on 7 November, so
+  this is the first release that can reach it **over LTE**: *Offer a release* on
+  the unit's page on meshmaster.dk and then an apply (the Walter's own pile 9),
+  or the `.uf2` by cable after `sha256sum -c SHA256SUMS` with the dummy load on
+  the antenna port. Then the three readings that are this release:
+  **`sensor get fw.version` reads `0.1.2+<sha7>`** → ______, `linkcli.py --port
+  <port> hello` prints `protocol 1.2` with `caps 0xff` and `band 868` → ______ —
+  the same string `python spec/tools/manifestref.py descriptor <the .bin of the
+  same release>` prints — and `linkcli.py local status` answers 56 bytes
+  → ______, which is §4's p3.9-02 lines walked from a release's file instead of
+  a build's. Walking this ticks p3.8-02's two readings above and p3.8-01's §2
+  line as well.
+- [ ] **p3.9-03** **An update does not cost the radio its identity.** The one
+  thing `v0.1.2` is a reply to, seen from the other end: before the update,
+  `get public.key` and `get name` on the radio → ______; after it, the same two
+  → ______, no `IDENTITY LOST` on the console and no `agent.companion_changed`
+  in meshmaster.dk's audit log for the unit. An update writes the application
+  region and the Walter's one settings page and nothing else
+  (`docs/flashing.md` §3a), so the key and the settings are expected to survive
+  — which is exactly what the last release's notes said about a recovery, and
+  why this line asks for the readings instead of the reasoning.
 
 - [ ] **p3.4-01** **The base boots, and the port after the reset.** The
   release's `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex` (`use: provision`;
