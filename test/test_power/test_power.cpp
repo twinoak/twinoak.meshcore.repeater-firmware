@@ -8,7 +8,11 @@
 //     CURRENT-SENSE.md section 3 (0.4, 2 and 0.8 mA per LSB);
 //   - the reader against a fake bus: a channel that fails goes invalid and comes back, a device
 //     that goes away is left alone and found again, and a transaction that takes too long does
-//     not hold the schedule;
+//     not hold the schedule - and, since p3.10-01, that a sweep happens once per averaging
+//     window of the device's own, found through the conversion-ready flag;
+//   - the totals (src/common/power/PowerTotals.h): an hour at a steady current, the battery's two
+//     directions apart, a burst in its own interval, the three kinds of gap, and a year at full
+//     scale by arithmetic on the types;
 //   - the thresholds: a dip shorter than the minimum time raises nothing; low, then critical;
 //     recovery needs the hysteresis; and nothing re-raised inside the hour, through the real
 //     attention machine of src/common/link/attention/;
@@ -32,6 +36,7 @@
 #include "common/power/Ina3221.h"
 #include "common/power/LinkPower.h"
 #include "common/power/PowerReader.h"
+#include "common/power/PowerTotals.h"
 #include "common/power/Prefs.h"
 #include "common/power/Telemetry.h"
 
@@ -63,6 +68,7 @@ class FakeBus : public I2cBus {
   uint32_t micros_to_report = 400;  // a healthy read at 100 kHz is about 500 us
 
   int reads = 0;
+  int ready_reads = 0;   // of those, reads of the Mask/Enable register
   int writes = 0;
   uint16_t last_written = 0;
   uint8_t last_written_reg = 0;
@@ -74,6 +80,12 @@ class FakeBus : public I2cBus {
     reg[shuntRegOf(channel_1based)] = regOf(shunt_raw);
     reg[busRegOf(channel_1based)] = regOf(bus_raw);
   }
+
+  // The device has finished an averaging window: bit 0 of the Mask/Enable register goes up, and
+  // the read of that register below is what puts it down again (src/common/power/Ina3221.h,
+  // kMaskConversionReady). That clearing is the whole reason the reader cannot read one window
+  // twice, so the fake has to do it.
+  void finishWindow() { reg[kRegMaskEnable] = uint16_t(reg[kRegMaskEnable] | kMaskConversionReady); }
 
   bool writeRegister(uint8_t address, uint8_t r, uint16_t value) override {
     (void)address;
@@ -88,6 +100,10 @@ class FakeBus : public I2cBus {
     reads++;
     if (fail_everything || fail_reg[r]) return false;
     value = reg[r];
+    if (r == kRegMaskEnable) {
+      ready_reads++;
+      reg[r] = uint16_t(reg[r] & uint16_t(~kMaskConversionReady));
+    }
     return true;
   }
 
@@ -99,6 +115,33 @@ class SlowBus : public FakeBus {
  public:
   SlowBus() { micros_to_report = kTransactionBudgetUs + 1; }
 };
+
+// One averaging window of the device's, end to end: `after_ms` after the window before it the
+// device sets the ready flag, the reader's next poll finds it, and the three channels are read
+// one per pass (kChannelsPerPass). `now` is left at the instant the flag was seen, which is the
+// instant the totals attribute the window to - so the interval they integrate is exactly
+// `after_ms`. Only good for an `after_ms` of at least kReadyPollFromMs, which is every call
+// below: a shorter one is the device running fast, and the reader would not be polling yet.
+void finishWindow(PowerReader& reader, FakeBus& bus, uint32_t& now, uint32_t after_ms) {
+  now += after_ms;
+  bus.finishWindow();
+  reader.loop(now);  // the poll that finds the flag, and no channel
+  for (uint8_t i = 0; i < kChannels; i++) reader.loop(now);
+}
+
+// The three channels as PowerTotals sees them, all valid.
+PowerReadings readingsOf(int16_t panel_ma, uint16_t panel_mv, int16_t batt_ma, uint16_t batt_mv,
+                         int16_t load_ma, uint16_t load_mv) {
+  PowerReadings r;
+  r.ch[0].current_ma = panel_ma;
+  r.ch[0].bus_mv = panel_mv;
+  r.ch[1].current_ma = batt_ma;
+  r.ch[1].bus_mv = batt_mv;
+  r.ch[2].current_ma = load_ma;
+  r.ch[2].bus_mv = load_mv;
+  for (uint8_t i = 0; i < kChannels; i++) r.ch[i].valid = true;
+  return r;
+}
 
 // ----------------------------------------------------------------------------- the fake part
 
@@ -262,7 +305,7 @@ TEST(TheConversion, TheValidBitsAndTheBatteryVoltageComeOutOfTheReadings) {
 
 // ============================================================================= the reader
 
-TEST(TheReader, AHealthyDeviceIsConfiguredOnceAndSweptOnceASecond) {
+TEST(TheReader, AHealthyDeviceIsConfiguredOnceAndSweptOncePerAveragingWindow) {
   FakeBus bus;
   bus.setChannel(1, 300, 2262);
   bus.setChannel(2, -26, 501);
@@ -274,12 +317,33 @@ TEST(TheReader, AHealthyDeviceIsConfiguredOnceAndSweptOnceASecond) {
   EXPECT_TRUE(reader.devicePresent());
   EXPECT_EQ(1, bus.writes);
   EXPECT_EQ(uint8_t(kRegConfig), bus.last_written_reg);
-  EXPECT_EQ(kConfigWord, bus.last_written) << "continuous shunt+bus, AVG 64, 1.1 ms, all three";
+  EXPECT_EQ(kConfigWord, bus.last_written) << "continuous shunt+bus, AVG 128, 1.1 ms, all three";
+  EXPECT_EQ(845u, kConversionCycleMs)
+      << "128 x 3 x 2 x 1.1 ms, rounded up (src/common/power/Ina3221.h)";
 
-  // One channel per pass (src/common/power/PowerReader.h, kChannelsPerPass), so a sweep is three
-  // passes and not one.
-  reader.loop(now);
+  // Nothing at all is read until a window could have finished: not a channel, and not even the
+  // ready flag (kReadyPollFromMs).
+  const int configured = bus.reads;
+  for (int i = 0; i < 100; i++) reader.loop(now + kReadyPollFromMs - 1);
+  EXPECT_EQ(configured, bus.reads);
+
+  // The flag, asked for and not yet up: one register, and no channel in that pass.
+  reader.loop(now + kReadyPollFromMs);
+  EXPECT_EQ(configured + 1, bus.reads);
+  EXPECT_EQ(1, bus.ready_reads);
   EXPECT_EQ(0u, reader.sweeps());
+  EXPECT_EQ(0, reader.readings().validBits());
+  for (int i = 0; i < 10; i++) reader.loop(now + kReadyPollFromMs + kReadyPollMs - 1);
+  EXPECT_EQ(1, bus.ready_reads) << "and it is not asked again for kReadyPollMs";
+
+  // The device finishes the window. One channel per pass (kChannelsPerPass), so a sweep is the
+  // pass that found the flag and three after it.
+  bus.finishWindow();
+  now += kConversionCycleMs;
+  reader.loop(now);
+  EXPECT_EQ(2, bus.ready_reads);
+  EXPECT_EQ(0u, reader.sweeps()) << "the pass that found the flag reads no channel";
+  reader.loop(now);
   EXPECT_EQ(twinoak::link::kPowerChannel1, reader.readings().validBits());
   reader.loop(now);
   reader.loop(now);
@@ -294,12 +358,78 @@ TEST(TheReader, AHealthyDeviceIsConfiguredOnceAndSweptOnceASecond) {
   EXPECT_EQ(85, reader.readings().ch[2].current_ma);
   EXPECT_EQ(4008, reader.readings().batteryMilliVolts());
 
-  // Nothing happens again until the interval has passed.
+  // And the window is in the totals, at its own length: the interval the flag measured out, not
+  // an assumed second (src/common/power/PowerTotals.h).
+  EXPECT_EQ(uint64_t(kConversionCycleMs), reader.totals().millisCovered());
+  EXPECT_EQ(uint64_t(85) * kConversionCycleMs, reader.totals().load().charge_uc);
+  EXPECT_EQ(uint64_t(52) * kConversionCycleMs, reader.totals().batteryOut().charge_uc);
+  EXPECT_EQ(uint64_t(0), reader.totals().batteryIn().charge_uc);
+  EXPECT_EQ(0u, reader.totals().gaps());
+  EXPECT_EQ(0u, reader.sweepsWithoutTheFlag()) << "the flag did the work, not the fallback";
+
+  // Nothing happens again until the next window could have finished.
+  const int read = bus.reads;
+  for (int i = 0; i < 100; i++) reader.loop(now + kReadyPollFromMs - 1);
+  EXPECT_EQ(read, bus.reads) << "no I2C between windows";
+  reader.loop(now + kReadyPollFromMs);
+  EXPECT_EQ(read + 1, bus.reads) << "and then one register, the flag";
+}
+
+TEST(TheReader, AWindowIsSweptOnceAndNoWindowIsSweptTwice) {
+  // The one property the whole of PowerTotals.h rests on: reading the Mask/Enable register is
+  // what clears the flag, so a window the reader has read cannot be read again - and a reader
+  // that asks before the device has finished the next one is told no and reads nothing.
+  FakeBus bus;
+  bus.setChannel(1, 300, 2262);
+  bus.setChannel(2, -26, 501);
+  bus.setChannel(3, 106, 498);
+  PowerReader reader(bus);
+
+  uint32_t now = 1000;
+  reader.begin(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
+  ASSERT_EQ(1u, reader.sweeps());
+
   const int reads = bus.reads;
-  for (int i = 0; i < 100; i++) reader.loop(now + 999);
-  EXPECT_EQ(reads, bus.reads) << "no I2C between sweeps";
-  reader.loop(now + 1000);
-  EXPECT_EQ(reads + 2, bus.reads) << "and then one channel, two registers";
+  const int asked = bus.ready_reads;
+  // Up to kReadyWaitMaxMs, which is where the fallback below takes over.
+  for (uint32_t t = 1; t < kReadyWaitMaxMs; t += 10) reader.loop(now + t);
+  EXPECT_GT(bus.ready_reads, asked) << "it did ask, more than once";
+  EXPECT_EQ(bus.reads - reads, bus.ready_reads - asked) << "and read nothing but the flag";
+  EXPECT_EQ(1u, reader.sweeps());
+  EXPECT_EQ(uint64_t(kConversionCycleMs), reader.totals().millisCovered())
+      << "a device with nothing new to say adds no time to the totals";
+}
+
+TEST(TheReader, APartThatNeverRaisesTheFlagIsStillRead) {
+  // The one thing no machine without an INA3221 on it can prove is that a real INA3221 raises
+  // the flag in continuous mode (src/common/power/PowerReader.h, kReadyWaitMaxMs; docs/bench.md
+  // section 5 is the line that settles it). A part that never did must not take the readings
+  // down with it, so after two windows of silence the reader reads the registers anyway - and
+  // says so, and the totals say honestly that they do not cover that time.
+  FakeBus bus;  // whose finishWindow() is never called: the flag never goes up
+  bus.setChannel(1, 300, 2262);
+  bus.setChannel(2, -26, 501);
+  bus.setChannel(3, 106, 498);
+  PowerReader reader(bus);
+
+  uint32_t now = 1000;
+  reader.begin(now);
+  for (uint32_t t = 0; t < kReadyWaitMaxMs; t += kReadyPollMs) reader.loop(now + t);
+  EXPECT_EQ(0u, reader.sweeps()) << "it waits for the flag first";
+  EXPECT_EQ(0, reader.readings().validBits());
+
+  now += kReadyWaitMaxMs + kReadyPollMs;
+  for (int i = 0; i < 4; i++) reader.loop(now);  // the poll that gives up, then three channels
+  EXPECT_EQ(1u, reader.sweeps());
+  EXPECT_EQ(1u, reader.sweepsWithoutTheFlag());
+  EXPECT_EQ(7, reader.readings().validBits()) << "and POWER_GET has its answers back";
+  EXPECT_EQ(4008, reader.readings().batteryMilliVolts());
+  EXPECT_TRUE(reader.devicePresent());
+  // Past the totals' bound, so that reading covers no window anybody can name: a gap.
+  EXPECT_EQ(uint64_t(0), reader.totals().millisCovered());
+  EXPECT_EQ(uint64_t(0), reader.totals().load().charge_uc);
+  EXPECT_EQ(1u, reader.totals().gaps());
 }
 
 TEST(TheReader, AChannelThatFailsGoesInvalidAndComesBack) {
@@ -311,26 +441,31 @@ TEST(TheReader, AChannelThatFailsGoesInvalidAndComesBack) {
 
   uint32_t now = 1000;
   reader.begin(now);
-  for (int i = 0; i < 3; i++) reader.loop(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
   ASSERT_EQ(7, reader.readings().validBits());
 
   // Channel 2's shunt register stops answering. The other two are still read: on this board they
   // are three ranges of one chip.
   bus.fail_reg[shuntRegOf(2)] = true;
-  now += 1000;
-  for (int i = 0; i < 3; i++) reader.loop(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
   EXPECT_EQ(twinoak::link::kPowerChannel1 | twinoak::link::kPowerChannel3,
             reader.readings().validBits());
   EXPECT_EQ(0, reader.readings().batteryMilliVolts()) << "and the battery reads 0, not stale";
   EXPECT_TRUE(reader.devicePresent()) << "one register is not the device going away";
   EXPECT_EQ(1u, reader.failures());
+  // A sweep counts for all three channels or for none, so that window is a gap: the two channels
+  // that did answer add nothing either.
+  EXPECT_EQ(1u, reader.totals().gaps());
+  EXPECT_EQ(uint64_t(kConversionCycleMs), reader.totals().millisCovered());
+  EXPECT_EQ(uint64_t(85) * kConversionCycleMs, reader.totals().load().charge_uc);
 
   // And back.
   bus.fail_reg[shuntRegOf(2)] = false;
-  now += 1000;
-  for (int i = 0; i < 3; i++) reader.loop(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
   EXPECT_EQ(7, reader.readings().validBits());
   EXPECT_EQ(4008, reader.readings().batteryMilliVolts());
+  EXPECT_EQ(uint64_t(2) * kConversionCycleMs, reader.totals().millisCovered())
+      << "the window that did read is counted and the gap is not";
 }
 
 TEST(TheReader, ADeviceThatIsNotThereIsLeftAloneAndFoundWhenItComes) {
@@ -358,7 +493,12 @@ TEST(TheReader, ADeviceThatIsNotThereIsLeftAloneAndFoundWhenItComes) {
   reader.loop(now);
   EXPECT_TRUE(reader.devicePresent());
   for (int i = 0; i < 3; i++) reader.loop(now);
+  EXPECT_EQ(0, reader.readings().validBits()) << "the window it has only just begun is not read";
+  finishWindow(reader, bus, now, kConversionCycleMs);
   EXPECT_EQ(7, reader.readings().validBits());
+  // The back-off is a gap by construction: the totals' clock is re-anchored when the device is
+  // configured, so the five seconds it was away are in no total and in no second covered.
+  EXPECT_EQ(uint64_t(kConversionCycleMs), reader.totals().millisCovered());
 }
 
 TEST(TheReader, ADeviceThatAnswersButIsNotAnIna3221IsNotConfigured) {
@@ -396,16 +536,46 @@ TEST(TheReader, AStuckTransactionDoesNotHoldTheSchedule) {
   PowerReader second(ok);
   now = 5000;
   second.begin(now);
-  second.loop(now);
+  ok.finishWindow();
+  now += kConversionCycleMs;
+  second.loop(now);  // the pass that finds the flag
+  second.loop(now);  // channel 1
   ASSERT_EQ(twinoak::link::kPowerChannel1, second.readings().validBits());
   ok.micros_to_report = kTransactionBudgetUs + 1;
   second.loop(now);
   EXPECT_EQ(0, second.readings().validBits()) << "a bus in trouble invalidates every channel";
   EXPECT_FALSE(second.devicePresent());
   EXPECT_EQ(1u, second.overruns());
+  EXPECT_EQ(uint64_t(0), second.totals().millisCovered()) << "an abandoned sweep adds nothing";
   const int after = ok.reads;
   for (int i = 0; i < 1000; i++) second.loop(now + 10);
   EXPECT_EQ(after, ok.reads);
+}
+
+TEST(TheReader, ABusThatWillNotSayWhetherItHasConvertedIsTheDeviceGoingAway) {
+  // The Mask/Enable register is the device itself rather than a channel of it: a part that will
+  // not answer it is a part there is nothing to read from, so this is the back-off and not a
+  // missing reading (src/common/power/PowerReader.cpp says so beside the branch).
+  FakeBus bus;
+  bus.setChannel(1, 300, 2262);
+  bus.setChannel(2, -26, 501);
+  bus.setChannel(3, 106, 498);
+  PowerReader reader(bus);
+
+  uint32_t now = 1000;
+  reader.begin(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
+  ASSERT_EQ(7, reader.readings().validBits());
+
+  bus.fail_reg[kRegMaskEnable] = true;
+  now += kConversionCycleMs;
+  reader.loop(now);
+  EXPECT_FALSE(reader.devicePresent());
+  EXPECT_EQ(0, reader.readings().validBits());
+  EXPECT_EQ(1u, reader.failures());
+  const int reads = bus.reads;
+  for (int i = 0; i < 1000; i++) reader.loop(now + 10);
+  EXPECT_EQ(reads, bus.reads) << "and it is left alone for kDeviceRetryMs";
 }
 
 TEST(TheReader, EveryChannelFailingAtOnceIsTheDeviceGoingAway) {
@@ -417,15 +587,306 @@ TEST(TheReader, EveryChannelFailingAtOnceIsTheDeviceGoingAway) {
 
   uint32_t now = 1000;
   reader.begin(now);
-  for (int i = 0; i < 3; i++) reader.loop(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
   ASSERT_TRUE(reader.devicePresent());
 
   for (uint8_t ch = 1; ch <= 3; ch++) bus.fail_reg[shuntRegOf(ch)] = true;
-  now += 1000;
-  for (int i = 0; i < 3; i++) reader.loop(now);
+  finishWindow(reader, bus, now, kConversionCycleMs);
   EXPECT_FALSE(reader.devicePresent());
   EXPECT_EQ(0, reader.readings().validBits());
   EXPECT_EQ(3u, reader.failures());
+  EXPECT_EQ(uint64_t(kConversionCycleMs), reader.totals().millisCovered())
+      << "and that window is in no total";
+}
+
+// ============================================================================= the totals
+
+TEST(TheTotals, ASteadyHundredMilliampsForAnHourIsAHundredMilliampHours) {
+  // The acceptance criterion, with the device's own window as the step: 4260 windows of 845 ms
+  // and one last one of 300 ms is an hour to the millisecond.
+  PowerTotals totals;
+  uint32_t now = 1000;
+  totals.anchor(now);
+
+  const PowerReadings r = readingsOf(0, 18000, 0, 4000, 100, 4000);
+  for (int i = 0; i < 4260; i++) {
+    now += kConversionCycleMs;
+    ASSERT_TRUE(totals.note(r, now));
+  }
+  now += 3600000u - 4260u * kConversionCycleMs;
+  ASSERT_TRUE(totals.note(r, now));
+
+  EXPECT_EQ(3600u, totals.secondsCovered());
+  EXPECT_EQ(uint64_t(3600000), totals.millisCovered());
+  // 100 mA for 3 600 000 ms is 360 000 000 microcoulomb, which is 100 mAh exactly. Both are
+  // exact here; the rounding of the two convenience units is a floor, so at most 1 mAh and 1 mWh
+  // short, and the accumulators themselves are exact to the millisecond.
+  EXPECT_EQ(uint64_t(360000000), totals.load().charge_uc);
+  EXPECT_EQ(uint64_t(100), milliAmpHours(totals.load()));
+  // 4000 mV x 100 mA = 400 mW for an hour: 400 mWh, 1.44e9 microjoule.
+  EXPECT_EQ(uint64_t(1440000000), totals.load().energy_uj);
+  EXPECT_EQ(uint64_t(400), milliWattHours(totals.load()));
+  EXPECT_EQ(0u, totals.gaps());
+}
+
+TEST(TheTotals, TheBatteryKeepsItsTwoDirectionsApart) {
+  // +500 mA for ten minutes and -50 mA for fifty, and neither direction has the other's. The
+  // interval here is a round second so that ten minutes is ten minutes; the device's own 845 ms
+  // is the step everywhere else, and the arithmetic is per-millisecond either way.
+  PowerTotals totals;
+  uint32_t now = 500;
+  totals.anchor(now);
+
+  const PowerReadings charging = readingsOf(0, 18000, 500, 4100, 0, 4100);
+  for (int i = 0; i < 600; i++) {
+    now += 1000;
+    ASSERT_TRUE(totals.note(charging, now));
+  }
+  const PowerReadings draining = readingsOf(0, 0, -50, 3900, 0, 3900);
+  for (int i = 0; i < 3000; i++) {
+    now += 1000;
+    ASSERT_TRUE(totals.note(draining, now));
+  }
+
+  EXPECT_EQ(3600u, totals.secondsCovered());
+  // 500 mA x 600 000 ms, and 4100 mV x 500 mA x 600 000 ms = 1.23e12 nJ = 1.23e9 uJ.
+  EXPECT_EQ(uint64_t(300000000), totals.batteryIn().charge_uc);
+  EXPECT_EQ(uint64_t(1230000000), totals.batteryIn().energy_uj);
+  EXPECT_EQ(uint64_t(83), milliAmpHours(totals.batteryIn()));
+  EXPECT_EQ(uint64_t(341), milliWattHours(totals.batteryIn()));
+  // 50 mA x 3 000 000 ms, and 3900 mV x 50 mA x 3 000 000 ms = 5.85e11 nJ = 5.85e8 uJ.
+  EXPECT_EQ(uint64_t(150000000), totals.batteryOut().charge_uc);
+  EXPECT_EQ(uint64_t(585000000), totals.batteryOut().energy_uj);
+  EXPECT_EQ(uint64_t(41), milliAmpHours(totals.batteryOut()));
+  EXPECT_EQ(uint64_t(162), milliWattHours(totals.batteryOut()));
+  // The two channels that read zero have nothing, and neither direction has the other's.
+  EXPECT_EQ(uint64_t(0), totals.panel().charge_uc);
+  EXPECT_EQ(uint64_t(0), totals.panel().energy_uj);
+  EXPECT_EQ(uint64_t(0), totals.load().charge_uc);
+  EXPECT_EQ(uint64_t(0), totals.load().energy_uj);
+}
+
+TEST(TheTotals, ThePanelAndTheLoadCountWhatIsPositive) {
+  // A negative reading on the panel or the load is noise around zero (the device's own input
+  // offset is tens of microvolts, CURRENT-SENSE.md section 3.5) and adds nothing; on the battery
+  // it is the pack draining, which is the whole point of having two directions.
+  PowerTotals totals;
+  uint32_t now = 0;
+  totals.anchor(now);
+  const PowerReadings negative = readingsOf(-1, 18000, -1, 4000, -1, 4000);
+  now += kConversionCycleMs;
+  ASSERT_TRUE(totals.note(negative, now));
+
+  EXPECT_EQ(uint64_t(0), totals.panel().charge_uc);
+  EXPECT_EQ(uint64_t(0), totals.panel().energy_uj);
+  EXPECT_EQ(uint64_t(0), totals.load().charge_uc);
+  EXPECT_EQ(uint64_t(0), totals.load().energy_uj);
+  EXPECT_EQ(uint64_t(kConversionCycleMs), totals.batteryOut().charge_uc) << "1 mA for one window";
+  EXPECT_EQ(uint64_t(0), totals.batteryIn().charge_uc);
+  // It is a reading and not a gap: the time it covers is covered.
+  EXPECT_EQ(uint64_t(kConversionCycleMs), totals.millisCovered());
+  EXPECT_EQ(0u, totals.gaps());
+}
+
+TEST(TheTotals, ABurstIsCountedForItsOwnIntervalAndNoOther) {
+  PowerTotals totals;
+  uint32_t now = 1000;
+  totals.anchor(now);
+
+  const PowerReadings idle = readingsOf(0, 18000, -100, 4000, 100, 4000);
+  const PowerReadings burst = readingsOf(0, 18000, -1500, 3700, 1500, 3700);
+
+  now += kConversionCycleMs;
+  ASSERT_TRUE(totals.note(idle, now));
+  EXPECT_EQ(uint64_t(100) * kConversionCycleMs, totals.load().charge_uc);
+
+  now += kConversionCycleMs;
+  ASSERT_TRUE(totals.note(burst, now));
+  EXPECT_EQ(uint64_t(1600) * kConversionCycleMs, totals.load().charge_uc)
+      << "the burst's own window, and only it";
+
+  now += kConversionCycleMs;
+  ASSERT_TRUE(totals.note(idle, now));
+  EXPECT_EQ(uint64_t(1700) * kConversionCycleMs, totals.load().charge_uc)
+      << "and the window after it is its own again";
+  EXPECT_EQ(uint64_t(3) * kConversionCycleMs, totals.millisCovered());
+}
+
+TEST(TheTotals, ALateSweepIsAGapAndTheOneAtTheBoundIsNot) {
+  // The bound is stated in PowerTotals.h: one and a half averaging windows. Past it the average
+  // in the device's registers covers part of the interval and not the whole of it, so the
+  // interval is in no total at all.
+  const PowerReadings r = readingsOf(0, 18000, 0, 4000, 100, 4000);
+
+  PowerTotals at_the_bound;
+  uint32_t now = 1000;
+  at_the_bound.anchor(now);
+  now += kMaxIntervalMs;
+  EXPECT_TRUE(at_the_bound.note(r, now));
+  EXPECT_EQ(uint64_t(kMaxIntervalMs), at_the_bound.millisCovered());
+  EXPECT_EQ(0u, at_the_bound.gaps());
+
+  PowerTotals late;
+  now = 1000;
+  late.anchor(now);
+  now += kMaxIntervalMs + 1;
+  EXPECT_FALSE(late.note(r, now));
+  EXPECT_EQ(uint64_t(0), late.millisCovered());
+  EXPECT_EQ(uint64_t(0), late.load().charge_uc);
+  EXPECT_EQ(1u, late.gaps());
+
+  // And the gap is that interval, not the next one as well.
+  now += kConversionCycleMs;
+  EXPECT_TRUE(late.note(r, now));
+  EXPECT_EQ(uint64_t(kConversionCycleMs), late.millisCovered());
+}
+
+TEST(TheTotals, AChannelThatDidNotReadIsAGapForAllThree) {
+  PowerTotals totals;
+  uint32_t now = 1000;
+  totals.anchor(now);
+
+  PowerReadings r = readingsOf(300, 18000, -100, 4000, 100, 4000);
+  r.ch[1].valid = false;
+  now += kConversionCycleMs;
+  EXPECT_FALSE(totals.note(r, now));
+  EXPECT_EQ(uint64_t(0), totals.panel().charge_uc) << "the channel that did read adds nothing";
+  EXPECT_EQ(uint64_t(0), totals.load().charge_uc);
+  EXPECT_EQ(uint64_t(0), totals.millisCovered());
+  EXPECT_EQ(1u, totals.gaps());
+}
+
+TEST(TheTotals, AnAnchorMovesTheClockAndClearsNoTotal) {
+  // "Zero at start, and only then": a reconfigured device re-anchors the clock, which is what
+  // keeps the back-off out of the totals, and that must not be a way to lose what has flowed.
+  PowerTotals totals;
+  uint32_t now = 1000;
+  totals.anchor(now);
+  const PowerReadings r = readingsOf(0, 18000, 0, 4000, 100, 4000);
+  now += kConversionCycleMs;
+  ASSERT_TRUE(totals.note(r, now));
+  const uint64_t charge = totals.load().charge_uc;
+  ASSERT_GT(charge, uint64_t(0));
+
+  now += 60000;  // a minute of back-off, and then the device is configured again
+  totals.anchor(now);
+  EXPECT_EQ(charge, totals.load().charge_uc);
+  EXPECT_EQ(uint64_t(kConversionCycleMs), totals.millisCovered());
+
+  now += kConversionCycleMs;
+  EXPECT_TRUE(totals.note(r, now)) << "and the window after it is one window, not a minute";
+  EXPECT_EQ(uint64_t(2) * kConversionCycleMs, totals.millisCovered());
+  EXPECT_EQ(uint64_t(200) * kConversionCycleMs, totals.load().charge_uc);
+}
+
+TEST(TheTotals, AYearAtFullScaleOverflowsNothing) {
+  // By arithmetic on the types, as the task asks. Full scale on this board is 1638, 8190 and
+  // 3276 mA (src/common/power/Ina3221.h) and the bus register's own full scale is 4095 x 8 mV;
+  // the worst case for every accumulator is the battery channel at both.
+  constexpr uint64_t kYearMs = 365ull * 24ull * 3600ull * 1000ull;  // 3.1536e10
+  constexpr uint64_t kFullScaleMa = 8190;
+  constexpr uint64_t kFullScaleMv = 4095 * 8;  // 32760
+
+  // Charge, in microcoulomb: 2.58e14 a year, and a uint64 holds 1.8e19 - 71 000 years of it.
+  static_assert(kFullScaleMa * kYearMs < UINT64_MAX / 70000ull,
+                "a year of charge at full scale has tens of thousands of years of room");
+  // Energy, in microjoule: 8.46e15 a year, which is 2 100 years of room. Nanojoules would have
+  // been 8.5e18 - two years - which is why add() carries a remainder into microjoules instead.
+  static_assert(kFullScaleMv * kFullScaleMa * kYearMs / 1000ull < UINT64_MAX / 2000ull,
+                "a year of energy at full scale has thousands of years of room");
+  // And one step's own product, in nanojoules, which is what add() computes before it divides.
+  static_assert(
+      kFullScaleMv * kFullScaleMa * uint64_t(kMaxIntervalMs) + 999ull < UINT64_MAX / 1000ull,
+      "one interval at full scale is far inside a uint64");
+  // The time covered: a year of milliseconds is nothing to a uint64 either.
+  static_assert(kYearMs < UINT64_MAX / 1000000ull, "millisCovered has room for half a million years");
+
+  // And the accumulator really does it, over many steps at full scale: no drift, and the
+  // hand-computed product to the microcoulomb and the microjoule.
+  PowerTotals totals;
+  uint32_t now = 0;
+  totals.anchor(now);
+  const PowerReadings full = readingsOf(1638, 32760, 8190, 32760, 3276, 32760);
+  const int steps = 100000;
+  for (int i = 0; i < steps; i++) {
+    now += kMaxIntervalMs;
+    ASSERT_TRUE(totals.note(full, now));
+  }
+  const uint64_t ms = uint64_t(steps) * kMaxIntervalMs;
+  EXPECT_EQ(ms, totals.millisCovered());
+  EXPECT_EQ(uint64_t(8190) * ms, totals.batteryIn().charge_uc);
+  EXPECT_EQ(uint64_t(32760) * 8190 * ms / 1000, totals.batteryIn().energy_uj);
+  EXPECT_EQ(uint64_t(1638) * ms, totals.panel().charge_uc);
+  EXPECT_EQ(uint64_t(3276) * ms, totals.load().charge_uc);
+}
+
+TEST(TheTotals, NothingBelowAMicrojouleIsLost) {
+  // A step whose energy is a few nanojoules is kept as a remainder and carried, so that a year
+  // of small steps is not a year of rounding down to nothing.
+  PowerTotals totals;
+  uint32_t now = 0;
+  totals.anchor(now);
+  const PowerReadings tiny = readingsOf(0, 0, 0, 0, 1, 1);  // 1 mV x 1 mA x 1 ms = 1 nJ a step
+  for (int i = 0; i < 999; i++) {
+    now += 1;
+    ASSERT_TRUE(totals.note(tiny, now));
+  }
+  EXPECT_EQ(uint64_t(0), totals.load().energy_uj) << "999 nanojoules is no whole microjoule yet";
+  EXPECT_EQ(uint64_t(999), totals.load().charge_uc) << "but the charge is exact at every step";
+  now += 1;
+  ASSERT_TRUE(totals.note(tiny, now));
+  EXPECT_EQ(uint64_t(1), totals.load().energy_uj) << "and the thousandth is the microjoule";
+  EXPECT_EQ(uint64_t(1000), totals.millisCovered());
+}
+
+TEST(TheTotals, TheThresholdsSeeWhatTheySaw) {
+  // The battery thresholds read channel 2 out of the same cache the totals are built from, and
+  // the ready-flag schedule did not change what that cache says: the watch sees every window's
+  // bus voltage, in order, and a pack below 3500 mV for a minute is the low level as it was
+  // before the totals existed (TheThresholds, below, is the same behaviour driven by hand).
+  FakeBus bus;
+  bus.setChannel(1, 0, 0);
+  bus.setChannel(3, 106, 498);
+  PowerReader reader(bus);
+  BatteryWatch watch;
+
+  uint32_t now = 1000;
+  reader.begin(now);
+
+  // 4.008 V, for a window: normal, and the watch has the cache's own number.
+  bus.setChannel(2, -26, 501);
+  finishWindow(reader, bus, now, kConversionCycleMs);
+  const ChannelReading* batt = &reader.readings().ch[1];
+  ASSERT_TRUE(batt->valid);
+  EXPECT_EQ(kBatteryNoChange, watch.poll(batt->valid, batt->bus_mv, now));
+  EXPECT_EQ(4008, watch.lastMilliVolts()) << "what the cache said, not a number of its own";
+
+  // 3.44 V: below the default low threshold, and nothing for the first minute.
+  bus.setChannel(2, -26, 430);
+  const uint32_t fell_at = now;
+  uint64_t covered = reader.totals().millisCovered();
+  // The clock on a pending change starts at the first poll that is below the threshold, which is
+  // one window after the pack fell, so the level is entered one window past kMinTimeBelowMs: 73
+  // windows of 845 ms.
+  for (int i = 0; i < 73; i++) {
+    finishWindow(reader, bus, now, kConversionCycleMs);
+    batt = &reader.readings().ch[1];
+    ASSERT_TRUE(batt->valid);
+    EXPECT_EQ(3440, batt->bus_mv);
+    const uint8_t entered = watch.poll(batt->valid, batt->bus_mv, now);
+    if (now - fell_at < kMinTimeBelowMs) {
+      EXPECT_EQ(kBatteryNoChange, entered) << "at " << now << " ms, inside the minute";
+    }
+    covered += kConversionCycleMs;
+    EXPECT_EQ(covered, reader.totals().millisCovered());
+  }
+  EXPECT_EQ(kBatteryLow, watch.level()) << "and then the level the pack really is at";
+  EXPECT_EQ(3440, watch.lastMilliVolts());
+
+  // And the totals of those windows are the current the cache held, to the millisecond.
+  EXPECT_EQ(uint64_t(52) * covered, reader.totals().batteryOut().charge_uc);
+  EXPECT_EQ(uint64_t(85) * covered, reader.totals().load().charge_uc);
+  EXPECT_EQ(0u, reader.totals().gaps());
 }
 
 // ============================================================================= the environment

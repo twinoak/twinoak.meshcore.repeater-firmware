@@ -209,6 +209,11 @@ _section("5", "Power", [
              "the three channels' sign and size against a DMM",
              person="the production connector boards, a bench supply at 18-21 V, a DMM in "
                     "series with the panel lead, and the link"),
+    PageLine("5.1a", ("p3.10-01",), "**The readings keep arriving, on the device's",
+             "that a real INA3221 raises its conversion-ready flag once an averaging window, so "
+             "the first reading after a restart is one window away and not the fallback's two",
+             person="the production connector boards and the link - and a part that really "
+                    "raises that flag, which only a real one proves (tasks/phase-3.10/01)"),
     PageLine("5.2", ("p1-06",), "**The same three numbers in a phone's telemetry",
              "the same three numbers in a phone's telemetry view, and the battery in `status`",
              person="a phone on the mesh, and the boards - a session cannot hear a radio"),
@@ -1115,7 +1120,7 @@ class Walker(object):
                              "as they were found, which is this walk's last step."
                              % (found_low, found_crit))
 
-            for key in ("5.1", "5.2", "5.3", "5.4"):
+            for key in ("5.1", "5.1a", "5.2", "5.3", "5.4"):
                 self.person(key)
 
             # 5.5 - settable, listed, and still there after a restart.
