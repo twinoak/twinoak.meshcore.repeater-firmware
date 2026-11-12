@@ -32,9 +32,20 @@ constexpr uint8_t kChannels = 3;
 enum Ina3221Reg : uint8_t {
   kRegConfig = 0x00,
   kRegShuntCh1 = 0x01,  // shunt is 0x01 + 2*(ch-1), bus is that plus one
+  kRegMaskEnable = 0x0F,
   kRegManufacturerId = 0xFE,
   kRegDieId = 0xFF,
 };
+
+// Bit 0 of the Mask/Enable register: **the conversion-ready flag**, set when all conversions,
+// the averaging and the multiplications of one pass over the enabled channels are complete, and
+// cleared by reading that register or by writing the Configuration register (INA3221 datasheet,
+// "Mask/Enable Register"; the pinned Adafruit INA3221 Library 1.0.1's INA3221_CONV_READY,
+// `(1UL << 0)` of `INA3221_REG_MASK_ENABLE 0x0F`, is the same two numbers read off disk).
+//
+// It is how PowerReader.h reads every averaging window exactly once: the flag is the device
+// saying *this window is finished and the next one has begun*.
+constexpr uint16_t kMaskConversionReady = 0x0001;
 
 inline uint8_t shuntRegOf(uint8_t channel_1based) {
   return uint8_t(kRegShuntCh1 + 2 * (channel_1based - 1));
@@ -50,14 +61,36 @@ constexpr uint16_t kManufacturerId = 0x5449;
 //
 //   bit 15      RST          0
 //   bits 14-12  CH1/2/3 EN   1 1 1
-//   bits 11-9   AVG          0b100 = 64 samples
+//   bits 11-9   AVG          0b100 = 128 samples
 //   bits 8-6    VBUS CT      0b100 = 1.1 ms
 //   bits 5-3    VSH CT       0b100 = 1.1 ms
 //   bits 2-0    MODE         0b111 = continuous, shunt and bus
 //
-// One sample set therefore takes 64 x 6 x 1.1 ms ~ 422 ms, so a reader that sweeps once a second
-// always finds a fresh average and never has to wait for a conversion.
-constexpr uint16_t kConfigWord = 0x7000 | (0x4u << 9) | (0x4u << 6) | (0x4u << 3) | 0x7u;
+// **0b100 is 128 samples, not 64**, and the comment here said 64 until p3.10-01: the field's
+// table is 1, 4, 16, 64, 128, 256, 512, 1024 for 0b000 to 0b111, so 0b011 is 64 and 0b100 is the
+// next one up (INA3221 datasheet, "Configuration Register", AVG2-AVG0; read off disk in the
+// pinned Adafruit INA3221 Library 1.0.1, `INA3221_AVG_128_SAMPLES = 0b100` of `ina3221_avgmode`,
+// beside `INA3221_CONVTIME_1MS = 0b100` - "1.1ms exact" - for the two conversion-time fields).
+// The word itself is unchanged: this board has been averaging 128 samples since p1-06, which is
+// inside the 64-256 section 6.7 allows, and only the arithmetic below was wrong.
+//
+// The two fields as numbers, so that nothing downstream has to restate them:
+constexpr uint16_t kAveragesField = 0x4;   // AVG2-AVG0
+constexpr uint32_t kAverages = 128;        // what that field means
+constexpr uint16_t kConvTimeField = 0x4;   // VBUS CT and VSH CT, the same for both
+constexpr uint32_t kConvTimeUs = 1100;     // what that field means
+
+constexpr uint16_t kConfigWord =
+    0x7000 | uint16_t(kAveragesField << 9) | uint16_t(kConvTimeField << 6) |
+    uint16_t(kConvTimeField << 3) | 0x7u;
+
+// How long one averaging window takes: the averages, over both measurements of all three enabled
+// channels, at the conversion time each - 128 x 3 x 2 x 1.1 ms = 844.8 ms, rounded up to the
+// millisecond the firmware counts in. In continuous mode the device starts the next window as it
+// finishes one, so these windows tile time end to end: a reader that takes exactly one reading
+// per window has every microsecond of it, which is what PowerTotals.h adds up.
+constexpr uint32_t kConversionCycleMs =
+    (kAverages * kChannels * 2u * kConvTimeUs + 999u) / 1000u;  // 845
 
 // ----------------------------------------------------------------------------- the shunts
 

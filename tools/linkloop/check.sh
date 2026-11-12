@@ -61,7 +61,8 @@ g++ -std=c++17 -O2 -Wall -Wextra -Werror -I src \
   src/roles/repeater/meshclient/LinkObservations.cpp src/roles/repeater/meshclient/ObservationRing.cpp \
   src/roles/repeater/meshclient/Reply.cpp src/roles/repeater/meshclient/SendCeiling.cpp \
   src/common/power/BatteryWatch.cpp src/common/power/Environment.cpp src/common/power/Ina3221.cpp \
-  src/common/power/LinkPower.cpp src/common/power/PowerReader.cpp src/common/power/Prefs.cpp \
+  src/common/power/LinkPower.cpp src/common/power/PowerReader.cpp \
+  src/common/power/PowerTotals.cpp src/common/power/Prefs.cpp \
   src/common/power/Telemetry.cpp
 echo "built $out/linkloop"
 

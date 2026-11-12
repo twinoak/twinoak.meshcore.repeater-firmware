@@ -689,6 +689,28 @@ here needs a meter, a phone, the lab supply's knob or a hand on the I2C bus.
   2.5× or 5× out, which is what a single shunt constant would give
   (`CURRENT-SENSE.md` §4). Panel → ______ mA / ______ mV;
   battery → ______ mA / ______ mV; load → ______ mA / ______ mV.
+- [ ] **p3.10-01** **[boards]** **The readings keep arriving, on the device's
+  own schedule.** Since `p3.10-01` a sweep waits for the INA3221's
+  **conversion-ready flag** (the Mask/Enable register's bit 0) instead of a
+  one-second timer of ours, because that is what makes one reading per 845 ms
+  averaging window and so makes the totals of what flowed cover all of the time
+  rather than 84 % of it (`docs/ARCHITECTURE.md` §6). The firmware's own tests
+  hold the schedule against a fake that raises and clears that flag; **only a
+  real part proves the part raises it**. A part that did not would not stop the
+  readings — after two windows of silence the reader reads the registers anyway
+  (`kReadyWaitMaxMs`), which is what it did before this task — so the thing to
+  look at is *when* the first reading arrives. So: `cli "reboot 0"`, then
+  `linkcli.py power` as soon as the link is back and four more times a few
+  seconds apart — `valid 7` every time, the three numbers alive and agreeing
+  with the DMM line above, and the **first** reading inside about a second of
+  the restart. Inside a second is the flag; nearer two is the fallback carrying
+  it, which is a finding for `tasks/phase-3.10/FOLLOWUPS.md` and not a fault of
+  the board. `cli "status"` carries a battery voltage from the same cache while
+  you are there.
+  Five `valid` bytes → ______ ______ ______ ______ ______;
+  first reading after the restart → ______ s; `status` battery → ______ mV.
+  The totals those windows add up to are **not on the wire in this task**:
+  `p3.10-02` puts them on LPP channels 6 to 14 and brings its own line here.
 - [ ] **p1-06** **[boards]** **The same three numbers in a phone's telemetry
   view** of the repeater, on LPP channels 2, 3 and 4 (`docs/link.md` §2d has
   the table), and

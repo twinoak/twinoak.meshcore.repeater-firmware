@@ -1,6 +1,15 @@
-// The INA3221 reader: it samples all three channels on a schedule, keeps the last good value and
-// a validity bit per channel, and gives up on a transaction that takes too long
-// (tasks/phase-1/06-power-and-environment.md; docs/ARCHITECTURE.md section 6).
+// The INA3221 reader: it samples all three channels once per averaging window of the device's
+// own, keeps the last good value and a validity bit per channel, adds the window up into
+// PowerTotals, and gives up on a transaction that takes too long
+// (tasks/phase-1/06-power-and-environment.md, tasks/phase-3.10/01-what-flowed.md;
+// docs/ARCHITECTURE.md section 6).
+//
+// **The device says when.** A sweep begins when the conversion-ready flag says an averaging
+// window has finished (Ina3221.h, kMaskConversionReady), not when a timer of ours says a second
+// has passed. In continuous mode those windows tile time end to end, so one reading per window
+// is every reading there is: no window is read twice, none is skipped, and the sum of the
+// intervals is the whole of the time the device was answering - which is what makes
+// PowerTotals.h's "the seconds covered" an honest number rather than 84 % of one.
 //
 // **Nothing reads the bus on demand.** A POWER_GET, a mesh telemetry request, a `status` and the
 // battery thresholds all read the cache this class fills, so no request ever waits on I2C and a
@@ -17,6 +26,7 @@
 #include <stdint.h>
 
 #include "common/power/Ina3221.h"
+#include "common/power/PowerTotals.h"
 
 namespace twinoak {
 namespace power {
@@ -43,10 +53,35 @@ struct I2cBus {
 
 // ----------------------------------------------------------------------------- the numbers
 
-// How often all three channels are sampled. The device averages 64 samples over about 422 ms
-// (Ina3221.h, kConfigWord), so once a second reads a fresh average every time; it is also fast
-// enough for the battery thresholds, whose own minimum time below is a minute.
-constexpr uint32_t kSweepIntervalMs = 1000;
+// When the reader starts asking whether the averaging window has finished, measured from the
+// moment the last one did. The window is kConversionCycleMs (845 ms, Ina3221.h) and the device's
+// own oscillator is not ours, so the poll starts an eighth of a window early: a device running
+// up to 12 % fast is still found before it could finish a *second* window, which is the one
+// thing this schedule may not miss.
+constexpr uint32_t kReadyPollFromMs = kConversionCycleMs - kConversionCycleMs / 8u;  // 740
+
+// How often it asks after that: one register read, less than the two a channel costs. Five of
+// them in a window at the worst, and the 25 ms is also the whole of the jitter between the
+// window ending and this reader noticing - which is in the interval the totals integrate over
+// and so is not lost.
+constexpr uint32_t kReadyPollMs = 25;
+
+// How long the reader waits for that flag before it reads the channels anyway.
+//
+// **Why there is a fallback at all.** That the INA3221 raises the flag once per averaging window
+// in *continuous* mode is read out of the datasheet and out of the pinned Adafruit library's
+// register map, and no test on a machine with no INA3221 on it can prove it: the fake raises the
+// flag because the datasheet says the part does. A part that never raised it would, without this,
+// read nothing for ever - no POWER_GET, no battery voltage, no thresholds - on a unit that is on
+// a roof and reachable only by telemetry. So after two windows of silence the reader reads the
+// registers regardless, which is exactly what it did before p3.10-01 and is a true reading of
+// the last window the device finished.
+//
+// Two windows is past kMaxIntervalMs (PowerTotals.h), so a reading taken this way is a **gap**
+// and adds nothing: the firmware keeps answering and the totals say honestly that they do not
+// cover that time. `sweepsWithoutTheFlag()` is then the number to read, and docs/bench.md section 5
+// is the line that settles it on a real part.
+constexpr uint32_t kReadyWaitMaxMs = 2u * kConversionCycleMs;  // 1690
 
 // What a sweep costs the loop: **one channel per pass**, two register reads. At 100 kHz that is
 // about half a millisecond, and a sweep is spread over three passes of loop() rather than taken
@@ -75,13 +110,18 @@ class PowerReader {
   // what POWER_GET then answers.
   void begin(uint32_t now_ms);
 
-  // One bounded pass, once per loop(). Reads at most kChannelsPerPass channels, and nothing at
-  // all while the device is in its back-off or the sweep interval has not passed.
+  // One bounded pass, once per loop(). Reads at most kChannelsPerPass channels - or, between
+  // sweeps, at most one ready-flag register - and nothing at all while the device is in its
+  // back-off or the next poll is not due.
   void loop(uint32_t now_ms);
 
   // --- what the four readers read ------------------------------------------------------
 
   const PowerReadings& readings() const { return readings_; }
+
+  // What has flowed since boot, added up from every completed sweep (PowerTotals.h). Nothing
+  // puts it on the wire yet; task 02 of this phase does that.
+  const PowerTotals& totals() const { return totals_; }
 
   // --- what a report and the bench read ------------------------------------------------
 
@@ -91,6 +131,10 @@ class PowerReader {
   uint32_t sweeps() const { return sweeps_; }
   uint32_t failures() const { return failures_; }
   uint32_t overruns() const { return overruns_; }
+  // Sweeps taken after kReadyWaitMaxMs of silence from the conversion-ready flag. On a healthy
+  // part this is 0 and stays 0; anything else says the flag is not doing what the datasheet
+  // says, and every one of those sweeps is a gap in the totals.
+  uint32_t sweepsWithoutTheFlag() const { return unflagged_; }
 
  private:
   enum ReadResult : uint8_t {
@@ -104,6 +148,9 @@ class PowerReader {
   bool configure(uint32_t now_ms);
   // Reads one channel's shunt and bus registers into the cache.
   ReadResult readChannel(uint8_t index);
+  // Reads the Mask/Enable register and says whether the conversion-ready flag was set. Reading
+  // it is what clears the flag, so a window is seen exactly once (Ina3221.h).
+  ReadResult readReady(bool& ready);
   // Begins a sweep of all three channels at channel 1.
   void startSweep();
   // The device is not to be asked again until the back-off is over, and no channel is valid in
@@ -121,13 +168,16 @@ class PowerReader {
   bool sweeping_ = false;       // a sweep is in progress; next_channel_ is where it stands
   uint8_t next_channel_ = 0;    // 0..kChannels-1
   uint8_t failed_this_sweep_ = 0;
-  uint32_t last_sweep_ms_ = 0;
+  uint32_t next_poll_ms_ = 0;   // when the ready flag is next worth asking about
+  uint32_t ready_at_ms_ = 0;    // when the flag said this window had finished
   uint32_t retry_at_ms_ = 0;
-  bool have_swept_ = false;     // nothing has been sampled yet, so the interval has not started
+
+  PowerTotals totals_;
 
   uint32_t sweeps_ = 0;
   uint32_t failures_ = 0;
   uint32_t overruns_ = 0;
+  uint32_t unflagged_ = 0;
 };
 
 }  // namespace power

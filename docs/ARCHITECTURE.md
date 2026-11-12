@@ -431,6 +431,39 @@ Nothing reads a bus on demand: the only two calls into I2C are `PowerReader::loo
 makes "a request on the box link never performs I2C" a property of the shape rather than of any
 one handler — and it is why upstream's own BME280 support had to leave the build.
 
+**The device says when a reading is due.** The INA3221 is configured for 128 averages of 1.1 ms
+conversions on both measurements of all three channels, which is one averaging window of 845 ms,
+and in continuous mode those windows tile time end to end. A sweep therefore begins when the
+*conversion-ready flag* of the Mask/Enable register says a window has finished — reading that
+register is what clears the flag — and not when a timer of ours says a second has passed. One
+reading per window is then every reading there is: no window is read twice and none is skipped,
+which is what the totals below need and which a free-running one-second sweep against an 845 ms
+window did not give (`p3.10-01`). It costs a one-register poll from 740 ms after the last window,
+every 25 ms until the flag is up — still **one channel per pass of `loop()`** at most, and the
+poll is cheaper than a channel. That a real INA3221 raises the flag in continuous mode is the one
+thing no host test can prove, so **two windows of silence and the reader reads the registers
+anyway**, exactly as it did before: a part that did not raise it costs the totals and nothing
+else, `PowerReader::sweepsWithoutTheFlag()` counts those sweeps, and `docs/bench.md` §5 is the
+line that settles it on a board.
+
+**What flowed, not what flows** (`PowerTotals.h`, `p3.10-01`). A reading is the average of one
+window, handed out whenever somebody asks, and the only moment anybody asks is the moment the
+unit's own Walter is awake to ask — so a week of hourly telemetry says 110 mA for a unit that
+draws a fraction of that over the hour. The reader therefore adds every window up: charge and
+energy for the panel, the load, and the battery **by direction** (the sign of channel 2 decides,
+window by window), with the milliseconds those totals cover. A reader takes the difference between
+two answers and has what really flowed in between. The accumulators are integers in the units the
+device and the clock give — milliamp-milliseconds (microcoulomb) and millivolt-milliamp-
+milliseconds (nanojoules, carried into microjoules with the remainder kept) — so a year at full
+scale on every channel is four orders of magnitude inside a `uint64`. **A gap is a gap**: a sweep
+that did not read all three channels, the back-off after `dropDevice`, and a sweep later than one
+and a half windows add nothing and count no time; a sweep counts for all three channels or for
+none, so the three channels of one answer always cover the same interval. The totals are zero at
+start and only then, they live in RAM, and nothing writes them to flash. They are not a fuel
+gauge: channel 2 resolves 2 mA, which `CURRENT-SENSE.md` §3 calls too coarse for coulomb counting,
+so state of charge stays a matter of voltage. Nothing carries them on the wire yet; `p3.10-02`
+does that.
+
 A sensor that stops answering is a missing reading, never a stalled loop: a channel that failed
 loses its validity bit and reads 0, a transaction that goes past its budget puts the whole device
 in a five-second back-off, and the sweep is abandoned where it stands. The one thing this layer
@@ -777,7 +810,7 @@ and the base never touches it.
 | link codec, session, retry memory | ✔ against the fixtures and fakes | | UART through the bulkheads |
 | the console over the link, our settings, the attention machine | ✔ against fakes, and the `CLI`, `SLEEP_NOTICE` and `EV_ATTENTION` fixtures through the real session | upstream's interpreter behind it | every console command, and a mesh admin waking the box |
 | clock rules, the boot order, the file's rate | ✔ against fakes, and the `TIME_SET` fixture through the real session | the flash file, the RTC probe | a reboot keeps time moving forward |
-| shunt arithmetic, the two readers' schedules, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part, and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view |
+| shunt arithmetic, the two readers' schedules, **the totals of what flowed**, the thresholds, the Cayenne-LPP | ✔ against a fake bus and a fake part — the fake has the device's own conversion-ready flag — and the `POWER_GET`, `ENV_GET` and `LPP_GET` fixtures through the real session | the I2C transactions, the Adafruit BME280 driver, the preferences file | real currents, sign, calibration; a phone's telemetry view; that a real INA3221 raises that flag once a window |
 | job state, reply matching, the send ceiling | ✔ (the ceiling against a fake clock, and through a real session) | the overrides, the sends | a login to a real repeater |
 | the observation ring, the pull's payload fitting, the RSSI note table, `obs.wake` | ✔ against fakes, and the `OBS_PULL` fixture through the real session | advert capture, the two overrides | adverts heard on the roof |
 | the first-boot profile: the reply rule, the runner, that it runs once, and the table's own rails | ✔ against a fake command interface (`test/test_firstboot`), and the shipped table through the firmware's own session behind a pipe (`tools/linkloop/check.sh`, which also drives `linkcli.py provision`) | upstream's interpreter behind it, and the one preferences write | `erase`, reset, and `sensor get firstboot.state`; a provisioning session at the port and one over the link |
