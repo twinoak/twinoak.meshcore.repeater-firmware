@@ -130,6 +130,8 @@ class BoardTelemetry : public TelemetrySource {
     const float mcu = board.getMCUTemperature();
     s.mcu_temp_valid = (mcu >= -300.0f) || (mcu < -300.0f);  // false only for a NaN
     s.mcu_temp_c = s.mcu_temp_valid ? mcu : 0.0f;
+    // What has flowed since boot, for LPP channels 6 to 14 (src/common/power/PowerTotals.h).
+    fillTotals(g_power.totals(), s);
     return s;
   }
 };
@@ -168,6 +170,21 @@ uint16_t batteryMilliVolts() { return g_power.readings().batteryMilliVolts(); }
 
 LinkPower& linkPower() { return g_link_power; }
 
+// The three numbers src/common/power/Telemetry.cpp's mirror copies out of CayenneLPP, held here
+// against the library's own macros - this is the one place in the firmware where that library is
+// actually compiled. A pinned version that changed a size, a multiplier or a type value is then a
+// red board build and not a surprise on the wire. (Signedness is a `switch` and not a macro:
+// getTypeSigned()'s list is cited where the mirror's table is.)
+static_assert(kLppGenericSensor == LPP_GENERIC_SENSOR, "the generic sensor is type 100");
+static_assert(LPP_GENERIC_SENSOR_SIZE == 4, "the totals are four bytes each");
+static_assert(LPP_GENERIC_SENSOR_MULT == 1, "one step of a total is one unit on the wire");
+static_assert(kLppTemperature == LPP_TEMPERATURE && LPP_TEMPERATURE_SIZE == 2 &&
+                  LPP_TEMPERATURE_MULT == 10, "temperature: 2 bytes, 0.1 C");
+static_assert(kLppVoltage == LPP_VOLTAGE && LPP_VOLTAGE_SIZE == 2 && LPP_VOLTAGE_MULT == 100,
+              "voltage: 2 bytes, 0.01 V");
+static_assert(kLppCurrent == LPP_CURRENT && LPP_CURRENT_SIZE == 2 && LPP_CURRENT_MULT == 1000,
+              "current: 2 bytes, 0.001 A");
+
 size_t appendOurFields(CayenneLPP& telemetry, uint8_t perm_mask) {
   LppField fields[kMaxLppFields];
   const size_t n = ourFields(g_telemetry.snapshot(), perm_mask, fields, kMaxLppFields);
@@ -181,6 +198,9 @@ size_t appendOurFields(CayenneLPP& telemetry, uint8_t perm_mask) {
         break;
       case kLppTemperature:
         telemetry.addTemperature(fields[i].channel, fields[i].value);
+        break;
+      case kLppGenericSensor:
+        telemetry.addGenericSensor(fields[i].channel, fields[i].value);
         break;
       default:
         break;  // a type src/common/power/Telemetry.cpp knows and this switch does not: added, not sent

@@ -461,8 +461,25 @@ and a half windows add nothing and count no time; a sweep counts for all three c
 none, so the three channels of one answer always cover the same interval. The totals are zero at
 start and only then, they live in RAM, and nothing writes them to flash. They are not a fuel
 gauge: channel 2 resolves 2 mA, which `CURRENT-SENSE.md` §3 calls too coarse for coulomb counting,
-so state of charge stays a matter of voltage. Nothing carries them on the wire yet; `p3.10-02`
-does that.
+so state of charge stays a matter of voltage.
+
+**And on the wire** (`p3.10-02`). The nine totals go where the three readings already go: in the
+Cayenne-LPP a telemetry request is answered with, on the mesh and byte for byte on the box link's
+`LPP_GET`. Nine channels, 6 to 14, one each, all of them the four-byte unsigned *generic sensor* —
+a charge in steps of 0.01 mAh, an energy in 0.1 mWh, and the seconds covered in seconds
+(`docs/link.md` §2d has the table, which is a contract from the day it merged). They sit behind the
+same environment permission as channels 2 to 5 and are **all nine or none**: until one sweep has
+been added up there is nothing to subtract, so they are left out together. A reader takes the
+difference between two answers; channel 14 going down says the radio restarted, and channel 14's
+own difference against the clock says how much of the interval the other eight are speaking for.
+The library takes a `float`, so a total above 2^24 steps reads as the nearest representable value —
+never lower than the answer before it — and at the top it **saturates** at 0xFFFFFF00 rather than
+wrapping, because converting a `float` of 2^32 or more to a `uint32_t` is undefined and the ceiling
+is a decision and not a conversion's accident. The whole reply is 90 bytes of the 180 upstream's
+buffer holds, against 36 before, and at the Danish channel's SF8/62.5 kHz/CR 4/8 that is 1033 ms
+of air for a telemetry reply instead of 640 (`tasks/phase-3.10/reports/02.md` has the arithmetic).
+`POWER_GET` does not change: the box link's three readings are the specification's, and whether it
+should carry a total is a change to `spec/LINK-PROTOCOL.md` where it lives.
 
 A sensor that stops answering is a missing reading, never a stalled loop: a channel that failed
 loses its validity bit and reads 0, a transaction that goes past its budget puts the whole device

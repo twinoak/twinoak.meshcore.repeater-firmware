@@ -25,6 +25,7 @@
 
 #include "common/power/Environment.h"
 #include "common/power/Ina3221.h"
+#include "common/power/PowerTotals.h"
 
 namespace twinoak {
 namespace power {
@@ -47,15 +48,53 @@ enum LppChannel : uint8_t {
   kLppChannelBattery = 3,  // INA3221 channel 2
   kLppChannelLoad = 4,   // INA3221 channel 3
   kLppChannelEnclosure = 5,  // the BME280
+  // What has flowed since the firmware started (PowerTotals.h, p3.10-02). One channel each, all
+  // of them the generic sensor below, and the step of each is in docs/link.md section 2d: a
+  // charge is 0.01 mAh and an energy 0.1 mWh. A reader takes the difference between two answers.
+  kLppChannelPanelCharge = 6,
+  kLppChannelPanelEnergy = 7,
+  kLppChannelBatteryChargeIn = 8,
+  kLppChannelBatteryChargeOut = 9,
+  kLppChannelBatteryEnergyIn = 10,
+  kLppChannelBatteryEnergyOut = 11,
+  kLppChannelLoadCharge = 12,
+  kLppChannelLoadEnergy = 13,
+  kLppChannelCovered = 14,  // the seconds those totals cover, 1 s per step
 };
 
 // The Cayenne-LPP types this firmware writes, with their own values
 // (src/helpers/sensors/LPPDataHelpers.h at the pin).
 enum LppType : uint8_t {
+  kLppGenericSensor = 100,  // 4 bytes, 1 per step, **unsigned**
   kLppTemperature = 103,  // 2 bytes, 0.1 C, signed
   kLppVoltage = 116,      // 2 bytes, 0.01 V
   kLppCurrent = 117,      // 2 bytes, 0.001 A, signed
 };
+
+// ----------------------------------------------------------------------------- the totals' steps
+
+// One step of each of the nine totals, in the accumulators' own units (PowerTotals.h:
+// microcoulomb and microjoule, both 3 600 000 to the milli-unit-hour). The steps are chosen so
+// that the smallest hour this unit has - an hour at 5 mA - is hundreds of steps of each and not
+// tens: 5 mAh is **500** steps of charge, and 5 mA at the lowest rail this board measures is
+// 15 mWh, which is **150** steps of energy.
+constexpr uint64_t kChargeStepMicroCoulomb = kMicroPerMilliHour / 100u;  // 0.01 mAh = 36 000 uC
+constexpr uint64_t kEnergyStepMicroJoule = kMicroPerMilliHour / 10u;     // 0.1 mWh = 360 000 uJ
+constexpr uint64_t kCoveredStepMillis = 1000u;                           // 1 s
+
+// **What a total does at the top, decided rather than inherited.** The generic sensor is four
+// bytes and the library takes a `float`, so the value on the wire is the step count rounded to
+// the nearest float and then truncated into a `uint32_t` (CayenneLPP 1.6.1, addField). A float of
+// 2^32 or more converted to a `uint32_t` is undefined in C++, and 4 294 967 295 **is** such a
+// float: it rounds up to 2^32. So a total is held at the largest value a float holds below 2^32 -
+// 0xFFFFFF00, which is 16 777 215 x 256 - and stays there. It saturates; it never wraps, and
+// what it does at the ceiling is not left to a conversion.
+//
+// Unreachable in service: 0xFFFFFF00 steps of charge is 42 949 Ah, 245 years of a 20 mA load.
+// The limit that is reached is the float's own: above 2^24 steps a total reads as the nearest
+// multiple of two steps (then four above 2^25, and so on), which never reads lower than the
+// answer before it - docs/link.md section 2d has the dates.
+constexpr uint32_t kTotalCeiling = 0xFFFFFF00u;
 
 // MeshCore's telemetry permission bits, with the link's own values (LPP_GET's perm_mask,
 // section 5.8; TELEM_PERM_* in src/helpers/SensorManager.h).
@@ -84,7 +123,18 @@ struct TelemetrySnapshot {
   // upstream leaves the field out when it is.
   bool mcu_temp_valid = false;
   float mcu_temp_c = 0.0f;
+  // What has flowed since the firmware started, as PowerTotals left it - the four directions in
+  // its own order, and the milliseconds they cover. `totals_counted` is false until one sweep has
+  // been added up, and then channels 6 to 14 are left out **together**. fillTotals() below is
+  // the one place this is copied out of a reader.
+  bool totals_counted = false;
+  Flow totals[PowerTotals::kFlows];
+  uint64_t totals_covered_ms = 0;
 };
+
+// The reader's accumulator into the three members above. One function, so that
+// src/common/power/BoardPower.cpp and tools/linkloop/ cannot copy it two different ways.
+void fillTotals(const PowerTotals& totals, TelemetrySnapshot& out);
 
 // ----------------------------------------------------------------------------- the fields
 
@@ -97,14 +147,14 @@ struct LppField {
 };
 
 // Room for the longest list this firmware can produce: the base voltage, three channels of
-// voltage and current, the enclosure temperature and the MCU temperature.
-constexpr size_t kMaxLppFields = 9;
+// voltage and current, the enclosure temperature, the nine totals, and the MCU temperature.
+constexpr size_t kMaxLppFields = 18;
 
-// **Ours**: the three INA3221 channels' voltage and current, then the enclosure temperature.
-// Only with the environment permission, which is the gate upstream's own manager uses
-// (EnvironmentSensorManager::querySensors at the pin). A channel whose validity bit is clear is
-// left out entirely - a missing reading is not a reading of zero - and the numbers of the
-// channels that are there do not move because of it.
+// **Ours**: the three INA3221 channels' voltage and current, the enclosure temperature, then the
+// nine totals of channels 6 to 14. Only with the environment permission, which is the gate
+// upstream's own manager uses (EnvironmentSensorManager::querySensors at the pin). A channel
+// whose validity bit is clear is left out entirely - a missing reading is not a reading of zero -
+// and the numbers of the channels that are there do not move because of it.
 size_t ourFields(const TelemetrySnapshot& s, uint8_t perm_mask, LppField* out, size_t cap);
 
 // **The whole reply**, in the order upstream's MyMesh::handleRequest builds it: the battery

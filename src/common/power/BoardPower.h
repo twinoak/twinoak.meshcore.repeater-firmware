@@ -47,9 +47,9 @@ uint16_t batteryMilliVolts();
 LinkPower& linkPower();
 
 // Adds this unit's own telemetry to upstream's buffer - the three INA3221 channels' voltage and
-// current and the enclosure's temperature, on the channels of src/common/power/Telemetry.h - and
-// returns how many fields it added. Called from TwinOakSensors::querySensors() after upstream's
-// manager has had its turn.
+// current, the enclosure's temperature and the nine totals of what has flowed, on the channels of
+// src/common/power/Telemetry.h - and returns how many fields it added. Called from
+// TwinOakSensors::querySensors() after upstream's manager has had its turn.
 size_t appendOurFields(CayenneLPP& telemetry, uint8_t perm_mask);
 
 // --- the two settings (src/roles/repeater/app/Settings.h) ------------------------------------------------------

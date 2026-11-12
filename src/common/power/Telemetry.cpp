@@ -37,12 +37,19 @@ struct TypeInfo {
   uint8_t type;
   uint8_t size;
   uint32_t multiplier;
+  // getTypeSigned()'s own list, which is a *different* list from isType()'s: LPP_VOLTAGE,
+  // LPP_CURRENT and LPP_TEMPERATURE are in it and **LPP_GENERIC_SENSOR is not**, so a negative
+  // generic sensor keeps its magnitude and is never two's-complemented (CayenneLPP.cpp's
+  // `is_signed & sign` in addField). The totals are never negative, and this is the number the
+  // mirror has to copy rather than assume.
+  bool is_signed;
 };
 
 const TypeInfo kTypes[] = {
-    {kLppTemperature, 2, 10},
-    {kLppVoltage, 2, 100},
-    {kLppCurrent, 2, 1000},
+    {kLppGenericSensor, 4, 1, false},
+    {kLppTemperature, 2, 10, true},
+    {kLppVoltage, 2, 100, true},
+    {kLppCurrent, 2, 1000, true},
 };
 
 const TypeInfo* typeInfoOf(uint8_t type) {
@@ -52,7 +59,24 @@ const TypeInfo* typeInfoOf(uint8_t type) {
   return nullptr;
 }
 
+// One total as the generic sensor carries it: the step count, held at kTotalCeiling so that the
+// float the library takes can never be 2^32 or more (Telemetry.h says why). The division is a
+// floor, so a total always reads at or below the truth and never above it.
+float stepsOf(uint64_t amount, uint64_t per_step) {
+  const uint64_t steps = amount / per_step;
+  return float(steps > uint64_t(kTotalCeiling) ? uint64_t(kTotalCeiling) : steps);
+}
+
+float chargeOf(const Flow& f) { return stepsOf(f.charge_uc, kChargeStepMicroCoulomb); }
+float energyOf(const Flow& f) { return stepsOf(f.energy_uj, kEnergyStepMicroJoule); }
+
 }  // namespace
+
+void fillTotals(const PowerTotals& totals, TelemetrySnapshot& out) {
+  out.totals_counted = totals.hasCounted();
+  for (uint8_t i = 0; i < PowerTotals::kFlows; i++) out.totals[i] = totals.flow(i);
+  out.totals_covered_ms = totals.millisCovered();
+}
 
 size_t ourFields(const TelemetrySnapshot& s, uint8_t perm_mask, LppField* out, size_t cap) {
   size_t n = 0;
@@ -71,6 +95,26 @@ size_t ourFields(const TelemetrySnapshot& s, uint8_t perm_mask, LppField* out, s
   if (s.env.temperatureValid()) {
     // The same centidegrees ENV_GET reports, so the link's number and the mesh's cannot differ.
     push(out, cap, n, kLppChannelEnclosure, kLppTemperature, float(s.env.temp_centi) / 100.0f);
+  }
+
+  // Channels 6 to 14: what has flowed since the firmware started (PowerTotals.h). **All nine or
+  // none** - until a first sweep has counted there is nothing to subtract and a zero would read
+  // as a number, so they are left out together (tasks/phase-3.10/02-the-totals-told.md).
+  if (s.totals_counted) {
+    const Flow& panel = s.totals[PowerTotals::kPanel];
+    const Flow& in = s.totals[PowerTotals::kBatteryIn];
+    const Flow& out_flow = s.totals[PowerTotals::kBatteryOut];
+    const Flow& load = s.totals[PowerTotals::kLoad];
+    push(out, cap, n, kLppChannelPanelCharge, kLppGenericSensor, chargeOf(panel));
+    push(out, cap, n, kLppChannelPanelEnergy, kLppGenericSensor, energyOf(panel));
+    push(out, cap, n, kLppChannelBatteryChargeIn, kLppGenericSensor, chargeOf(in));
+    push(out, cap, n, kLppChannelBatteryChargeOut, kLppGenericSensor, chargeOf(out_flow));
+    push(out, cap, n, kLppChannelBatteryEnergyIn, kLppGenericSensor, energyOf(in));
+    push(out, cap, n, kLppChannelBatteryEnergyOut, kLppGenericSensor, energyOf(out_flow));
+    push(out, cap, n, kLppChannelLoadCharge, kLppGenericSensor, chargeOf(load));
+    push(out, cap, n, kLppChannelLoadEnergy, kLppGenericSensor, energyOf(load));
+    push(out, cap, n, kLppChannelCovered, kLppGenericSensor,
+         stepsOf(s.totals_covered_ms, kCoveredStepMillis));
   }
   return n;
 }
@@ -106,8 +150,13 @@ size_t encodeLpp(const LppField* fields, size_t count, uint8_t* out, size_t cap)
     const bool negative = value < 0.0f;
     if (negative) value = -value;
     uint32_t v = uint32_t(value * float(info->multiplier));
-    if (negative) {
-      const uint32_t mask = (uint32_t(1) << (info->size * 8)) - 1;
+    // addField's `is_signed & sign`: an **unsigned** type keeps the magnitude and is never
+    // two's-complemented, which is the generic sensor's case. A four-byte mask is written out
+    // rather than shifted, because `1u << 32` is undefined where the library's own expression
+    // never meets a four-byte signed type.
+    if (info->is_signed && negative) {
+      const uint32_t mask = info->size >= 4 ? 0xFFFFFFFFu
+                                            : uint32_t((uint32_t(1) << (info->size * 8)) - 1);
       v = v & mask;
       v = mask - v + 1;
     }

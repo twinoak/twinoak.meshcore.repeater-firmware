@@ -71,6 +71,13 @@ The piles through 3.9 have landed. What the firmware does **today**:
 - **It measures itself**: three current-sense channels with the right shunt
   each, the air inside the box, two battery thresholds that raise attention,
   and the same numbers in a phone's telemetry view (§2d).
+- **It says what *flowed*, not just what flows**: every one of the INA3221's
+  845 ms averaging windows is added up, so beside the three readings a
+  telemetry reply carries nine totals — charge and energy for the panel and the
+  load, the battery's by direction, and the seconds they cover — on LPP
+  channels 6 to 14. A reader subtracts two answers and has the hour, instead of
+  reading the one moment the unit's own Walter was awake to ask
+  (`docs/link.md` §2d).
 - **It is the radio half of a MeshMaster exit node**: on the Walter's behalf it
   begins a job with one peer and makes the five exchanges — a login, a request,
   a CLI line, a path discovery, a trace — **one packet per send**, as itself,
@@ -118,7 +125,7 @@ radio took **`v0.1.1`'s `.bin` over SWD from its own Walter** as a first install
 unit runs `0.1.1+3d81536` today, with a golden image to roll back to and a
 telemetry job of its own repeater already carried over the link (the Walter
 firmware's `tasks/phase-8/FOLLOWUPS.md`, 7 November). No board has run `v0.1.2`.
-26 of the 117 lines of
+26 of the 119 lines of
 [`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
 scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 

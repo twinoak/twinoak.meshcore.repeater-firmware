@@ -158,11 +158,37 @@ $cli env
 
 echo
 echo "== lpp: exactly what a mesh telemetry request would be answered with, read back field by"
-echo "   field - the channel table is docs/link.md's and never changes"
-$cli lpp
+echo "   field - the channel table is docs/link.md's and never changes. Channels 6 to 14 are the"
+echo "   totals of what flowed through the hour this program's reader was stepped through"
+echo "   (--flowed, one hour by default), and a reader of them subtracts two answers."
+$cli lpp > "$out/lpp.log" 2>&1
+cat "$out/lpp.log"
+for want in "channel 6  panel      charge" "channel 7  panel      energy" \
+            "channel 8  battery    charge in" "channel 9  battery    charge out" \
+            "channel 10 battery    energy in" "channel 11 battery    energy out" \
+            "channel 12 load       charge" "channel 13 load       energy" \
+            "channel 14 the totals seconds covered"; do
+  grep -qF "$want" "$out/lpp.log" || {
+    echo "the lpp table did not name: $want" >&2
+    exit 1
+  }
+done
+for unit in mAh mWh; do
+  grep -qF " $unit" "$out/lpp.log" || { echo "no $unit in the lpp table" >&2; exit 1; }
+done
+echo "   all nine totals named, in mAh, mWh and seconds"
 echo
 echo "   and with base permission alone, which is what a guest gets:"
 $cli lpp 1
+echo
+echo "   and on a board in its very first averaging window, where no sweep has been counted yet:"
+echo "   the three channels are not read and the nine totals are left out together"
+python3 tools/linkcli.py --pipe "$out/linkloop --flowed 0" lpp > "$out/lpp-fresh.log" 2>&1
+cat "$out/lpp-fresh.log"
+if grep -qE "^  channel (6|14) " "$out/lpp-fresh.log"; then
+  echo "a total was reported before any sweep had been counted" >&2
+  exit 1
+fi
 
 echo
 echo "== local (5.9, link 1.2): the node's own status, neighbours, access list and owner info,"

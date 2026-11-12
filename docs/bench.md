@@ -719,6 +719,25 @@ here needs a meter, a phone, the lab supply's knob or a hand on the I2C bus.
   for byte; that equality is a native test over the same field list, but only a
   radio proves the mesh half of it. **No phone has ever read this node's
   telemetry.**
+- [ ] **p3.10-02** **[boards]** **Two answers an hour apart, and the difference
+  is what the load really drew.** `p3.10-02` puts the totals on **LPP channels
+  6 to 14** (`docs/link.md` §2d). Verifying them is subtraction and a known
+  load: `linkcli.py lpp`, then the same an hour later, with a DMM or a bench
+  load holding the load rail at something steady you wrote down. Channel 12's
+  difference, divided by 100, is the milliamp-hours the load drew in that hour;
+  it must match current × hours within the channel's 0.8 mA LSB and the air of
+  a few percent the DMM line above allows. Channel 14's difference must be
+  **3600 ± a few seconds** — anything less is the sweeps that were a gap, and
+  that shortfall is the honest size of what the other eight do not cover. Then
+  `cli "reboot 0"` and read `lpp` again: every total back to a small number and
+  channel 14 **lower than before**, which is the restart a reader is meant to
+  see and throw its interval away. Before → ______ (ch 12) / ______ (ch 14);
+  an hour later → ______ / ______; load held at ______ mA;
+  after the restart → ______ / ______.
+  The hour is the point: an hourly reading of channel 4 taken at the same two
+  moments is the Walter's own 110–170 mA, which is the number this task exists
+  to stop MeshMaster charting as the hour
+  (`tasks/phase-3.10/README.md`).
 - [ ] **p1-06** **[boards]** **`linkcli.py env` against a thermometer** in the
   enclosure, and
   the humidity and pressure against anything trustworthy (a weather station's
