@@ -30,21 +30,24 @@ session, and the nine places a bump re-reads — is
 
 ## State
 
-**There is a release: [`v0.1.2`](../../releases/latest).** The images, the base,
+**There is a release: [`v0.1.3`](../../releases/latest).** The images, the base,
 a signed manifest and a body a person can read are a GitHub Release, signed with
 the key `73efdd383a957596` on a GitHub runner;
 [`docs/flashing.md`](docs/flashing.md) is the one page for getting it onto a
-board and [`release-notes/v0.1.2.md`](release-notes/v0.1.2.md) is what it says
+board and [`release-notes/v0.1.3.md`](release-notes/v0.1.3.md) is what it says
 about itself. `v0.1.0` of 5 November was the first;
 [`v0.1.1`](release-notes/v0.1.1.md) is the one whose `HELLO` says the radio's
 band (link 1.1), without which MeshMaster cannot pick a unit's first image over
 LTE; [`v0.1.2`](release-notes/v0.1.2.md) is the one that refuses to make a new
 key when the file system holding the old one will not mount, and that answers its
 own Walter's status, neighbours, access-list and owner-info requests with
-MeshCore's own bytes (link 1.2). Before them, the only way to get this firmware
-onto a board was to build it.
+MeshCore's own bytes (link 1.2);
+[`v0.1.3`](release-notes/v0.1.3.md) is the one that reports what *flowed* — nine
+totals beside the three readings, on LPP channels 6 to 14 — so a reader is no
+longer left with the one moment a unit's Walter was awake to ask. Before them,
+the only way to get this firmware onto a board was to build it.
 
-The piles through 3.9 have landed. What the firmware does **today**:
+The piles through 3.10 have landed. What the firmware does **today**:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
   `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
@@ -121,11 +124,16 @@ the day formatted it without a word (pile 3.9's task 01 found the mechanism and
 makes the radio refuse instead; [`docs/flashing.md`](docs/flashing.md) §3a is
 what to do and what to expect). The day after that, on 7 November, the same
 radio took **`v0.1.1`'s `.bin` over SWD from its own Walter** as a first install
-— 102 pages, read back whole, proving, committing, *is the golden image* — so the
-unit runs `0.1.1+3d81536` today, with a golden image to roll back to and a
-telemetry job of its own repeater already carried over the link (the Walter
-firmware's `tasks/phase-8/FOLLOWUPS.md`, 7 November). No board has run `v0.1.2`.
-26 of the 119 lines of
+— 102 pages, read back whole, proving, committing, *is the golden image* — which
+is the image it still has to roll back to, and a telemetry job of its own
+repeater was already carried over the link that day (the Walter firmware's
+`tasks/phase-8/FOLLOWUPS.md`, 7 November). The day after *that*, on 8 November,
+the radio went to **`v0.1.2`**, which is what it runs today (the Walter
+firmware's `tasks/phase-10/reports/03.md` and `release-notes/v0.1.3.md`; how it
+was installed is not written down there, and the unit's own first update over
+LTE failed that day for a reason in the Walter's download). So `v0.1.2` is on a
+board and **no board has run `v0.1.3`**.
+26 of the 120 lines of
 [`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
 scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 

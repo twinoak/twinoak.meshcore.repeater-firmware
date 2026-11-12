@@ -206,8 +206,11 @@ verified here*, as before the tool existed.
   `agent.companion_changed`, which is p3.9-01's whole subject). If the drive
   needed a hand, §3a's four steps are in the wrong order and the page says so.
 - [ ] **p3.9-03** **The published `v0.1.2` on a board, and link 1.2 off its own
-  file.** The radio runs `0.1.1+3d81536`, installed over SWD on 7 November, so
-  this is the first release that can reach it **over LTE**: *Offer a release* on
+  file.** (The radio has run `v0.1.2` since 8 November 2026 — the Walter
+  firmware's `tasks/phase-10/reports/03.md` — but none of the three readings
+  below was written down, so the line stays open and p3.10-03's below asks for
+  the same three of `v0.1.3`.) `v0.1.1` was installed over SWD on 7 November, so
+  this is the first release that can reach the radio **over LTE**: *Offer a release* on
   the unit's page on meshmaster.dk and then an apply (the Walter's own pile 9),
   or the `.uf2` by cable after `sha256sum -c SHA256SUMS` with the dummy load on
   the antenna port. Then the three readings that are this release:
@@ -227,6 +230,22 @@ verified here*, as before the tool existed.
   (`docs/flashing.md` §3a), so the key and the settings are expected to survive
   — which is exactly what the last release's notes said about a recovery, and
   why this line asks for the readings instead of the reasoning.
+- [ ] **p3.10-03** **The published `v0.1.3` on a board, and the nine totals off
+  its own file.** The radio runs `v0.1.2` and has a golden image, and since
+  8 November 2026 the server serves a download the unit's Walter can actually
+  fetch, so this is the release to try **over LTE** with: import `v0.1.3` on
+  meshmaster.dk, *Offer a release* for the **Repeater** product on the unit's
+  page, a wake, then *Apply the candidate* — or the `.uf2` by cable after
+  `sha256sum -c SHA256SUMS`, with the dummy load on the antenna port. Then the
+  four readings that are this release: **`sensor get fw.version` reads
+  `0.1.3+<sha7>`** → ______; `linkcli.py --port <port> hello` prints
+  `protocol 1.2` with `caps 0xff` and `band 868` → ______ — the same string
+  `python spec/tools/manifestref.py descriptor <the .bin of the same release>`
+  prints; `linkcli.py lpp` answers **90 bytes** with channels 6 to 14 present
+  and named → ______; and `linkcli.py local status` answers 56 bytes → ______.
+  Walking it ticks p3.9-03's three readings above, p3.8-02's two and p3.8-01's
+  §2 line as well. What the totals then *say* is §5's p3.10-02 line, which
+  needs an hour and a meter.
 
 - [ ] **p3.4-01** **The base boots, and the port after the reset.** The
   release's `twinoak-base-rak4630-0.4.4-s140-6.1.1.hex` (`use: provision`;
