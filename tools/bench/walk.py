@@ -217,6 +217,11 @@ _section("5", "Power", [
     PageLine("5.2", ("p1-06",), "**The same three numbers in a phone's telemetry",
              "the same three numbers in a phone's telemetry view, and the battery in `status`",
              person="a phone on the mesh, and the boards - a session cannot hear a radio"),
+    PageLine("5.2a", ("p3.10-02",), "**Two answers an hour apart, and the difference",
+             "the totals of LPP channels 6 to 14 read as a difference against a known load, and "
+             "channel 14 going down across a restart",
+             person="an hour of wall clock, a steady load on the load rail and a DMM to say what "
+                    "it is - a difference is not something one answer can show"),
     PageLine("5.3", ("p1-06",), "**`linkcli.py env` against a thermometer**",
              "temperature, humidity and pressure against something trustworthy",
              person="a thermometer in the enclosure, a BME280 on the bus, and the link"),
@@ -1120,7 +1125,7 @@ class Walker(object):
                              "as they were found, which is this walk's last step."
                              % (found_low, found_crit))
 
-            for key in ("5.1", "5.1a", "5.2", "5.3", "5.4"):
+            for key in ("5.1", "5.1a", "5.2", "5.2a", "5.3", "5.4"):
                 self.person(key)
 
             # 5.5 - settable, listed, and still there after a restart.

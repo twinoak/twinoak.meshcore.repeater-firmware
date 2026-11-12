@@ -139,14 +139,32 @@ ENV_VALID_NAMES = [(0x01, "temperature"), (0x02, "humidity"), (0x04, "pressure")
 # LPP_GET's perm_mask: MeshCore's telemetry permission bits.
 LPP_PERM_NAMES = [(0x01, "base"), (0x02, "location"), (0x04, "environment")]
 # The LPP types this firmware writes, and how to read one (src/common/power/Telemetry.h; MeshCore's
-# src/helpers/sensors/LPPDataHelpers.h). Each is two bytes, most significant first.
+# src/helpers/sensors/LPPDataHelpers.h): the name, the byte count, the steps per unit, whether it
+# is signed, and the unit. Most significant byte first, every one of them.
 LPP_TYPES = {
-    103: ("temperature", 10.0, True, "C"),
-    116: ("voltage", 100.0, False, "V"),
-    117: ("current", 1000.0, True, "A"),
+    100: ("total", 4, 1.0, False, ""),
+    103: ("temperature", 2, 10.0, True, "C"),
+    116: ("voltage", 2, 100.0, False, "V"),
+    117: ("current", 2, 1000.0, True, "A"),
 }
 # The LPP channels of a TwinOak repeater - chosen once and never renumbered (docs/link.md).
-LPP_CHANNEL_NAMES = {1: "self", 2: "panel", 3: "battery", 4: "load", 5: "enclosure"}
+LPP_CHANNEL_NAMES = {1: "self", 2: "panel", 3: "battery", 4: "load", 5: "enclosure",
+                     6: "panel", 7: "panel", 8: "battery", 9: "battery", 10: "battery",
+                     11: "battery", 12: "load", 13: "load", 14: "the totals"}
+# Channels 6 to 14 are totals of what has flowed since the node started, all of them the generic
+# sensor (type 100), so what each one *means* is the channel and not the type: the field's name
+# and the steps per unit (docs/link.md 2d). A reader subtracts one answer from another.
+LPP_TOTALS = {
+    6: ("charge", 100.0, "mAh"),
+    7: ("energy", 10.0, "mWh"),
+    8: ("charge in", 100.0, "mAh"),
+    9: ("charge out", 100.0, "mAh"),
+    10: ("energy in", 10.0, "mWh"),
+    11: ("energy out", 10.0, "mWh"),
+    12: ("charge", 100.0, "mAh"),
+    13: ("energy", 10.0, "mWh"),
+    14: ("seconds covered", 1.0, "s"),
+}
 # EV_ATTENTION's reason, in words, with what its `detail` then means (LINK-PROTOCOL.md 8).
 ATTENTION_REASON_NAMES = {
     1: ("the node restarted", "the reset reason"),
@@ -640,13 +658,16 @@ def print_lpp(data, indent=""):
     while i + 2 <= len(raw):
         channel, kind = raw[i], raw[i + 1]
         i += 2
-        name, mult, signed, unit = LPP_TYPES.get(kind, (None, None, None, None))
-        if name is None or i + 2 > len(raw):
+        name, size, mult, signed, unit = LPP_TYPES.get(kind, (None, None, None, None, None))
+        if name is None or i + size > len(raw):
             print("%schannel %d: type %d, which this tool cannot read" % (indent, channel, kind))
             return
-        value = int.from_bytes(raw[i:i + 2], "big", signed=signed)
-        i += 2
-        print("%schannel %-2d %-10s %-11s %8.3f %s"
+        value = int.from_bytes(raw[i:i + size], "big", signed=signed)
+        i += size
+        # A total's unit is the channel's and not the type's, and its steps are too.
+        if kind == 100:
+            name, mult, unit = LPP_TOTALS.get(channel, (name, mult, "steps"))
+        print("%schannel %-2d %-10s %-15s %12.3f %s"
               % (indent, channel, LPP_CHANNEL_NAMES.get(channel, "?"), name, value / mult, unit))
     if i != len(raw):
         print("%s%d byte(s) left over" % (indent, len(raw) - i))

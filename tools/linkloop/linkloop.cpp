@@ -32,9 +32,15 @@
 //     miniature of upstream's own CommonCLI branch - including its 134-byte paging rule, so that
 //     what `cli "sensor list"` prints here is what the console prints on the board;
 //   - the **power and environment readers** (src/common/power/), driven over a fake I2C bus that answers
-//     real INA3221 register values - so `power`, `env` and `lpp` go through the firmware's own
+//     real INA3221 register values **and raises the conversion-ready flag the way the datasheet
+//     says the part does** - so `power`, `env` and `lpp` go through the firmware's own
 //     conversion, its own cache and its own Cayenne-LPP, and `--drop-ina` is the bench's
-//     "unplug the B-board" case with no board at all;
+//     "unplug the B-board" case with no board at all. One linkcli invocation lives for a tenth
+//     of a second and an averaging window is 845 ms, so the reader is stepped through the
+//     device's own windows on a clock of its own before the pipe opens: `--flowed <seconds>`,
+//     one hour by default, is "a board that has been reading for this long" and is what puts
+//     something in the nine totals of LPP channels 6 to 14. `--flowed 0` is a board in its very
+//     first window: no channel has been read, and the nine are left out together;
 //   - the **mesh client** (src/roles/repeater/meshclient/), the job and the five sends and the reply record,
 //     over a port where nothing is ever transmitted, so a send is answered as the firmware
 //     answers it and its wait ends in the silence event. `--job` begins a job at startup;
@@ -582,6 +588,9 @@ LoopLocalRequest g_local_request;
 class LoopBus : public twinoak::power::I2cBus {
  public:
   bool dropped = false;  // --drop-ina: the B-board unplugged
+  // The clock the reader is driven on, which is also the clock this device's averaging windows
+  // are measured on (powerNowMs(), below the class).
+  uint32_t (*clock)() = nullptr;
 
   LoopBus() {
     reg_[twinoak::power::kRegManufacturerId] = twinoak::power::kManufacturerId;
@@ -595,16 +604,36 @@ class LoopBus : public twinoak::power::I2cBus {
     reg_[twinoak::power::busRegOf(channel)] = uint16_t(uint16_t(bus_raw) << 3);
   }
 
-  bool writeRegister(uint8_t, uint8_t, uint16_t) override { return !dropped; }
+  bool writeRegister(uint8_t, uint8_t reg, uint16_t) override {
+    if (dropped) return false;
+    // "Cleared by reading that register or by writing the Configuration register"
+    // (src/common/power/Ina3221.h): a configuration write is what starts the first window.
+    if (reg == twinoak::power::kRegConfig) window_end_ms_ = now() + kWindowMs;
+    return true;
+  }
   bool readRegister(uint8_t, uint8_t reg, uint16_t& value) override {
     if (dropped) return false;
+    if (reg == twinoak::power::kRegMaskEnable) {
+      // The conversion-ready flag, as the INA3221 raises it: set when an averaging window has
+      // finished and cleared by this very read. In continuous mode the windows tile time end to
+      // end, so the next one ends a window after *this* one did and not a window from now.
+      const bool ready = int32_t(now() - window_end_ms_) >= 0;
+      if (ready) window_end_ms_ += kWindowMs;
+      value = ready ? twinoak::power::kMaskConversionReady : uint16_t(0);
+      return true;
+    }
     value = reg_[reg];
     return true;
   }
   uint32_t lastTransactionMicros() const override { return 400; }
 
  private:
+  static constexpr uint32_t kWindowMs = twinoak::power::kConversionCycleMs;
+
+  uint32_t now() const { return clock == nullptr ? 0 : clock(); }
+
   uint16_t reg_[256] = {0};
+  uint32_t window_end_ms_ = 0;
 };
 
 // A BME280 that answers what a sealed box on a Danish mast in winter would.
@@ -626,6 +655,36 @@ twinoak::power::PowerReader g_power_reader(g_bus);
 twinoak::power::EnvReader g_env_reader(g_part);
 twinoak::power::BatteryWatch g_battery;
 
+// --- the power reader's own clock ---------------------------------------------------------------
+
+// The reader and the fake device are driven on this and not on nowMs() directly, because one
+// linkcli invocation lives for about a tenth of a second and one averaging window is 845 ms:
+// without it nothing would ever be read at all, and `power` would answer `valid 0` on a healthy
+// fake. --flowed steps the reader through as many windows as the seconds it was given, by hand;
+// the pipe loop then carries the same clock on from the real one, so no interval goes backwards
+// and the device's windows keep tiling time.
+long g_flowed_s = 3600;        // --flowed <seconds>: how long this board has been reading
+uint32_t g_power_ms = 0;       // where the simulation got to
+bool g_power_live = false;     // and then: the real clock, offset by the above
+uint32_t g_power_live_from = 0;
+
+uint32_t powerNowMs() { return g_power_live ? g_power_ms + (nowMs() - g_power_live_from) : g_power_ms; }
+
+// Every window of the seconds asked for, at the granularity the reader polls the flag with: the
+// flag is noticed within one poll, and the three channels are read one per pass, exactly as a
+// board's loop() does it.
+void flowPower(long seconds) {
+  g_power_ms = 0;
+  g_power_reader.begin(powerNowMs());
+  const uint32_t until = uint32_t(seconds > 0 ? seconds : 0) * 1000u;
+  while (g_power_ms < until) {
+    g_power_ms += twinoak::power::kReadyPollMs;
+    g_power_reader.loop(powerNowMs());
+  }
+  g_power_live_from = nowMs();
+  g_power_live = true;
+}
+
 // The snapshot the three handlers answer out of - the firmware's own, with the MCU temperature
 // a board would read from its own die.
 class LoopTelemetry : public twinoak::power::TelemetrySource {
@@ -637,6 +696,9 @@ class LoopTelemetry : public twinoak::power::TelemetrySource {
     s.batt_mv = s.power.batteryMilliVolts();
     s.mcu_temp_valid = true;
     s.mcu_temp_c = 21.25f;
+    // What has flowed, for LPP channels 6 to 14 - the firmware's own accumulator, filled by the
+    // windows flowPower() stepped the reader through (src/common/power/Telemetry.h).
+    twinoak::power::fillTotals(g_power_reader.totals(), s);
     return s;
   }
 };
@@ -831,8 +893,10 @@ int pump() {
   if (g_obs_wake) g_observations.setWakeEnabled(true);
   for (long n = 0; n < g_adverts; n++) hearAdvert(n, nowMs());
 
-  // As TwinOakSensors::begin() does it (src/common/board/target.cpp).
-  g_power_reader.begin(nowMs());
+  // As TwinOakSensors::begin() does it (src/common/board/target.cpp) - the power reader through
+  // the --flowed simulation, which begins it and then hands it the real clock.
+  g_bus.clock = powerNowMs;
+  flowPower(g_flowed_s);
   g_env_reader.begin(nowMs());
 
   for (;;) {
@@ -857,7 +921,7 @@ int pump() {
     // and the battery thresholds looked at with whatever channel 2 last said.
     {
       const uint32_t now = nowMs();
-      g_power_reader.loop(now);
+      g_power_reader.loop(powerNowMs());
       g_env_reader.loop(now);
       const twinoak::power::ChannelReading& batt = g_power_reader.readings().ch[1];
       const uint8_t entered = g_battery.poll(batt.valid, batt.bus_mv, now);
@@ -970,10 +1034,15 @@ int main(int argc, char** argv) {
     } else if (strcmp(argv[i], "--adverts") == 0 && i + 1 < argc) {
       g_adverts = strtol(argv[++i], nullptr, 10);
       if (g_adverts < 0) g_adverts = 0;
+    } else if (strcmp(argv[i], "--flowed") == 0 && i + 1 < argc) {
+      // How long this board has been reading its INA3221 before the pipe opened: the totals of
+      // LPP channels 6 to 14 are what that time flowed through.
+      g_flowed_s = strtol(argv[++i], nullptr, 10);
+      if (g_flowed_s < 0) g_flowed_s = 0;
     } else {
       fprintf(stderr,
               "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina] [--job]"
-              " [--adverts <n>] [--obs-wake] [--first-boot]\n");
+              " [--adverts <n>] [--obs-wake] [--first-boot] [--flowed <seconds>]\n");
       return 2;
     }
   }

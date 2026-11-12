@@ -640,9 +640,11 @@ class SectionFive(WalkCase):
                      "thermometer in the enclosure", "lab supply's knob",
                      "hand on the I2C connector",
                      # p3.10-01: the conversion-ready flag, which only a real part raises
-                     "a part that really raises that flag"):
+                     "a part that really raises that flag",
+                     # p3.10-02: a total is read as a difference, which takes two answers
+                     "an hour of wall clock"):
             self.assertIn(owed, still)
-        self.assertEqual(still.count("- **5."), 7)
+        self.assertEqual(still.count("- **5."), 8)
         # the boot-voltage line is the lab supply's, but its three `get`s are read here
         self.assertIn("**section 5 get pwrmgt.bootmv** -> 0 mV", text)
         self.assertIn("**section 5 get pwrmgt.support** -> supported", text)

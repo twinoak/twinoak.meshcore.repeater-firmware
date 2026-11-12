@@ -448,8 +448,11 @@ ENV_GET
 - **A channel whose `valid` bit is clear reads 0** — a missing reading, never a
   stale one. With the B-board unplugged, `power` answers `valid 0` and the
   repeater keeps repeating: nothing on this bus can hold up forwarding.
-- **No request ever touches the I2C bus.** The three channels are swept once a
-  second and the BME280 every five, both out of the firmware's own `loop()`;
+- **No request ever touches the I2C bus.** The three channels are swept **once
+  per averaging window of the device's own** — 845 ms, found through the
+  INA3221's conversion-ready flag since `p3.10-01`, which is what makes the
+  totals below cover all of the time — and the BME280 every five seconds, both
+  out of the firmware's own `loop()`;
   every request answers out of that cache. A sensor that stops answering is a
   missing reading and the firmware leaves it alone for five seconds before
   asking again (`src/common/power/PowerReader.h`).
@@ -463,30 +466,48 @@ ENV_GET
 at those permissions would get — which is how the Walter reports what a phone
 was told. **These channel numbers are chosen once and never renumbered**:
 
-| LPP channel | What | Fields | Whose |
-|---:|---|---|---|
-| 1 | the node itself | battery voltage, MCU temperature | upstream's (`TELEM_CHANNEL_SELF`) |
-| 2 | panel | voltage, current | ours |
-| 3 | battery | voltage, current | ours |
-| 4 | total load | voltage, current | ours |
-| 5 | the enclosure | temperature | ours |
+| LPP channel | What | Fields | Unit | Whose |
+|---:|---|---|---|---|
+| 1 | the node itself | battery voltage, MCU temperature | | upstream's (`TELEM_CHANNEL_SELF`) |
+| 2 | panel | voltage, current | | ours |
+| 3 | battery | voltage, current | | ours |
+| 4 | total load | voltage, current | | ours |
+| 5 | the enclosure | temperature | | ours |
+| 6 | panel, charge | total since start | 0.01 mAh | ours |
+| 7 | panel, energy | total since start | 0.1 mWh | ours |
+| 8 | battery, charge **in** | total since start | 0.01 mAh | ours |
+| 9 | battery, charge **out** | total since start | 0.01 mAh | ours |
+| 10 | battery, energy **in** | total since start | 0.1 mWh | ours |
+| 11 | battery, energy **out** | total since start | 0.1 mWh | ours |
+| 12 | load, charge | total since start | 0.01 mAh | ours |
+| 13 | load, energy | total since start | 0.1 mWh | ours |
+| 14 | the seconds those totals cover | total since start | 1 s | ours |
 
 ```
 $ python3 tools/linkcli.py --port COM7 lpp
 LPP_GET perm_mask 0x05 (base, environment)
-  36 byte(s): 017401900274071102750078037401900375ffcc0474018e047500550567ffdd016700d4
-  channel 1  self       voltage        4.000 V
-  channel 2  panel      voltage       18.090 V
-  channel 2  panel      current        0.120 A
-  channel 3  battery    voltage        4.000 V
-  channel 3  battery    current       -0.052 A
-  channel 4  load       voltage        3.980 V
-  channel 4  load       current        0.085 A
-  channel 5  enclosure  temperature   -3.500 C
-  channel 1  self       temperature   21.200 C
+  90 byte(s): 017401900274071102750078037401900375ffcc0474018e047500550567ffdd066400002edf0764000054d108640000000009640000144f0a64000000000b64000008230c64000021330d6400000d3a0e6400000e0f016700d4
+  channel 1  self       voltage                4.000 V
+  channel 2  panel      voltage               18.090 V
+  channel 2  panel      current                0.120 A
+  channel 3  battery    voltage                4.000 V
+  channel 3  battery    current               -0.052 A
+  channel 4  load       voltage                3.980 V
+  channel 4  load       current                0.085 A
+  channel 5  enclosure  temperature           -3.500 C
+  channel 6  panel      charge               119.990 mAh
+  channel 7  panel      energy              2171.300 mWh
+  channel 8  battery    charge in              0.000 mAh
+  channel 9  battery    charge out            51.990 mAh
+  channel 10 battery    energy in              0.000 mWh
+  channel 11 battery    energy out           208.300 mWh
+  channel 12 load       charge                84.990 mAh
+  channel 13 load       energy               338.600 mWh
+  channel 14 the totals seconds covered     3599.000 s
+  channel 1  self       temperature           21.200 C
 ```
 
-- Channels 2 to 5 need the **environment** permission (`0x04`), which is the
+- Channels 2 to 14 need the **environment** permission (`0x04`), which is the
   gate upstream's own sensor manager uses. `lpp 1` — base alone, which is what a
   guest gets — is channel 1 and nothing else.
 - **The enclosure's humidity and pressure are not in the LPP.** CayenneLPP
@@ -498,6 +519,58 @@ LPP_GET perm_mask 0x05 (base, environment)
 - A voltage is 0.01 V per step and a current 0.001 A, both truncated towards
   zero, so `4008 mV` reads back as `4.00 V`. That is Cayenne-LPP's resolution
   and it is the same on the mesh.
+
+### Reading channels 6 to 14: subtract two answers
+
+Channels 2, 3 and 4 are a **moment** — the average of the INA3221's last 845 ms
+window, handed out whenever somebody asks. On a unit whose Walter is asleep
+nearly all the time, the only moment anybody asks is the moment that Walter is
+awake with its modem up, drawing 110 to 170 mA, so a week of those moments says
+the unit draws 110 mA when it draws a fraction of that over the hour. Channels
+6 to 14 are the cure: the radio never sleeps, it sees every window, and it adds
+them up (`docs/ARCHITECTURE.md` §6).
+
+So **a total is read as a difference and never as a value.** Two answers an hour
+apart, channel 12 at 84.99 mAh and then at 115.22 mAh, say the load drew
+30.23 mAh in that hour — and channel 14, 3599 s and then 7199 s, says that the
+3600 s between them were covered to the second. Three things follow:
+
+- **Channel 14 going *down* means the radio restarted** and every total began
+  again from zero. A reader that subtracts across that boundary gets a negative
+  number, which is its signal to throw the interval away rather than to chart
+  it. The totals live in RAM; nothing writes them to flash.
+- **Channel 14's own difference against the clock says how much of the time was
+  seen.** 3600 s of wall clock and 3600 s of channel 14 is every window; less
+  means sweeps were a gap — a channel that did not answer, the five-second
+  back-off after a bus failure, a window the device never flagged — and the
+  difference is how much of the interval the other eight channels are silent
+  about. They are honest in the same proportion.
+- **All nine arrive together or not at all.** A unit in its first averaging
+  window has counted nothing, and reports channels 1 to 5 and no total: there
+  is nothing yet to subtract, and a zero would read as a number.
+
+Every one of the nine is a **four-byte unsigned** Cayenne-LPP *generic sensor*
+(type 100), so a reader that knows the type still needs this table to know the
+unit. Two limits of that encoding are worth knowing, because the library takes
+a `float`:
+
+- **Above 16 777 216 steps a total is rounded to the nearest representable
+  value** — a multiple of 2 steps, then 4 above 33 554 432, and so on. It is
+  still never smaller than the answer before it, so a difference is still a
+  difference; it is simply granular. Channel 14 crosses that line after
+  **194 days** of uptime, whatever the current; the charge channels after about
+  **350 days** at 20 mA, and the energy channels after about **2.4 years**.
+- **At the top a total saturates.** It sticks at 4 294 967 040 steps — the
+  largest value a `float` holds below 2³² — and stays there rather than
+  wrapping or becoming whatever a conversion happened to do. That is 42 949 Ah
+  of charge, about 245 years of a 20 mA load, so no unit will see it; what will
+  be seen is the rounding above.
+
+`POWER_GET` (§2d) does **not** carry the totals: it is the three readings, as
+the protocol defines them, and the Walter decides how long to sleep from a
+voltage and a current it reads while it is itself awake. Whether the box link
+should carry a total or an average is a change to `spec/LINK-PROTOCOL.md` where
+it lives (`tasks/phase-3.10/FOLLOWUPS.md`).
 
 ## 2e. The mesh client's job
 

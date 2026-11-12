@@ -111,6 +111,12 @@ class PowerTotals {
   uint64_t millisCovered() const { return covered_ms_; }
   uint32_t secondsCovered() const { return uint32_t(covered_ms_ / 1000u); }
 
+  // Whether one sweep has been added up at all. A counted sweep always covers at least a
+  // millisecond, so this is "the totals mean something yet" - which is what makes the nine
+  // fields of p3.10-02 all nine or none: a total of zero and a total not yet counted are
+  // different things, and a reader subtracts one answer from another.
+  bool hasCounted() const { return covered_ms_ > 0; }
+
   // Sweeps that were a gap, since boot - what makes a thin "seconds covered" readable.
   uint32_t gaps() const { return gaps_; }
 

@@ -18,6 +18,10 @@
 //     attention machine of src/common/link/attention/;
 //   - the LPP of LPP_GET equals the LPP the telemetry path builds, for the same fake readings -
 //     and both equal bytes computed by hand from CayenneLPP's own arithmetic;
+//   - and since p3.10-02 the nine totals of LPP channels 6 to 14: their steps, the floor, all
+//     nine or none, that channels 1 to 5 are byte for byte what v0.1.2 answered, that the whole
+//     reply fits the mesh's cap, that an unsigned type keeps its magnitude where a signed one is
+//     two's-complemented, and what a total does above 2^24 steps and at the top;
 //   - and POWER_GET's and ENV_GET's own bodies through src/common/power/LinkPower.h. Their *frames*,
 //     byte for byte against the fixture, are test/test_link_session's.
 
@@ -25,6 +29,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -182,6 +187,19 @@ class FakeSource : public TelemetrySource {
 // for them (computed by hand from src/CayenneLPP.cpp's addField at version 1.6.1: the value
 // times the type's multiplier, truncated towards zero, two's complement, most significant byte
 // first).
+// The nine totals every LPP test below shares, in **steps** of the wire's own units - 0.01 mAh
+// for a charge, 0.1 mWh for an energy and one second for the time covered (docs/link.md 2d) - so
+// that the hex beside them is a hand-computed answer and not a restatement of the input.
+const uint32_t kPanelChargeSteps = 12345;
+const uint32_t kPanelEnergySteps = 67890;
+const uint32_t kBattInChargeSteps = 100;
+const uint32_t kBattOutChargeSteps = 23456;
+const uint32_t kBattInEnergySteps = 4200;
+const uint32_t kBattOutEnergySteps = 98765;
+const uint32_t kLoadChargeSteps = 54321;
+const uint32_t kLoadEnergySteps = 123456;
+const uint32_t kCoveredSeconds = 3600;
+
 TelemetrySnapshot sampleSnapshot() {
   TelemetrySnapshot s;
   s.power.ch[0].bus_mv = 18096;  // panel, 18.096 V
@@ -200,6 +218,25 @@ TelemetrySnapshot sampleSnapshot() {
   s.batt_mv = 4008;
   s.mcu_temp_valid = true;
   s.mcu_temp_c = 21.25f;
+  s.totals_counted = true;
+  s.totals[PowerTotals::kPanel].charge_uc =
+      uint64_t(kPanelChargeSteps) * kChargeStepMicroCoulomb;
+  s.totals[PowerTotals::kPanel].energy_uj = uint64_t(kPanelEnergySteps) * kEnergyStepMicroJoule;
+  s.totals[PowerTotals::kBatteryIn].charge_uc =
+      uint64_t(kBattInChargeSteps) * kChargeStepMicroCoulomb;
+  s.totals[PowerTotals::kBatteryIn].energy_uj =
+      uint64_t(kBattInEnergySteps) * kEnergyStepMicroJoule;
+  s.totals[PowerTotals::kBatteryOut].charge_uc =
+      uint64_t(kBattOutChargeSteps) * kChargeStepMicroCoulomb;
+  s.totals[PowerTotals::kBatteryOut].energy_uj =
+      uint64_t(kBattOutEnergySteps) * kEnergyStepMicroJoule;
+  // One step short of the next step, on two of them: what the wire carries is a floor, so a
+  // total always reads at or below the truth and never above it.
+  s.totals[PowerTotals::kLoad].charge_uc =
+      uint64_t(kLoadChargeSteps) * kChargeStepMicroCoulomb + kChargeStepMicroCoulomb - 1;
+  s.totals[PowerTotals::kLoad].energy_uj =
+      uint64_t(kLoadEnergySteps) * kEnergyStepMicroJoule + kEnergyStepMicroJoule - 1;
+  s.totals_covered_ms = uint64_t(kCoveredSeconds) * kCoveredStepMillis + kCoveredStepMillis - 1;
   return s;
 }
 
@@ -212,7 +249,43 @@ const char* const kOursHex =
     "0474018e"  // channel 4 load voltage, 3.98 V (398)
     "04750055"  // channel 4 load current, 0.085 A (85)
     "0567ffdd";  // channel 5 enclosure temperature, -3.5 C (-35)
+// Channels 6 to 14, type 100 (0x64, four bytes, unsigned, one unit per step): the step counts
+// above, most significant byte first (p3.10-02).
+const char* const kTotalsHex =
+    "066400003039"  // 6  panel charge      12345 steps = 123.45 mAh
+    "076400010932"  // 7  panel energy      67890 steps = 6789.0 mWh
+    "086400000064"  // 8  battery charge in   100 steps = 1.00 mAh
+    "096400005ba0"  // 9  battery charge out 23456 steps = 234.56 mAh
+    "0a6400001068"  // 10 battery energy in  4200 steps = 420.0 mWh
+    "0b64000181cd"  // 11 battery energy out 98765 steps = 9876.5 mWh
+    "0c640000d431"  // 12 load charge        54321 steps = 543.21 mAh
+    "0d640001e240"  // 13 load energy       123456 steps = 12345.6 mWh
+    "0e6400000e10";  // 14 seconds covered    3600 steps = 3600 s
 const char* const kMcuHex = "016700d4";  // channel 1, temperature, 21.25 -> 212, truncated
+
+// Every field of the longest reply this firmware builds, encoded: 36 bytes of channels 1 to 5
+// and 54 of the nine totals (p3.10-02's cost line).
+constexpr size_t kWholeReplyBytes = 90;
+
+// One charge total as the wire carries it, through the real field builder and the real mirror.
+// A default snapshot has no valid channel and no environment reading, so the nine totals are the
+// whole of `ourFields`' list and channel 6 - the panel's charge - is the first of them.
+std::string chargeHex(uint64_t steps) {
+  TelemetrySnapshot s;
+  s.totals_counted = true;
+  s.totals[PowerTotals::kPanel].charge_uc = steps * kChargeStepMicroCoulomb;
+  LppField f[kMaxLppFields];
+  const size_t n = ourFields(s, kPermEnvironment, f, kMaxLppFields);
+  if (n == 0) return std::string();
+  uint8_t out[kMeshLppCap] = {0};
+  return toHex(out, encodeLpp(f, 1, out, sizeof(out)));
+}
+
+// The four bytes of that field, as a number - what a reader of the LPP gets back.
+uint32_t chargeSteps(uint64_t steps) {
+  const std::string hex = chargeHex(steps);
+  return uint32_t(strtoul(hex.substr(4).c_str(), nullptr, 16));
+}
 
 }  // namespace
 
@@ -1145,10 +1218,13 @@ TEST(TheTelemetry, TheFieldsAreOursOnTheChannelsThatNeverMove) {
   LppField f[kMaxLppFields];
 
   const size_t n = ourFields(s, kPermBase | kPermEnvironment, f, kMaxLppFields);
-  ASSERT_EQ(7u, n);
-  const uint8_t want_channel[] = {2, 2, 3, 3, 4, 4, 5};
+  ASSERT_EQ(16u, n);
+  const uint8_t want_channel[] = {2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
   const uint8_t want_type[] = {kLppVoltage, kLppCurrent, kLppVoltage, kLppCurrent,
-                               kLppVoltage, kLppCurrent, kLppTemperature};
+                               kLppVoltage, kLppCurrent, kLppTemperature,
+                               kLppGenericSensor, kLppGenericSensor, kLppGenericSensor,
+                               kLppGenericSensor, kLppGenericSensor, kLppGenericSensor,
+                               kLppGenericSensor, kLppGenericSensor, kLppGenericSensor};
   for (size_t i = 0; i < n; i++) {
     EXPECT_EQ(want_channel[i], f[i].channel) << "field " << i;
     EXPECT_EQ(want_type[i], f[i].type) << "field " << i;
@@ -1161,6 +1237,15 @@ TEST(TheTelemetry, TheFieldsAreOursOnTheChannelsThatNeverMove) {
   static_assert(kLppChannelBattery == 3, "the battery is LPP channel 3");
   static_assert(kLppChannelLoad == 4, "the load is LPP channel 4");
   static_assert(kLppChannelEnclosure == 5, "the enclosure is LPP channel 5");
+  static_assert(kLppChannelPanelCharge == 6, "the panel's charge is LPP channel 6");
+  static_assert(kLppChannelPanelEnergy == 7, "the panel's energy is LPP channel 7");
+  static_assert(kLppChannelBatteryChargeIn == 8, "the battery's charge in is LPP channel 8");
+  static_assert(kLppChannelBatteryChargeOut == 9, "the battery's charge out is LPP channel 9");
+  static_assert(kLppChannelBatteryEnergyIn == 10, "the battery's energy in is LPP channel 10");
+  static_assert(kLppChannelBatteryEnergyOut == 11, "the battery's energy out is LPP channel 11");
+  static_assert(kLppChannelLoadCharge == 12, "the load's charge is LPP channel 12");
+  static_assert(kLppChannelLoadEnergy == 13, "the load's energy is LPP channel 13");
+  static_assert(kLppChannelCovered == 14, "the seconds covered are LPP channel 14");
 }
 
 TEST(TheTelemetry, OursNeedTheEnvironmentPermissionAndAnInvalidChannelIsLeftOut) {
@@ -1170,22 +1255,57 @@ TEST(TheTelemetry, OursNeedTheEnvironmentPermissionAndAnInvalidChannelIsLeftOut)
   EXPECT_EQ(0u, ourFields(s, kPermBase, f, kMaxLppFields)) << "base alone gets none of ours";
   EXPECT_EQ(0u, ourFields(s, 0, f, kMaxLppFields));
   EXPECT_EQ(0u, ourFields(s, kPermLocation, f, kMaxLppFields));
-  EXPECT_EQ(7u, ourFields(s, 0xFF, f, kMaxLppFields)) << "an unknown bit is ignored";
+  EXPECT_EQ(16u, ourFields(s, 0xFF, f, kMaxLppFields)) << "an unknown bit is ignored";
 
   // A channel that could not be read is not reported as zero volts, and the channels that are
   // there keep their numbers.
   s.power.ch[1].valid = false;
-  ASSERT_EQ(5u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  ASSERT_EQ(14u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
   EXPECT_EQ(kLppChannelPanel, f[0].channel);
   EXPECT_EQ(kLppChannelLoad, f[2].channel) << "the load is still channel 4";
   EXPECT_EQ(kLppChannelEnclosure, f[4].channel);
+  EXPECT_EQ(kLppChannelPanelCharge, f[5].channel) << "and the totals follow it";
 
   s.env.valid = 0;
-  EXPECT_EQ(4u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  EXPECT_EQ(13u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
 
+  // **A total is not a reading.** With not one channel answering, the three readings are gone and
+  // the nine totals are still the whole truth about the time before: they are history, and the
+  // sweeps that failed are a gap in the time they say they cover, not a reason to withdraw them.
   s.power.ch[0].valid = false;
   s.power.ch[2].valid = false;
-  EXPECT_EQ(0u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  ASSERT_EQ(9u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  EXPECT_EQ(kLppChannelPanelCharge, f[0].channel);
+  EXPECT_EQ(kLppChannelCovered, f[8].channel);
+}
+
+TEST(TheTelemetry, TheNineTotalsAreAllOrNoneUntilASweepHasCounted) {
+  TelemetrySnapshot s = sampleSnapshot();
+  LppField f[kMaxLppFields];
+
+  // A board in its first averaging window: the accumulator has added nothing up, so there is
+  // nothing to subtract and a zero would read as a number.
+  s.totals_counted = false;
+  ASSERT_EQ(7u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  for (size_t i = 0; i < 7; i++) EXPECT_LE(f[i].channel, kLppChannelEnclosure) << "field " << i;
+
+  // And the accumulator itself decides it, through the one function that copies it out.
+  PowerTotals totals;
+  fillTotals(totals, s);
+  EXPECT_FALSE(s.totals_counted) << "nothing has been noted";
+  EXPECT_EQ(7u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+
+  PowerReadings r;
+  for (uint8_t i = 0; i < kChannels; i++) {
+    r.ch[i].valid = true;
+    r.ch[i].bus_mv = 4000;
+    r.ch[i].current_ma = 100;
+  }
+  totals.anchor(0);
+  ASSERT_TRUE(totals.note(r, kConversionCycleMs));
+  fillTotals(totals, s);
+  EXPECT_TRUE(s.totals_counted) << "one sweep is enough";
+  EXPECT_EQ(16u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
 }
 
 TEST(TheTelemetry, TheBytesAreWhatCayenneLppWrites) {
@@ -1195,20 +1315,152 @@ TEST(TheTelemetry, TheBytesAreWhatCayenneLppWrites) {
 
   const size_t n = ourFields(s, kPermEnvironment, f, kMaxLppFields);
   const size_t len = encodeLpp(f, n, out, sizeof(out));
-  EXPECT_EQ(std::string(kOursHex), toHex(out, len));
+  EXPECT_EQ(std::string(kOursHex) + kTotalsHex, toHex(out, len));
 
   // The whole reply: the base voltage, ours, then the MCU's own temperature - and 21.25 C comes
   // out as 212 and not 213, because CayenneLPP truncates where it could round.
   const size_t all = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
   ASSERT_EQ(n + 2, all);
+  ASSERT_EQ(kMaxLppFields, all) << "the longest list this firmware builds";
   const size_t all_len = encodeLpp(f, all, out, sizeof(out));
-  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kMcuHex, toHex(out, all_len));
+  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kTotalsHex + kMcuHex, toHex(out, all_len));
+}
+
+TEST(TheTelemetry, ChannelsOneToFiveAreByteForByteWhatTheReleaseBeforeThisAnswered) {
+  // v0.1.2 answered these bytes for this snapshot, and p3.10-02 only *adds* fields: nothing of
+  // channels 1 to 5 moved, so a reader of the release before this one reads the same numbers in
+  // the same places (tasks/phase-3.10/02-the-totals-told.md).
+  const TelemetrySnapshot s = sampleSnapshot();
+  LppField f[kMaxLppFields];
+  uint8_t out[kMeshLppCap] = {0};
+  const size_t all = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
+  const std::string hex = toHex(out, encodeLpp(f, all, out, sizeof(out)));
+
+  const std::string before = std::string(kBaseHex) + kOursHex;  // v0.1.2's whole answer, bar the MCU
+  EXPECT_EQ(before, hex.substr(0, before.size())) << "channels 1 to 5, unmoved";
+  EXPECT_EQ(std::string(kMcuHex), hex.substr(hex.size() - 8)) << "and the MCU's own, still last";
+  // 36 bytes before, 90 after: the nine totals are the 54 between them (docs/link.md 2d, and
+  // p3.10-02's cost line - the bytes are what the airtime is computed from).
+  EXPECT_EQ(36u, before.size() / 2 + 4u) << "v0.1.2's whole reply was 36 bytes";
+  EXPECT_EQ(kWholeReplyBytes, hex.size() / 2);
+  EXPECT_EQ(54u, hex.size() / 2 - 36u) << "the nine totals, six bytes each";
+}
+
+TEST(TheTelemetry, TheWholeReplyFitsTheMeshCapWithEveryFieldPresent) {
+  const TelemetrySnapshot s = sampleSnapshot();
+  LppField f[kMaxLppFields];
+  uint8_t out[kMeshLppCap] = {0};
+  const size_t all = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
+  ASSERT_EQ(kMaxLppFields, all);
+
+  // Nothing is dropped at the mesh's own cap, which is the cap LPP_GET uses as well: nine
+  // two-byte fields at four bytes each and nine totals at six.
+  const size_t len = encodeLpp(f, all, out, kMeshLppCap);
+  EXPECT_EQ(kWholeReplyBytes, len);
+  EXPECT_EQ(9u * 4u + 9u * 6u, len);
+  EXPECT_LE(len, kMeshLppCap) << "half of the 180 bytes upstream's buffer holds";
+  EXPECT_EQ(90u, kMeshLppCap - len) << "and ninety bytes still free for whatever comes next";
+}
+
+TEST(TheTelemetry, ATotalIsFourUnsignedBytesAndTheFloorOfItsSteps) {
+  // CayenneLPP 1.6.1's own three numbers for LPP_GENERIC_SENSOR, which the mirror copies:
+  // LPP_GENERIC_SENSOR 100, LPP_GENERIC_SENSOR_SIZE 4, LPP_GENERIC_SENSOR_MULT 1, and **not** in
+  // getTypeSigned()'s list. src/common/power/BoardPower.cpp holds the first three against the
+  // library's own macros where the library is compiled; these are the bytes they produce.
+  EXPECT_EQ(std::string("066400000000"), chargeHex(0));
+  EXPECT_EQ(std::string("066400000001"), chargeHex(1));
+  EXPECT_EQ(std::string("0664000003e8"), chargeHex(1000));
+  EXPECT_EQ(std::string("06640000ffff"), chargeHex(0xFFFF));
+  EXPECT_EQ(std::string("066400ffffff"), chargeHex(0xFFFFFF));
+
+  // An hour at 5 mA is 500 steps of charge and not five: the unit was chosen so that the
+  // smallest hour this unit has is hundreds of steps (Telemetry.h).
+  const uint64_t five_ma_for_an_hour_uc = 5ull * 3600ull * 1000ull;  // mA * ms
+  EXPECT_EQ(500u, five_ma_for_an_hour_uc / kChargeStepMicroCoulomb);
+  const uint64_t five_ma_at_three_volts_uj = 3000ull * 5ull * 3600ull;  // mV * mA * ms / 1000
+  EXPECT_EQ(150u, five_ma_at_three_volts_uj * 1000ull / 1000ull / kEnergyStepMicroJoule);
+
+  // The floor: one microcoulomb short of the next step is still this step, and never the next.
+  LppField f[kMaxLppFields];
+  TelemetrySnapshot s;
+  s.totals_counted = true;
+  for (uint64_t extra = 0; extra < kChargeStepMicroCoulomb; extra += 7919) {
+    s.totals[PowerTotals::kPanel].charge_uc = 1234ull * kChargeStepMicroCoulomb + extra;
+    ASSERT_EQ(9u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+    EXPECT_FLOAT_EQ(1234.0f, f[0].value) << "extra " << extra;
+  }
+}
+
+TEST(TheTelemetry, AnUnsignedTypeKeepsItsMagnitudeWhereASignedOneIsTwosComplemented) {
+  // addField takes the sign off the float first and only *then* asks whether the type is signed:
+  // `is_signed & sign`. A current of -52 mA is two's-complemented (0xffcc, kOursHex above); a
+  // generic sensor of the same magnitude is not, and reads as the magnitude.
+  LppField f[2];
+  f[0].channel = kLppChannelBattery;
+  f[0].type = kLppCurrent;
+  f[0].value = -0.052f;
+  f[1].channel = kLppChannelPanelCharge;
+  f[1].type = kLppGenericSensor;
+  f[1].value = -52.0f;
+  uint8_t out[32] = {0};
+  EXPECT_EQ(std::string("0375ffcc") + "066400000034", toHex(out, encodeLpp(f, 2, out, sizeof(out))));
+}
+
+TEST(TheTelemetry, ATotalAboveSixteenMillionStepsReadsAsTheNearestFloatAndNeverLower) {
+  // The library takes a `float`, which holds every integer up to 2^24 exactly and then only the
+  // even ones. Below that a total is itself:
+  EXPECT_EQ(std::string("066401000000"), chargeHex(1u << 24));
+  EXPECT_EQ(16777216u, chargeSteps(1u << 24));
+  EXPECT_EQ(16777215u, chargeSteps((1u << 24) - 1u));
+  EXPECT_EQ(16777218u, chargeSteps((1u << 24) + 2u));
+
+  // Above it, the nearest representable step - which rounds either way at a tie, so the only
+  // promises are that it is within one step of the truth and that it **never reads lower than
+  // the answer before it**. That is what a reader subtracting two answers needs.
+  uint32_t last = chargeSteps(1u << 24);
+  for (uint64_t steps = (1ull << 24); steps < (1ull << 24) + 4096; steps++) {
+    const uint32_t got = chargeSteps(steps);
+    ASSERT_GE(got, last) << "steps " << steps << " went backwards";
+    ASSERT_LE(got > steps ? got - steps : steps - got, 2u) << "steps " << steps;
+    last = got;
+  }
+  // And far above it, the same two promises at the coarser grid: 2^30 steps is a multiple of 64.
+  last = chargeSteps(1ull << 30);
+  for (uint64_t steps = (1ull << 30); steps < (1ull << 30) + 4096; steps += 97) {
+    const uint32_t got = chargeSteps(steps);
+    ASSERT_GE(got, last) << "steps " << steps;
+    ASSERT_LE(got > steps ? got - steps : steps - got, 64u) << "steps " << steps;
+    last = got;
+  }
+}
+
+TEST(TheTelemetry, ATotalSaturatesAtTheTopAndNeverWraps) {
+  // The decision of docs/link.md 2d: a total sticks at the largest value a float holds below
+  // 2^32 - 0xFFFFFF00 - because converting a float of 2^32 or more to a uint32_t is undefined,
+  // and 4 294 967 295 is such a float. It saturates; it does not wrap, and it does not become
+  // whatever the conversion happened to do.
+  static_assert(kTotalCeiling == 0xFFFFFF00u, "the largest float below 2^32");
+  EXPECT_EQ(std::string("0664ffffff00"), chargeHex(kTotalCeiling));
+  EXPECT_EQ(std::string("0664ffffff00"), chargeHex(uint64_t(kTotalCeiling) + 1u));
+  EXPECT_EQ(std::string("0664ffffff00"), chargeHex(0xFFFFFFFFull));
+  EXPECT_EQ(std::string("0664ffffff00"), chargeHex(0xFFFFFFFFFFull));
+  // Monotone right up to it, and not one step past it.
+  EXPECT_EQ(kTotalCeiling, chargeSteps(kTotalCeiling));
+  EXPECT_GE(kTotalCeiling, chargeSteps(uint64_t(kTotalCeiling) - 1u));
 }
 
 TEST(TheTelemetry, TheLppOfLppGetIsTheLppTheTelemetryPathBuilds) {
   // The two compositions of src/common/power/Telemetry.h, for the same readings: LPP_GET's whole list,
   // and what upstream's MyMesh::handleRequest writes around TwinOakSensors::querySensors.
-  const TelemetrySnapshot s = sampleSnapshot();
+  //
+  // The snapshot carries a total **above 2^24 steps** among the nine, because that is where the
+  // float the library takes stops being exact and is the one value the two writers could differ
+  // over if either of them did its own arithmetic.
+  TelemetrySnapshot s = sampleSnapshot();
+  s.totals[PowerTotals::kLoad].charge_uc =
+      (uint64_t(1) << 24) * kChargeStepMicroCoulomb + 3ull * kChargeStepMicroCoulomb;
+  s.totals[PowerTotals::kBatteryOut].energy_uj =
+      uint64_t(kTotalCeiling) * kEnergyStepMicroJoule + 1ull;  // and one at the ceiling
   FakeSource source;
   source.s = s;
   LinkPower link(source);
@@ -1244,7 +1496,7 @@ TEST(TheTelemetry, TheMcuTemperatureIsLeftOutWhenItIsNotANumber) {
   const size_t n = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
   uint8_t out[kMeshLppCap] = {0};
   const size_t len = encodeLpp(f, n, out, sizeof(out));
-  EXPECT_EQ(std::string(kBaseHex) + kOursHex, toHex(out, len));
+  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kTotalsHex, toHex(out, len));
 }
 
 TEST(TheTelemetry, AFieldThatWouldNotFitIsDroppedAsTheLibraryDropsIt) {
@@ -1253,10 +1505,17 @@ TEST(TheTelemetry, AFieldThatWouldNotFitIsDroppedAsTheLibraryDropsIt) {
   const size_t n = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
   uint8_t out[64] = {0};
 
-  // Every field this firmware writes is four bytes, so a cap of five holds exactly one.
+  // A two-byte field is four bytes on the wire, so a cap of five holds exactly one of them.
   EXPECT_EQ(4u, encodeLpp(f, n, out, 5));
   EXPECT_EQ(std::string(kBaseHex), toHex(out, 4));
   EXPECT_EQ(0u, encodeLpp(f, n, out, 3));
+
+  // A total is six, and the library's overflow check is per field and does not stop the walk: at
+  // a cap of 36 the nine totals do not fit (32 + 4 + 2 > 36) and the MCU's own temperature still
+  // does (32 + 2 + 2 = 36), because addField returns 0 for the one and writes the other. Which
+  // is v0.1.2's reply exactly - the shape a cap of 36 would have forced anyway.
+  EXPECT_EQ(36u, encodeLpp(f, n, out, 36));
+  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kMcuHex, toHex(out, 36));
 
   // A type nothing here knows writes nothing at all - which is CayenneLPP's isType() gate, and
   // the reason the enclosure's humidity and pressure are on the box link and not in the LPP.
