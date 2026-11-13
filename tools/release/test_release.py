@@ -56,9 +56,11 @@ sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 
 import build_release  # noqa: E402
 import check as base_check  # noqa: E402  (tools/base/check.py)
+import gate  # noqa: E402
 import manifestref  # noqa: E402
 import release_notes  # noqa: E402
 import sign_manifest  # noqa: E402
+import version as version_module  # noqa: E402
 
 FIXTURES = os.path.join(REPO, "spec", "fixtures", "manifest")
 BASES = os.path.join(REPO, "boards", "base")
@@ -714,12 +716,217 @@ class ThePublishedPublicHalf(ReleaseTestCase):
         self.assertEqual(manifestref.key_id(public), "73efdd383a957596")
 
 
-# ------------------------------------------------------- the hand-written top of a release body
+# ---------------------------------------------------- the version, in one place, naming the next
 
-class TheHandWrittenNotes(ReleaseTestCase):
-    """release-notes/vX.Y.Z.md: what a person wrote, in front of what the manifest generates
-    (tools/release/release_notes.py). A tag without it is refused in release.yml's ci-green, the
-    way a tag without a signing key is; a rehearsal has none and says so."""
+class TheVersion(ReleaseTestCase):
+    """VERSION at the root is the one place the next release's version is written
+    (tools/release/version.py). The release workflow reads it from there and from no other file,
+    and a build carries it into the descriptor and the manifest as a build flag."""
+
+    def write_version(self, text):
+        self.write(os.path.join(self.tmp, version_module.VERSION_FILE), text)
+        return self.tmp
+
+    def test_it_is_the_one_line_of_the_file(self):
+        self.assertEqual(version_module.read(self.write_version("1.2.3\n")), "1.2.3")
+
+    def test_the_next_release_is_the_next_patch(self):
+        self.assertEqual(version_module.next_patch("0.1.4"), "0.1.5")
+        self.assertEqual(version_module.next_patch("0.1.9"), "0.1.10")
+        self.assertEqual(version_module.next_patch("1.0.0"), "1.0.1")
+
+    def test_the_tag_is_the_version_with_a_v(self):
+        self.assertEqual(version_module.tag("0.1.4"), "v0.1.4")
+
+    def test_a_file_that_is_not_one_version_is_refused(self):
+        for text in ("", "\n", "v1.2.3\n", "1.2\n", "1.2.3+abc1234\n", "1.2.3\n1.2.4\n"):
+            with self.assertRaises(version_module.VersionError):
+                version_module.read(self.write_version(text))
+
+    def test_a_missing_file_says_what_it_is_for(self):
+        with self.assertRaises(version_module.VersionError) as caught:
+            version_module.read(self.tmp)
+        self.assertIn("VERSION", str(caught.exception))
+
+    def test_it_is_written_back_with_one_newline_and_lf(self):
+        version_module.write("2.0.0", self.tmp)
+        with open(os.path.join(self.tmp, version_module.VERSION_FILE), "rb") as fh:
+            self.assertEqual(fh.read(), b"2.0.0\n")
+
+    def test_this_repositorys_own_version_is_one(self):
+        """The real VERSION of this commit: what the button would publish today."""
+        number = version_module.read(REPO)
+        self.assertRegex(number, r"^\d+\.\d+\.\d+$")
+        # And it is the version that comes NEXT: its tag is not one that has been released.
+        self.assertNotIn(version_module.tag(number), release_notes.published(REPO))
+
+    def test_a_build_of_that_version_carries_it_into_the_manifest(self):
+        """The version is a build flag (-D TWINOAK_FW_VERSION), so a release's images report it
+        and build_release.py refuses a build that reports anything else. test/test_image holds the
+        descriptor's half of the same rule in the firmware."""
+        number = version_module.read(REPO)
+        version = "%s+%s" % (number, COMMIT[:7])
+        manifest = self.release(build_dirs=[self.build_dir(version=version)], version=version)
+        self.assertEqual(manifest["version"], version)
+        self.assertEqual(manifest["tag"], version_module.tag(number))
+        with self.assertRaises(build_release.ReleaseError) as caught:
+            self.release(build_dirs=[self.build_dir(version=version, name="other")],
+                         version="9.9.9+" + COMMIT[:7])
+        self.assertIn("was built as version", str(caught.exception))
+
+    def test_no_other_file_of_the_repository_names_a_release_version(self):
+        """One place. The workflow reads VERSION; nothing else holds an X.Y.Z to keep in step."""
+        for path in (os.path.join(REPO, ".github", "workflows", "release.yml"),
+                     os.path.join(REPO, "tools", "verify.ps1")):
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertNotRegex(text, r"(?<![\w.\-])0\.1\.\d+(?![\w.\-])",
+                                "%s names a release version; VERSION is the one place"
+                                % os.path.relpath(path, REPO).replace(os.sep, "/"))
+
+
+# -------------------------------------------------- the line a task leaves, and the body it makes
+
+class TheLinesATaskLeaves(ReleaseTestCase):
+    """release-notes/unreleased/<task>.md: one line, what a person with a radio will notice. The
+    release compiles the waiting ones into the top of the body, in the order the tasks merged, and
+    puts release-notes/standing.md under them (tools/release/release_notes.py)."""
+
+    def scratch(self, lines=(), standing="## The Walter it goes with\n\n`v9.9.9`, docs/flashing.md.\n",
+                version="0.1.4"):
+        """A repository with a VERSION, a standing paragraph and some waiting lines."""
+        os.makedirs(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/")),
+                    exist_ok=True)
+        self.write(os.path.join(self.tmp, version_module.VERSION_FILE), version + "\n")
+        if standing is not None:
+            self.write(os.path.join(self.tmp, *release_notes.STANDING_FILE.split("/")), standing)
+        for name, text in lines:
+            self.write(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/"), name),
+                       text)
+        return self.tmp
+
+    def git(self, *arguments):
+        subprocess.check_call(["git", "-C", self.tmp] + list(arguments),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def test_a_line_is_one_line_of_plain_words(self):
+        repo = self.scratch([("01.md", "The unit now says what flowed, not only what flows.\n")])
+        self.assertEqual(release_notes.line_of("01.md", repo),
+                         "The unit now says what flowed, not only what flows.")
+
+    def test_two_lines_in_one_file_are_refused(self):
+        repo = self.scratch([("01.md", "One thing.\n\nAnd another.\n")])
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.line_of("01.md", repo)
+        self.assertIn("is 2 line(s)", str(caught.exception))
+
+    def test_an_empty_file_is_refused(self):
+        repo = self.scratch([("01.md", "\n   \n")])
+        with self.assertRaises(release_notes.NotesError):
+            release_notes.line_of("01.md", repo)
+
+    def test_a_line_past_the_bound_is_refused_with_its_length(self):
+        repo = self.scratch([("01.md", "x" * (release_notes.MAX_LINE + 1) + "\n")])
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.line_of("01.md", repo)
+        self.assertIn("%d characters" % (release_notes.MAX_LINE + 1), str(caught.exception))
+
+    def test_a_line_that_is_markup_is_refused(self):
+        for text in ("- a bullet\n", "# a heading\n", "| a | table |\n", "> a quote\n"):
+            repo = self.scratch([("01.md", text)])
+            with self.assertRaises(release_notes.NotesError) as caught:
+                release_notes.line_of("01.md", repo)
+            self.assertIn("plain words", str(caught.exception))
+
+    def test_two_lines_compile_into_the_top_in_merge_order(self):
+        """The order the tasks merged, which is the order the commits that ADDED the files are in
+        - not the order of their names, and this scratch repository adds them the other way round
+        on purpose. Skipped where there is no git: the container tools/verify.ps1 runs this step
+        in has none, and merge_order falls back to the names there (the runner that publishes a
+        release has git, and that is the only place the order is read for real)."""
+        if not shutil.which("git"):
+            self.skipTest("no git here; merge_order falls back to the file names")
+        repo = self.scratch()
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "test@example.invalid")
+        self.git("config", "user.name", "A test")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "the repository")
+        for name, text in (("zz-first.md", "The radio answers nine new channels.\n"),
+                           ("aa-second.md", "The clock survives a reset.\n")):
+            self.write(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/"), name),
+                       text)
+            self.git("add", "-A")
+            self.git("commit", "-qm", name)
+        self.assertEqual(release_notes.merge_order(repo), ["zz-first.md", "aa-second.md"])
+        top = release_notes.compiled_top(repo)
+        self.assertIn("## What is new in v0.1.4", top)
+        self.assertLess(top.index("The radio answers nine new channels."),
+                        top.index("The clock survives a reset."))
+        self.assertIn("- The radio answers nine new channels.", top)
+        self.assertIn("The Walter it goes with", top)
+
+    def test_a_file_git_does_not_know_yet_comes_last_by_name(self):
+        repo = self.scratch([("bb.md", "Second.\n"), ("aa.md", "First.\n")])
+        self.assertEqual(release_notes.merge_order(repo), ["aa.md", "bb.md"])
+
+    def test_nothing_waiting_is_a_refusal_with_its_sentence(self):
+        repo = self.scratch()
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.compiled_top(repo)
+        message = str(caught.exception)
+        self.assertIn("nothing to release", message)
+        self.assertIn(release_notes.UNRELEASED_DIR, message)
+
+    def test_a_rehearsal_with_nothing_waiting_says_so_instead(self):
+        repo = self.scratch()
+        text = release_notes.top(repo, require=False)
+        self.assertIn("No release note is waiting", text)
+        self.assertTrue(text.endswith("\n---\n\n"))
+
+    def test_the_top_ends_with_a_divider_a_blank_line_above_it(self):
+        repo = self.scratch([("01.md", "One thing.\n")])
+        text = release_notes.top(repo)
+        self.assertTrue(text.endswith("\n---\n\n"))
+        # A `---` directly under a paragraph is a Markdown heading: there is a blank line above it.
+        self.assertIn("\n\n---\n", text)
+
+    def test_a_standing_paragraph_that_is_not_there_is_refused(self):
+        repo = self.scratch([("01.md", "One thing.\n")], standing=None)
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.compiled_top(repo)
+        self.assertIn(release_notes.STANDING_FILE, str(caught.exception))
+        self.assertIn("Walter", str(caught.exception))
+
+    def test_the_command_writes_utf_8_whatever_the_console_is(self):
+        """The notes become a release body, which GitHub reads as UTF-8. On Windows a plain
+        sys.stdout.write would have put cp1252 in the file (an em dash as 0x97), so the script
+        writes the bytes itself - and this runs it as a process, because that is the only way the
+        encoding of its stdout is the real one."""
+        em_dash, nbsp = "—", " "
+        repo = self.scratch([("01.md", "Nine channels %s and a non-breaking%sspace.\n"
+                                       % (em_dash, nbsp))])
+        raw = subprocess.check_output(
+            [sys.executable, os.path.join(HERE, "release_notes.py"), "top", "--repo", repo])
+        self.assertIn(em_dash.encode("utf-8"), raw)
+        self.assertIn(nbsp.encode("utf-8"), raw)
+        self.assertEqual(raw.decode("utf-8"), release_notes.top(repo))
+
+    def test_this_commits_own_waiting_lines_and_standing_paragraph_read(self):
+        """The real release-notes/ of this repository: every waiting line is one this tooling
+        would compile, and the standing paragraph is there. A typo is caught on a commit
+        (tools/release/selfcheck.py runs the same code in tools/verify.ps1)."""
+        for name, text in release_notes.unreleased(REPO):
+            self.assertTrue(text)
+        self.assertIn("The Walter it goes with", release_notes.standing(REPO))
+        self.assertIn("docs/flashing.md", release_notes.standing(REPO))
+
+
+# ------------------------------------------------------- the notes of a release, as published
+
+class ThePublishedNotes(ReleaseTestCase):
+    """release-notes/vX.Y.Z.md is a release's body as it went out: written by hand for v0.1.0 to
+    v0.1.3, and written by `move` from v0.1.4 on."""
 
     VERSION = "1.2.3+abc1234"
 
@@ -727,14 +934,6 @@ class TheHandWrittenNotes(ReleaseTestCase):
         path = os.path.join(self.tmp, release_notes.NOTES_DIR)
         os.makedirs(path, exist_ok=True)
         return path
-
-    @staticmethod
-    def command_line(args):
-        """release_notes.py's main, with what it printed instead of the console."""
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = release_notes.main(args)
-        return code, out.getvalue(), err.getvalue()
 
     def test_the_file_is_named_by_the_tag_and_not_by_the_build_metadata(self):
         self.assertEqual(release_notes.tag_of("1.2.3+abc1234"), "v1.2.3")
@@ -749,73 +948,34 @@ class TheHandWrittenNotes(ReleaseTestCase):
             with self.assertRaises(release_notes.NotesError):
                 release_notes.tag_of(version)
 
-    def test_the_top_is_the_files_text_with_a_divider_under_it(self):
+    def test_it_is_the_files_text_with_a_divider_under_it(self):
         self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "**The first release.**\n")
         text = release_notes.hand_written(self.VERSION, self.tmp)
         self.assertTrue(text.startswith("**The first release.**\n"))
         self.assertTrue(text.endswith("\n---\n\n"))
-        # A `---` directly under a paragraph is a Markdown heading: there is a blank line above it.
         self.assertIn("\n\n---\n", text)
 
-    def test_a_release_with_no_hand_written_top_is_refused_and_says_what_to_write(self):
+    def test_a_version_with_no_published_notes_is_refused(self):
         with self.assertRaises(release_notes.NotesError) as caught:
             release_notes.hand_written(self.VERSION, self.tmp)
-        message = str(caught.exception)
-        self.assertIn("release-notes/v1.2.3.md", message)
-        self.assertIn("docs/flashing.md", message)
-        self.assertIn("not released", message)
-        code, out, err = self.command_line(["--version", self.VERSION, "--require",
-                                            "--repo", self.tmp])
-        self.assertEqual((code, out), (1, ""))
-        self.assertIn("release-notes/v1.2.3.md", err)
+        self.assertIn("release-notes/v1.2.3.md", str(caught.exception))
 
-    def test_an_empty_hand_written_top_is_refused_too(self):
+    def test_an_empty_one_is_refused_too(self):
         self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "\n   \n")
         with self.assertRaises(release_notes.NotesError) as caught:
             release_notes.hand_written(self.VERSION, self.tmp)
         self.assertIn("holds nothing", str(caught.exception))
 
-    def test_a_rehearsal_is_not_refused_and_says_there_is_no_top(self):
-        text = release_notes.no_hand_written("0.0.0-dryrun+abc1234", self.tmp)
-        self.assertIn("release-notes/v0.0.0.md", text)
-        self.assertIn("No hand-written top", text)
-        self.assertTrue(text.endswith("\n---\n\n"))
-        code, out, err = self.command_line(["--version", "0.0.0-dryrun+abc1234",
-                                            "--repo", self.tmp])
-        self.assertEqual((code, err, out), (0, "", text))
-
-    def test_the_check_the_tag_job_runs_prints_the_path_and_not_the_body(self):
+    def test_the_standing_paragraph_is_not_one_of_them(self):
         self.write(os.path.join(self.notes_dir(), "v1.2.3.md"), "**The first release.**\n")
-        code, out, err = self.command_line(["--version", self.VERSION, "--require", "--check",
-                                            "--repo", self.tmp])
-        self.assertEqual((code, err), (0, ""))
-        self.assertEqual(out.strip(), "release-notes/v1.2.3.md")
-        self.assertNotIn("The first release", out)
-
-    def test_the_script_writes_utf_8_whatever_the_console_is(self):
-        """The notes become a release body, which GitHub reads as UTF-8. On Windows a plain
-        sys.stdout.write would have put cp1252 in the file (an em dash as 0x97), so the script
-        writes the bytes itself - and this runs it as a process, because that is the only way the
-        encoding of its stdout is the real one."""
-        em_dash, nbsp = "\u2014", "\u00a0"
-        self.write(os.path.join(self.notes_dir(), "v1.2.3.md"),
-                   "**The first release** %s an em dash, and a non-breaking%sspace.\n"
-                   % (em_dash, nbsp))
-        raw = subprocess.check_output(
-            [sys.executable, os.path.join(HERE, "release_notes.py"),
-             "--version", self.VERSION, "--require", "--repo", self.tmp])
-        self.assertIn(em_dash.encode("utf-8"), raw)
-        self.assertIn(nbsp.encode("utf-8"), raw)
-        self.assertEqual(raw.decode("utf-8"), release_notes.hand_written(self.VERSION, self.tmp))
+        self.write(os.path.join(self.notes_dir(), release_notes.STANDING_NAME), "standing\n")
+        self.assertEqual(release_notes.published(self.tmp), ["v1.2.3.md"])
 
     def test_this_commits_own_notes_are_readable(self):
-        """Every release-notes/*.md of this repository: a version this tooling understands, and
-        something in it. The file is written on the branch before the tag, so this is where a
-        typo in its name is caught - on a commit, and not at the tag."""
-        directory = os.path.join(REPO, release_notes.NOTES_DIR)
-        if not os.path.isdir(directory):
-            self.skipTest("no release-notes/ in this repository yet")
-        names = sorted(n for n in os.listdir(directory) if n.endswith(".md"))
+        """Every published release-notes/*.md of this repository: a version this tooling
+        understands, and something in it that points a reader at the flashing guide."""
+        names = release_notes.published(REPO)
+        self.assertTrue(names, "no release has been published from this repository")
         for name in names:
             version = name[1:-3] if name.startswith("v") else name[:-3]
             self.assertEqual(release_notes.tag_of(version), name[:-3],
@@ -823,6 +983,209 @@ class TheHandWrittenNotes(ReleaseTestCase):
             text = release_notes.hand_written(version, REPO)
             self.assertIn("docs/flashing.md", text,
                           "%s does not point a reader at the flashing guide" % name)
+
+
+# ------------------------------------------- the move after a release, and what a release refuses
+
+class TheMoveAfterARelease(ReleaseTestCase):
+    """What the workflow's own pull request carries: the lines become release-notes/vX.Y.Z.md as
+    published, release-notes/unreleased/ is emptied, and VERSION moves to the next patch."""
+
+    def scratch(self, version="0.1.4"):
+        os.makedirs(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/")))
+        self.write(os.path.join(self.tmp, version_module.VERSION_FILE), version + "\n")
+        self.write(os.path.join(self.tmp, *release_notes.STANDING_FILE.split("/")),
+                   "## The Walter it goes with\n\n`v9.9.9`, and docs/flashing.md.\n")
+        for name, text in (("01.md", "The radio answers nine new channels.\n"),
+                           ("02.md", "The clock survives a reset.\n")):
+            self.write(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/"), name),
+                       text)
+        return self.tmp
+
+    def test_the_lines_become_the_published_notes_and_the_version_moves_on(self):
+        repo = self.scratch()
+        top = release_notes.compiled_top(repo)
+        released, after, names = release_notes.move(repo)
+        self.assertEqual((released, after, names), ("0.1.4", "0.1.5", ["01.md", "02.md"]))
+
+        with open(os.path.join(repo, release_notes.NOTES_DIR, "v0.1.4.md"),
+                  encoding="utf-8") as fh:
+            published = fh.read()
+        self.assertEqual(published, top)
+        self.assertIn("The radio answers nine new channels.", published)
+        self.assertIn("The Walter it goes with", published)
+
+        self.assertEqual(os.listdir(os.path.join(repo,
+                                                 *release_notes.UNRELEASED_DIR.split("/"))), [])
+        self.assertEqual(version_module.read(repo), "0.1.5")
+        # And what it wrote reads back as a published release's notes.
+        self.assertIn("The clock survives a reset.", release_notes.hand_written("0.1.4", repo))
+
+    def test_the_commit_it_makes_touches_the_releases_own_files_and_nothing_else(self):
+        repo = self.scratch()
+        before = set(self.every_file(repo))
+        release_notes.move(repo)
+        after = set(self.every_file(repo))
+        changed = (before ^ after) | {"VERSION"}
+        self.assertTrue(gate.release_only(sorted(changed)),
+                        "the move touched %s" % sorted(changed))
+
+    @staticmethod
+    def every_file(repo):
+        for base, _, names in os.walk(repo):
+            for name in names:
+                yield os.path.relpath(os.path.join(base, name), repo).replace(os.sep, "/")
+
+    def test_the_same_version_is_never_published_twice(self):
+        repo = self.scratch()
+        release_notes.move(repo)
+        self.write(os.path.join(repo, *release_notes.UNRELEASED_DIR.split("/"), "03.md"),
+                   "Something else.\n")
+        with self.assertRaises(release_notes.NotesError) as caught:
+            release_notes.move(repo, "0.1.4")
+        self.assertIn("not written twice", str(caught.exception))
+
+    def test_the_command_says_what_it_moved(self):
+        repo = self.scratch()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = release_notes.main(["move", "--repo", repo])
+        self.assertEqual(code, 0)
+        self.assertIn("v0.1.4.md: 2 line(s)", out.getvalue())
+        self.assertIn("VERSION: 0.1.4 -> 0.1.5", out.getvalue())
+
+
+# ---------------------------------------------------- what a release is refused for, before a build
+
+class WhatAReleaseIsRefusedFor(ReleaseTestCase):
+    """tools/release/gate.py, in release.yml's ci-green: each refusal is one sentence and each
+    happens before anything is built."""
+
+    def scratch(self, version="0.1.4", lines=(("01.md", "A thing a person notices.\n"),)):
+        os.makedirs(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/")))
+        self.write(os.path.join(self.tmp, version_module.VERSION_FILE), version + "\n")
+        self.write(os.path.join(self.tmp, *release_notes.STANDING_FILE.split("/")), "standing\n")
+        for name, text in lines:
+            self.write(os.path.join(self.tmp, *release_notes.UNRELEASED_DIR.split("/"), name),
+                       text)
+        return self.tmp
+
+    def test_a_release_of_main_with_a_waiting_line_and_an_unused_tag_is_not_refused(self):
+        version, lines = gate.refusals(self.scratch(), "main", "", ["v0.1.3"])
+        self.assertEqual(version, "0.1.4")
+        self.assertEqual([name for name, _ in lines], ["01.md"])
+
+    def test_a_ref_that_is_not_main_is_refused(self):
+        with self.assertRaises(gate.Refused) as caught:
+            gate.refusals(self.scratch(), "task/p3.11-01-a-release-from-the-button", "", [])
+        message = str(caught.exception)
+        self.assertIn("published from main", message)
+        self.assertIn("dry run", message)
+
+    def test_only_a_dry_run_may_name_another_ref(self):
+        with self.assertRaises(gate.Refused) as caught:
+            gate.refusals(self.scratch(), "main", "a-branch", [])
+        self.assertIn("only a *dry run*", str(caught.exception))
+
+    def test_no_waiting_line_is_refused_with_its_sentence(self):
+        with self.assertRaises(gate.Refused) as caught:
+            gate.refusals(self.scratch(lines=()), "main", "", [])
+        message = str(caught.exception)
+        self.assertIn("nothing to release", message)
+        self.assertIn(release_notes.UNRELEASED_DIR, message)
+
+    def test_a_version_whose_tag_exists_is_refused_and_says_how_to_finish(self):
+        with self.assertRaises(gate.Refused) as caught:
+            gate.refusals(self.scratch(), "main", "", ["v0.1.3", "v0.1.4"])
+        message = str(caught.exception)
+        self.assertIn("v0.1.4 is already a tag", message)
+        self.assertIn("not moved on", message)
+        self.assertIn("0.1.5", message)            # what to put in VERSION to finish it by hand
+
+    def test_a_version_file_that_is_not_one_is_refused(self):
+        with self.assertRaises(version_module.VersionError):
+            gate.refusals(self.scratch(version="v0.1.4"), "main", "", [])
+
+    def test_the_command_prints_the_version_and_the_lines(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = gate.main(["check", "--repo", self.scratch(), "--ref-name", "main"])
+        self.assertEqual(code, 0)
+        self.assertIn("v0.1.4", out.getvalue())
+        self.assertIn("A thing a person notices.", out.getvalue())
+
+    def test_the_command_says_one_sentence_and_fails(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = gate.main(["check", "--repo", self.scratch(lines=()), "--ref-name", "main"])
+        self.assertEqual((code, out.getvalue()), (1, ""))
+        self.assertIn("nothing to release", err.getvalue())
+
+
+class TheCiRunThatStandsForACommit(ReleaseTestCase):
+    """The commit this workflow's own pull request leaves on main carries VERSION and
+    release-notes/ and nothing else, and HAS NO CI RUN OF ITS OWN - GitHub starts no workflow from
+    an event raised with the job's own token. The gate walks back over exactly those."""
+
+    @staticmethod
+    def history(commits):
+        """commits is [(sha, [paths], has_run)], newest first."""
+        order = [sha for sha, _, _ in commits]
+        by_sha = {sha: (paths, run) for sha, paths, run in commits}
+
+        def parent_of(sha):
+            index = order.index(sha)
+            return order[index + 1] if index + 1 < len(order) else ""
+
+        return (parent_of,
+                lambda sha: by_sha[sha][0],
+                lambda sha: by_sha[sha][1])
+
+    def test_a_commit_with_a_run_of_its_own_answers_for_itself(self):
+        parent, changed, run = self.history([("a", ["src/x.cpp"], True),
+                                             ("b", ["src/y.cpp"], True)])
+        self.assertEqual(gate.evidence_commit("a", parent, changed, run), ("a", []))
+
+    def test_the_walk_goes_back_over_the_releases_own_commits(self):
+        parent, changed, run = self.history([
+            ("notes2", ["VERSION", "release-notes/v0.1.5.md"], False),
+            ("notes1", ["VERSION", "release-notes/v0.1.4.md",
+                        "release-notes/unreleased/01.md"], False),
+            ("work", ["src/x.cpp"], True),
+        ])
+        self.assertEqual(gate.evidence_commit("notes2", parent, changed, run),
+                         ("work", ["notes2", "notes1"]))
+
+    def test_a_commit_that_touched_anything_else_stops_the_walk(self):
+        """Not green, not red: a commit ci is simply not finished with, which the caller waits
+        for. Nothing is skipped over it."""
+        parent, changed, run = self.history([
+            ("head", ["VERSION", "src/x.cpp"], False),
+            ("work", ["src/y.cpp"], True),
+        ])
+        self.assertEqual(gate.evidence_commit("head", parent, changed, run), ("head", []))
+
+    def test_a_commit_with_no_files_at_all_stops_the_walk(self):
+        parent, changed, run = self.history([("merge", [], False), ("work", ["a"], True)])
+        self.assertEqual(gate.evidence_commit("merge", parent, changed, run), ("merge", []))
+
+    def test_the_walk_stops_at_the_root(self):
+        parent, changed, run = self.history([("only", ["VERSION"], False)])
+        self.assertEqual(gate.evidence_commit("only", parent, changed, run), ("only", []))
+
+    def test_the_walk_is_bounded(self):
+        commits = [("c%d" % n, ["VERSION"], False) for n in range(40)]
+        parent, changed, run = self.history(commits)
+        sha, walked = gate.evidence_commit("c0", parent, changed, run)
+        self.assertEqual(len(walked), gate.WALK_LIMIT)
+
+    def test_which_files_a_release_may_leave_behind(self):
+        self.assertTrue(gate.release_only(["VERSION"]))
+        self.assertTrue(gate.release_only(["release-notes/v0.1.4.md",
+                                           "release-notes/unreleased/01.md"]))
+        self.assertFalse(gate.release_only([]))
+        self.assertFalse(gate.release_only(["VERSION", "platformio.ini"]))
+        self.assertFalse(gate.release_only(["src/common/version/Version.cpp"]))
 
 
 # ------------------------------------------------------------------ the base under the application

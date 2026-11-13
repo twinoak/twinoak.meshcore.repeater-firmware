@@ -46,6 +46,9 @@ specification where it lives and copies it again.
   in `platformio.ini`; adding one needs a one-line justification in the PR.
 - **Secrets never in the repo**, and no default password in an image
   (`spec/SYSTEM.md` S-13).
+- **A change a person with a radio will notice leaves one line** in
+  `release-notes/unreleased/pP-NN.md`, in the same pull request; a change nobody
+  can see leaves none ([`RUNBOOK.md`](RUNBOOK.md) §2). A release is those lines.
 - **Docs move with code.** A task that changes what the firmware says on its
   console, what the link carries or how it is flashed updates `docs/` in the
   same PR, and adds its bench lines to `docs/bench.md`.
@@ -63,7 +66,10 @@ when its report exists on `origin/main`; the first task that does not land
 stops the run (`phase-N/logs/STOPPED.md`), and `-From NN` resumes.
 `tasks/run-pile.ps1` runs phase after phase and stops where a phase stops.
 Review findings go into `phase-N/FOLLOWUPS.md`, tagged with the task that must
-pick them up. Merging never releases; a release is a person pushing a tag.
+pick them up. Merging never releases; a release is a person pressing *Run
+workflow* on `release`, and a task that changes something a person with a radio
+will notice leaves its one line in `release-notes/unreleased/`
+([`RUNBOOK.md`](RUNBOOK.md) §2, [`docs/release.md`](../docs/release.md)).
 
 ## The piles
 

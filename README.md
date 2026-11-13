@@ -47,7 +47,14 @@ totals beside the three readings, on LPP channels 6 to 14 — so a reader is no
 longer left with the one moment a unit's Walter was awake to ask. Before them,
 the only way to get this firmware onto a board was to build it.
 
-The piles through 3.10 have landed. What the firmware does **today**:
+**The next release is one press of a button.** `v0.1.0` to `v0.1.3` were each a
+task's work — a body written by hand, a tag pushed, the files checked. From now
+on the version is [`VERSION`](VERSION) in the repository, the words are the one
+line each task leaves in `release-notes/unreleased/`, and *Actions → release →
+Run workflow* publishes them, signed, and then moves the version on
+([`docs/release.md`](docs/release.md)). A tag pushed by hand starts nothing.
+
+The piles through 3.11 have landed. What the firmware does **today**:
 
 - **It is a MeshCore repeater**, upstream's `simple_repeater` from the pin
   `repeater-v1.18.0` (`81dbae59`), compiled unmodified and subclassed — the
@@ -190,7 +197,7 @@ container provides it. The task piles that build the rest are run with
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | `[self-hosted, unraid]` | it only checks — `tools/verify.ps1` and nothing else — and GitHub-hosted minutes got out of hand |
 | [`upstream.yml`](.github/workflows/upstream.yml) | `[self-hosted, unraid]` | it asks whether MeshCore moved and opens a pull request; it ships nothing |
-| [`release.yml`](.github/workflows/release.yml) | `ubuntu-latest` | it builds the images every repeater's update trusts and signs them with `RELEASE_SIGNING_KEY` ([`keys/README.md`](keys/README.md)). It runs at a tag, so its minutes are few |
+| [`release.yml`](.github/workflows/release.yml) | `ubuntu-latest` | it builds the images every repeater's update trusts and signs them with `RELEASE_SIGNING_KEY` ([`keys/README.md`](keys/README.md)). It runs when a person presses *Run workflow*, so its minutes are few |
 
 `unraid` is the label on the organisation's own GitHub Actions runners
 (`unraid-1`…, `myoung34/github-runner` on the Unraid box).
@@ -219,7 +226,7 @@ workspace and that home, and no step opens a port on the host.
 | Builds | `pio run -e <role>_<board>`; `pio test -e native` for everything that needs no board |
 | Verified by | `tools/verify.ps1` — locally first; CI runs the same script |
 | Flashed | in service: by the Walter over SWD, application region only. At a bench: UF2 or serial DFU over the adapter's USB-C ([`docs/flashing.md`](docs/flashing.md)) |
-| Released as | a GitHub Release: the images, the base, `manifest.json`, its signature, `SHA256SUMS`, and a body that begins with `release-notes/vX.Y.Z.md` |
+| Released as | a GitHub Release: the images, the base, `manifest.json`, its signature, `SHA256SUMS`, and a body that begins with the lines the tasks left in `release-notes/unreleased/`. One press of *Run workflow*, the version from [`VERSION`](VERSION) ([`docs/release.md`](docs/release.md)) |
 | Channel | 869.618 MHz, 62.5 kHz, SF8, CR8, +22 dBm (MeshCore Denmark, EU Narrow) |
 
 ## Provisioning it
