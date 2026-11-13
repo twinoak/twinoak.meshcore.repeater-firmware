@@ -7,8 +7,10 @@ flashes the RAK over SWD. What it carries and how each reader checks it is
 when it refuses. What to *do* with one — which file, which cable, what to check
 afterwards — is [`docs/flashing.md`](flashing.md).
 
-**Merging never releases.** A release is a person pushing a tag. CI on `main`
-proves a commit is releasable; it publishes nothing.
+**Merging never releases.** A release is a person pressing *Run workflow*. CI on
+`main` proves a commit is releasable; it publishes nothing. **And a tag pushed
+by hand starts nothing** — there is no tag trigger here any more; the tag of a
+release is made by the run that publishes it, on the commit it built.
 
 **And it is built away from home.** Every job of `release.yml` runs on a
 GitHub-hosted `ubuntu-latest`, while everything that only checks — `ci.yml`,
@@ -18,53 +20,65 @@ images every repeater's update trusts, signed with `RELEASE_SIGNING_KEY`. A
 self-hosted runner is shared with every branch a task session pushes and keeps
 its home — `~/.platformio` and its toolchains — from one job to the next, and
 signing somewhere else would keep the key off that runner but would still sign
-whatever it built. A tag is rare, so the minutes are few.
+whatever it built. A release is rare, so the minutes are few.
 `tools/ci/check-runners.ps1`, which runs as `ci.yml`'s first step, fails when a
 job of this file moves home or when any other job stays away.
 
 ## Making one
 
-**First, on a branch: the words.** `release-notes/v<X.Y.Z>.md` is the
-hand-written top of the release body and it is written before the tag, in the
-pull request that precedes it, so that it is reviewed like everything else here
-(*The notes*, below). A tag with no such file is refused.
+**Press the button.** *Actions → release → Run workflow*, branch `main`, **dry
+run** left unticked. Nothing is typed.
 
-```powershell
-git checkout main
-git pull --ff-only
-git tag v0.3.0            # the commit must be one of main's, ci green on it, and its notes written
-git push origin v0.3.0
-```
+That is the whole of it, because the two things a release used to be told are
+already in the repository:
 
-That starts `.github/workflows/release.yml`, which does, in order:
+| | Where | Who puts it there |
+|---|---|---|
+| the version | [`VERSION`](../VERSION) at the root, one line of `X.Y.Z`. It names the release that **comes next**, and after a release the workflow moves it to the next patch | the workflow, in a pull request of its own. A bigger step than a patch is that one line edited beforehand, in the pull request that earns it |
+| the words | `release-notes/unreleased/<task>.md`, one line per task, plus the standing paragraph `release-notes/standing.md` | each task, in its own pull request (*The notes*, below) |
 
-1. **`ci-green`** — refuses a tag whose commit `ci` has not passed, refuses a
-   tag that is not on `main`, refuses a tag when there is no signing key,
-   refuses a tag whose `release-notes/vX.Y.Z.md` is not in the repository, and
-   works out the version: `X.Y.Z+<sha7>`, which is what the firmware itself
+`.github/workflows/release.yml` then does, in order:
+
+1. **`ci-green`**, before anything is built: the refusals (*When a release is
+   refused*, below), the signing key, and `ci` green for the commit. The
+   version is `X.Y.Z+<sha7>` of `VERSION`, which is what the firmware itself
    reports.
 2. **`build`** — one job per board environment of `platformio.ini`, built with
    `-D TWINOAK_FW_VERSION="X.Y.Z+<sha7>"` so the version is *inside* the image.
    `tools/pio/buildinfo.py` leaves `buildinfo.json` and a copy of the linker
    script beside the images, which is what the next job reads instead of being
    told anything.
-3. **`publish`** — the body is `release-notes/vX.Y.Z.md` and then what
-   `tools/release/release_notes.py` puts after it;
+3. **`publish`** — the body is the waiting lines and the standing paragraph
+   (`tools/release/release_notes.py`) and then what the manifest generates;
    `tools/release/build_release.py` writes the files,
    `tools/release/sign_manifest.py` signs the manifest with the repository
    secret `RELEASE_SIGNING_KEY`, `spec/tools/manifestref.py verify` proves that
    signature **before** anything is published, and then `gh release create`
+   makes the tag on the commit that was built, publishes it as **Latest** and
    uploads the lot.
+4. **the move**, in the same job and only once the release is out: the lines
+   become `release-notes/vX.Y.Z.md` as published, `release-notes/unreleased/`
+   is emptied, `VERSION` goes to the next patch, and that one commit is filed
+   as a pull request the job opens and merges itself.
+
+**The release stands whatever happens to that pull request.** If it cannot be
+merged it is left open, the run goes red and its summary says what is waiting;
+nothing is undone, and the next release is refused until the version has moved
+(*When a release is refused*). `main` requires a pull request before merging and
+asks for the `verify` check, and GitHub starts no workflow from an event raised
+with the job's own token — so until that rule changes, the pull request is
+merged by a person.
 
 ### A rehearsal
 
-*Actions → release → Run workflow*, with `ref` left empty or set to a commit or
-branch. It is the same three jobs and the same code; nothing is published. The
-files are the run's artifact, the version is `0.0.0-dryrun+<sha7>` and the
-signature is the specification's **public test key** — so an artifact of a
-rehearsal can never be mistaken for a release, and
-`tools/release/sign_manifest.py` would refuse to sign a real `X.Y.Z` with that
-key.
+The same button with **dry run** ticked, from any branch, with `ref` optionally
+naming a commit or branch to rehearse on (only a rehearsal may). It is the same
+three jobs and the same code; nothing is published and no tag is made. The files
+are the run's artifact, the version is `0.0.0-dryrun+<sha7>` and the signature
+is the specification's **public test key** — so an artifact of a rehearsal can
+never be mistaken for a release, and `tools/release/sign_manifest.py` would
+refuse to sign a real `X.Y.Z` with that key. The body is compiled from the same
+waiting lines, so what a rehearsal prints is what the release would publish.
 
 The same rehearsal happens on this machine on every commit:
 `tools/verify.ps1`'s `release` step runs the tooling's tests and then a dry run
@@ -173,27 +187,51 @@ with the file, `base.json` and a README, and a family name in
 
 ## The notes
 
-A release body is two parts, in this order:
+**A line is written when the change is made, by the task that makes it.** That
+is the only moment anybody knows, in one plain sentence, what a person with a
+radio will notice. Nothing is summarised afterwards; a release is those lines.
 
-1. **what a person wrote**, `release-notes/v<X.Y.Z>.md` in this repository: what
-   this release is, which MeshCore it is, the link to
-   [`docs/flashing.md`](flashing.md), and which Walter release it goes with. It
-   is committed on the branch before the tag and reviewed in that pull request,
-   and `tools/release/release_notes.py` puts it at the top of the body with a
-   `---` under it;
+One file, in the same pull request as the change:
+
+```
+release-notes/unreleased/<task>.md
+```
+
+`<task>` is the task's number (`p3.11-01.md`) or, for a change made by hand, any
+short name. The file holds **one line**: at most 240 characters, plain words and
+nothing else — no heading, no list marker, no table — about **what a person will
+notice** rather than what was done, and naming no task, decision or spec
+section. A change nobody can see — a test, a refactoring, a workflow, a document
+— writes **no** file. If you are not sure, ask what somebody who looks after a
+repeater would do differently; if the answer is *nothing*, there is no line.
+
+A release body is then two parts, in this order:
+
+1. **the top this repository compiles**: the waiting lines, in the order the
+   tasks merged — the commit that *added* each file, along `main`'s first
+   parent, so a line is placed by its pull request and not by its file name —
+   and under them [`release-notes/standing.md`](../release-notes/standing.md):
+   what every hand-written top used to repeat and no manifest can generate,
+   **The Walter it goes with** first among it. The task that changes one of
+   those things edits that file in the same pull request;
 2. **what the tooling generates** from the manifest — the version the firmware
-   reports, the table of files and what each one is for, the application region,
-   and where to read about flashing one.
+   reports, which MeshCore it is, the table of files and what each one is for,
+   the application region, and where to read about flashing one — with a `---`
+   between the two.
 
-**A tag whose file is missing is refused in `ci-green`**, before anything is
-built, the way a tag with no signing key is: nothing else would catch it, and a
-release whose notes are only the generated table is a release nobody can read.
-An empty file is refused too. A *rehearsal* is not refused — its version is
-`0.0.0-dryrun+<sha7>`, no file is written for it, and the body says so in one
-line where the top would be, which is how that path is exercised without a tag.
-`tools/verify.ps1` reads every `release-notes/*.md` of the commit with the same
-code (`tools/release/selfcheck.py`), so a file named `v0.1.md`, or one that says
-nothing, fails on a commit.
+Once the release is out, the lines become `release-notes/vX.Y.Z.md`: a
+release's body as it was published, which is what the four tops written by hand
+for `v0.1.0` to `v0.1.3` are. Nothing there is ever edited afterwards.
+
+**A release with no waiting line is refused in `ci-green`**, before anything is
+built, the way one with no signing key is: a release with nothing to say is a
+release nobody reads. A *rehearsal* is not refused — with nothing waiting its
+body says so in one line where the lines would be, which is how that path is
+exercised without publishing anything. `tools/verify.ps1` reads `VERSION`, every
+waiting line, the standing paragraph and every published
+`release-notes/vX.Y.Z.md` with the same code
+(`tools/release/selfcheck.py`), so a line of three sentences, or a file named
+`v0.1.md`, fails on a commit.
 
 ## The key
 
@@ -209,20 +247,23 @@ Nothing in the pipeline prints a key, and no error message quotes one: when
 something is wrong with the key the message says what is wrong and not what it
 was given.
 
-## When a tag is refused
+## When a release is refused
 
 The run stops in `ci-green` or at the signing step, and nothing is published —
-a refused tag has published nothing, so the fix is a new commit and a new tag
-(`v0.3.1`), not a forced one.
+a refused release has published nothing and made no tag, so the fix is a commit
+on `main` and the button again.
 
 | What the log says | What happened | What to do |
 |---|---|---|
-| `RELEASE_SIGNING_KEY is not set` | the repository has no signing key | make it: `keys/README.md`. Until it exists, no tag can be released, which is the safe state |
-| `… is not a commit of main` | the tag is on a side branch | tag a commit of `main` |
-| `ci has completed for … without a green run` | `ci` was red on that commit | fix it on `main`, then tag the new commit |
-| `ci has not gone green for … within 20 minutes` | `ci` never ran, or is still running | wait for `ci` on `main` to finish and tag again; a tag whose commit CI has not passed is not released |
-| `release-notes/vX.Y.Z.md is not in the repository` | the tag has no hand-written notes | write that file on a branch, merge it, and tag the commit it merged as. *The notes*, above, says what goes in it |
-| `… does not hold a public key on its first line of content` / `… names key id …, and the key on that line is …` | `keys/release.pub` is not one line of `ed25519 <key id> <64 hex>` or of 64 hexadecimal characters, or its two halves disagree | `keys/README.md` has the one form. `tools/verify.ps1` reads the real file on every commit, so this should never be met at a tag |
+| `there is nothing to release` | no line is waiting in `release-notes/unreleased/` | there is nothing a person would notice since the last release. *The notes*, above |
+| `v0.1.4 is already a tag` | the version was not moved on after the last release: the pull request that moves it never landed | merge it if it is still open. If it was never opened: `python tools/release/release_notes.py move` on a branch off `main`, merge that, and press the button again |
+| `a release is published from main` | the run was started on another branch | choose `main` in the branch box, or tick *dry run* to rehearse where you are |
+| `only a *dry run* may rehearse somewhere else` | a release was asked for with a `ref` | leave `ref` empty to publish |
+| `RELEASE_SIGNING_KEY is not set` | the repository has no signing key | make it: `keys/README.md`. Until it exists, nothing can be released, which is the safe state |
+| `… is not a commit of main` | `main` moved between the press and the checkout | press the button again |
+| `ci has completed for … without a green run` | `ci` was red on that commit | fix it on `main`, then press the button again |
+| `ci has not gone green for … within 20 minutes` | `ci` never ran, or is still running | wait for `ci` on `main` to finish and press again; a commit CI has not passed is not released |
+| `… does not hold a public key on its first line of content` / `… names key id …, and the key on that line is …` | `keys/release.pub` is not one line of `ed25519 <key id> <64 hex>` or of 64 hexadecimal characters, or its two halves disagree | `keys/README.md` has the one form. `tools/verify.ps1` reads the real file on every commit, so this should never be met in a release |
 | `… is not the key keys/release.pub publishes` | the secret and the published public half are not two halves of one key | one of them is wrong. Replace the secret, or publish the right public half in a commit — and work out which, because a Walter trusts only what `keys/release.pub` says |
 | `this manifest says version X.Y.Z, which is a release` | something tried to sign a release with the test key | that is the guard working; a release is signed with `RELEASE_SIGNING_KEY` |
 | `is not one contiguous span` / `outside the application region` | the linked image is not a single span inside the application region | a change to the linker script or to a `KEEP` section put bytes somewhere an update may not write. Read the addresses in the message against the script line it quotes |
@@ -231,15 +272,32 @@ a refused tag has published nothing, so the fix is a new commit and a new tag
 | `… is refused against the application region … (section 4a)` | the base fails one of §4a's rules against the region the linker script gives (the message quotes the rule) | the file is not a base for this board, or the application region moved: read the rule against `boards/base/rak4630/README.md` |
 | `no base is pinned under boards/base/…` / `has 0 provision file(s)` | a `rak4630-*` image without its base, in the build or in a manifest about to be signed | a release of this board carries the base or it is not signed (S-5a); see *The base* |
 
-The same messages come out of `tools/verify.ps1` on this machine, with no tag
-and no key involved, which is where they are meant to be met first.
+The same messages come out of `tools/verify.ps1` on this machine, with nothing
+published and no key involved, which is where they are meant to be met first.
 
 ## Versions
 
+**`VERSION` at the root is the one place** — one line of `X.Y.Z`, naming the
+release that comes next, read by `tools/release/version.py` and by nothing else.
 `X.Y.Z+<sha7>` is what the firmware reports and what the manifest records; the
-file names carry `vX.Y.Z` without the build metadata. A tag is `vX.Y.Z` and
-nothing else — the workflow's trigger is `v[0-9]+.[0-9]+.[0-9]+`, so a
-pre-release tag does not start it.
+file names carry `vX.Y.Z` without the build metadata, and a tag is `vX.Y.Z` and
+nothing else.
+
+A release moves the file on by a patch, in its own pull request. **A minor or a
+major is that line edited by hand beforehand**, on the branch whose change earns
+it, in the same pull request as the line that explains it — then the button
+publishes what the file says.
+
+### The commit a release leaves behind
+
+The pull request the workflow files touches `VERSION` and `release-notes/` and
+nothing else, and **it has no `ci` run of its own**: GitHub starts no workflow
+from a push or a pull request raised with the job's own token, so nothing ran on
+it and nothing ever will. The next release's *ci is green* gate therefore walks
+back from `main`'s head over exactly those commits — a commit that touched one
+other file stops the walk at once — to the newest commit that does have a run,
+and that run is the evidence (`tools/release/gate.py`). The images are still
+built from `main`'s head; nothing those commits carry can reach one.
 
 A version with a pre-release part (`0.0.0-dev` from a local build,
 `0.0.0-dryrun+<sha7>` from a rehearsal) is not a release version: that is the

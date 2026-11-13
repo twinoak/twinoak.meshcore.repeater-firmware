@@ -21,18 +21,20 @@
                 as a host program and driven by tools/linkcli.py through a pipe. One step, two
                 rows of the summary, because they are two things that can fail; the link loop is
                 in this step because it needs exactly what this step already has
-    5. release  python tools/release/selfcheck.py --require-descriptor - first the two files
-                only a tag ever reads, with the code the tag path uses: the **real**
+    5. release  python tools/release/selfcheck.py --require-descriptor - first what only a
+                release ever reads, with the code the release path uses: the **real**
                 keys/release.pub through sign_manifest.read_public_key (a malformed public half
-                therefore fails on a commit and not at a tag, after the builds - which is what
-                p3.7-01 found) and every release-notes/vX.Y.Z.md through
-                tools/release/release_notes.py; then the release tooling's
-                own tests and tools/bench's (the guards of the one tool a session may touch a
-                board with, and every walk of docs/bench.md, against a fake serial layer), then
-                the base under the application held to its pin (tools/base/check.py: the
-                vendored boards/base/ file's hash, spec/FIRMWARE-MANIFEST.md section 4a against
-                every build's linker script, its README), then a dry run of the real release
-                over out/build/<env>, what step 3
+                therefore fails on a commit and not when the button is pressed, after the builds
+                - which is what p3.7-01 found), VERSION, every line waiting in
+                release-notes/unreleased/ held to its format, the standing paragraph under them,
+                the body's top they compile into, and every release-notes/vX.Y.Z.md already
+                published - all through tools/release/release_notes.py; then the release
+                tooling's own tests and tools/bench's (the guards of the one tool a session may
+                touch a board with, and every walk of docs/bench.md, against a fake serial
+                layer), then the base under the application held to its pin (tools/base/check.py:
+                the vendored boards/base/ file's hash, spec/FIRMWARE-MANIFEST.md section 4a
+                against every build's linker script, its README), then a dry run of the real
+                release over out/build/<env>, what step 3
                 left: the images, each one's descriptor held against its manifest entry, the
                 base under every RAK4630 image, a validated manifest, its signature by the
                 specification's public test key, and that signature verified. So the release
@@ -292,8 +294,9 @@ if (Step-Wanted 'release') {
     # names the commit the tree came from, which is what a rehearsal can know.
     $commit = (& git -C $root rev-parse HEAD 2>$null)
     if ($LASTEXITCODE -ne 0 -or -not ($commit -match '^[0-9a-f]{40}$')) { $commit = '0' * 40 }
-    # selfcheck.py's first part needs neither: it reads keys/release.pub and release-notes/ with
-    # the tag path's own code, which is the only check in this script that touches either file.
+    # selfcheck.py's first part needs neither: it reads keys/release.pub, VERSION and
+    # release-notes/ with the release path's own code, which is the only check in this script
+    # that touches any of them.
     # out/build/<env>, what step 3 copied there: see the note in that step for why not .pio/.
     # --require-descriptor: every image this repository builds carries one (phase 3's task 01),
     # the release workflow passes the same flag, and a dry run that did not would be rehearsing

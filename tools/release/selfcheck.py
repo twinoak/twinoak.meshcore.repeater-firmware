@@ -6,13 +6,16 @@
 Four things, in this order, so that the release path is exercised on every commit without GitHub
 and without the release key:
 
-  0. keys/release.pub and release-notes/, the two files of a tag that no dry run touches: the
-     **real** public half, read with sign_manifest.read_public_key - the reader the tag path uses
-     - and the hand-written top of the notes for every version release-notes/ holds. A dry run
-     signs with the specification's test key and generates its own body, so neither file is in its
-     way: before p3.7-01 keys/release.pub was in the form the Walter firmware's trust table uses
-     and the reader refused it, and a tag would have failed at `publish` after the builds. Both
-     now fail here instead, on a commit (tasks/phase-3.7/01-the-first-release.md).
+  0. what only a release reads and no dry run touches: the **real** keys/release.pub, through
+     sign_manifest.read_public_key - the reader the release path uses - then VERSION, the one
+     place the next release's version is written, then every line waiting in
+     release-notes/unreleased/ held to its format, the standing paragraph under them, the body's
+     top they compile into, and every release-notes/vX.Y.Z.md already published. A dry run signs
+     with the specification's test key and generates its own body, so none of it is in its way:
+     before p3.7-01 keys/release.pub was in the form the Walter firmware's trust table uses and
+     the reader refused it, and a tag would have failed at `publish` after the builds. All of it
+     now fails here instead, on a commit (tasks/phase-3.7/01-the-first-release.md,
+     tasks/phase-3.11/01-a-release-from-the-button.md).
   1. tools/release/test_release.py - every test of the tooling - and tools/bench's own,
      test_bench.py and test_walk.py: the guards of the bench tool a session may touch a board
      with, and every walk of docs/bench.md run end to end, both against its fake serial layer
@@ -49,6 +52,7 @@ import manifestref  # noqa: E402
 import release_notes  # noqa: E402
 import sign_manifest  # noqa: E402
 import test_release  # noqa: E402
+import version as version_module  # noqa: E402
 
 # tools/bench's guards (phase 3.3's task 02): Python already, standard library only, and the
 # place a refusal must be proved on every commit is a step that runs without a board - this one.
@@ -65,28 +69,41 @@ def run_tests():
     return result.wasSuccessful(), result.testsRun
 
 
-def the_files_only_a_tag_reads(repo=REPO):
-    """keys/release.pub with the tag path's own reader, and every release-notes/vX.Y.Z.md.
+def the_files_only_a_release_reads(repo=REPO):
+    """keys/release.pub with the release path's own reader, and everything the notes are made of.
 
-    Neither is on the dry run's path - it signs with the test key and writes its own notes - so
-    without this a malformed one is found at a tag, after the builds, and by then nothing can be
-    done but a new commit and a new tag (docs/release.md, *When a tag is refused*).
+    None of it is on the dry run's path below - that signs with the test key and builds its own
+    body - so without this a malformed one is found when the button is pressed, after the builds,
+    and by then the only way out is another commit (docs/release.md, *When a release is refused*).
     """
     path = os.path.join(repo, sign_manifest.PUBLIC_KEY_FILE)
     public = sign_manifest.read_public_key(path)
     print("%s: a %d-byte Ed25519 public key, key id %s (the form keys/README.md describes)"
           % (sign_manifest.PUBLIC_KEY_FILE, len(public), manifestref.key_id(public)))
 
-    directory = os.path.join(repo, release_notes.NOTES_DIR)
-    names = sorted(n for n in os.listdir(directory) if n.endswith(".md")) \
-        if os.path.isdir(directory) else []
-    if not names:
-        print("%s/: no hand-written release notes yet, so no tag would be accepted"
-              % release_notes.NOTES_DIR)
-    for name in names:
+    # The one place the next release's version is written, and the tag it would take.
+    number = version_module.read(repo)
+    print("%s: %s, so the next release is %s"
+          % (version_module.VERSION_FILE, number, version_module.tag(number)))
+
+    # The lines the tasks have left, each held to the format the release compiles them in.
+    waiting = release_notes.unreleased(repo)
+    if not waiting:
+        print("%s/: no line is waiting, so a release would be refused (there is nothing to say)"
+              % release_notes.UNRELEASED_DIR)
+    for name, text in waiting:
+        print("%s/%s: %d characters, %s" % (release_notes.UNRELEASED_DIR, name, len(text), text))
+
+    # And the body's top those lines make, which is what the button would publish today.
+    release_notes.standing(repo)
+    top = release_notes.top(repo, require=False)
+    print("the body's top for %s: %d characters, %d line(s) in front of the generated part"
+          % (version_module.tag(number), len(top), top.count("\n")))
+
+    for name in release_notes.published(repo):
         version = name[1:-3] if name.startswith("v") else name[:-3]
         text = release_notes.hand_written(version, repo)
-        print("%s/%s: %d characters, %d line(s) in front of the generated part"
+        print("%s/%s: %d characters, %d line(s), as published"
               % (release_notes.NOTES_DIR, name, len(text), text.count("\n")))
 
 
@@ -120,10 +137,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.only in (None, "keys"):
-        print("== the two files only a tag reads: keys/release.pub, and the release notes")
+        print("== what only a release reads: keys/release.pub, VERSION, and the notes")
         try:
-            the_files_only_a_tag_reads()
-        except (sign_manifest.SigningError, release_notes.NotesError) as exc:
+            the_files_only_a_release_reads()
+        except (sign_manifest.SigningError, release_notes.NotesError,
+                version_module.VersionError) as exc:
             sys.stderr.write("error: %s\n" % exc)
             return 1
 

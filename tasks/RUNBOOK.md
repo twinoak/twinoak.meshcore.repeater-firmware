@@ -68,6 +68,20 @@ Say in the report that the task was done in more than one session.
 - The conventions in `tasks/README.md` apply: spec wins, no scope creep,
   libraries pinned to an exact version with a one-line justification, secrets
   never in the repo, docs move with code, leave the evidence.
+- **A task that changes something a person with a radio will notice adds its
+  one line to `release-notes/unreleased/pP-NN.md`, in this same pull request**
+  (phase 3.11's task 01, in meshmaster.dk's words). One line, at most 240
+  characters, plain words, about what a person will notice — not what was done,
+  and naming no task, decision or spec section. A change nobody can see — CI, a
+  refactoring, tests, documentation — writes **no** file. If you are not sure,
+  ask what somebody who looks after a repeater would do differently tomorrow;
+  if the answer is *nothing*, there is no line. `docs/release.md`, *The notes*,
+  is the rule, and a file that breaks it fails `tools/verify.ps1` on this
+  machine. The release workflow compiles the waiting lines into the body of the
+  release it publishes, so a line not written here is a change nobody is told
+  about. A task that changes what *The Walter it goes with* says, or anything
+  else no manifest can generate, edits `release-notes/standing.md` in the same
+  pull request.
 - **One command verifies the repository: `tools/verify.ps1`** (phase 0's task
   01 writes it; until it exists, the task's own commands are the
   verification). It runs what CI runs — every board environment's build, the
@@ -176,7 +190,9 @@ task/pP-NN-<name>`. CI runs on `main`; the reviewer watches it.
 
 The driver considers the task done when `tasks/phase-P/reports/NN.md` exists
 on `origin/main`. Nothing else counts. Merging never releases: a release is a
-person pushing a tag `vX.Y.Z` (or pressing *Run workflow* for a dry run).
+person pressing *Run workflow* on `release`, which publishes the version
+`VERSION` names with the waiting lines as its body (`docs/release.md`). A tag
+pushed by hand starts nothing. No task releases.
 
 ## 5. Stop conditions
 
