@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.join(REPO, "tools", "base"))
 import build_release  # noqa: E402
 import check as base_check  # noqa: E402  (tools/base/check.py)
 import gate  # noqa: E402
+import notes_pr  # noqa: E402
 import manifestref  # noqa: E402
 import release_notes  # noqa: E402
 import sign_manifest  # noqa: E402
@@ -1101,6 +1102,9 @@ class WhatAReleaseIsRefusedFor(ReleaseTestCase):
         self.assertIn("v0.1.4 is already a tag", message)
         self.assertIn("not moved on", message)
         self.assertIn("0.1.5", message)            # what to put in VERSION to finish it by hand
+        # And this is the backstop under a release that leaves its notes' pull request open
+        # (tools/release/notes_pr.py): the next press is refused, in the sentence it has.
+        self.assertIn("if that one is still open, merge it", message)
 
     def test_a_version_file_that_is_not_one_is_refused(self):
         with self.assertRaises(version_module.VersionError):
@@ -1124,8 +1128,10 @@ class WhatAReleaseIsRefusedFor(ReleaseTestCase):
 
 class TheCiRunThatStandsForACommit(ReleaseTestCase):
     """The commit this workflow's own pull request leaves on main carries VERSION and
-    release-notes/ and nothing else, and HAS NO CI RUN OF ITS OWN - GitHub starts no workflow from
-    an event raised with the job's own token. The gate walks back over exactly those."""
+    release-notes/ and nothing else, and MAY HAVE NO CI RUN OF ITS OWN: nothing starts one for a
+    push raised with the job's own token, and the run GitHub does start for the pull request
+    belongs to the branch's commit and is held for a maintainer's approval (p3.12-02). The gate
+    walks back over exactly those commits to one that has a run."""
 
     @staticmethod
     def history(commits):
@@ -1186,6 +1192,156 @@ class TheCiRunThatStandsForACommit(ReleaseTestCase):
         self.assertFalse(gate.release_only([]))
         self.assertFalse(gate.release_only(["VERSION", "platformio.ini"]))
         self.assertFalse(gate.release_only(["src/common/version/Version.cpp"]))
+
+
+# ------------------------------- the pull request a release leaves behind, and how the step ends
+
+class TheNotesPullRequest(ReleaseTestCase):
+    """tools/release/notes_pr.py. One place decides how release.yml's last step ends - pushed or
+    not, opened or not, merged or not, in; the exit code and the summary's first line, out - and
+    the same place writes the pull request's body.
+
+    A release that published and left that pull request open is GREEN (p3.12-02): main requires
+    the `verify` check, so the job cannot merge what it opened, and that is every release rather
+    than a failure of one. Red is kept for the branch that could not be pushed and the pull
+    request that could not be opened, where nothing is waiting for a person.
+    """
+
+    URL = "https://github.com/twinoak/twinoak.meshcore.repeater-firmware/pull/50"
+    TAG = "v0.1.4"
+    BRANCH = "release-notes/v0.1.4"
+
+    # What v0.1.4's own pull request said on 13 November 2026, and what is not true: GitHub does
+    # start a ci run for a pull request the job's token opened and holds it for a maintainer's
+    # approval (run 43467131534 - no job of it was ever created, and an hour later it was listed
+    # as failed). The body said the opposite, so this sentence is in no file that a person or a
+    # pull request reads.
+    WAS_NOT_TRUE = re.compile(r"(?i)no check runs on this pull request"
+                              r"|starts no workflow from an event raised")
+
+    # The one thing the body and the page both have to say about that check.
+    THE_HOLD = "held for a maintainer's approval"
+
+    def page(self, relative):
+        with open(os.path.join(REPO, *relative.split("/")), "r", encoding="utf-8") as fh:
+            return fh.read()
+
+    # ---------------------------------------------------------------- how the step ends
+
+    def test_pushed_and_opened_but_not_merged_is_green_and_names_the_pull_request(self):
+        result = notes_pr.outcome(True, True, False, self.TAG, self.BRANCH, self.URL)
+        self.assertEqual(result.code, 0)
+        self.assertIn(self.URL, result.summary.splitlines()[0])
+        self.assertIn("merge", result.headline)
+        self.assertIn(self.TAG, result.headline)
+        self.assertIn("::notice::", notes_pr.annotation(result))
+        # and it says what a person does with it, both ways
+        self.assertIn("Approve and run", result.summary)
+        self.assertIn("without waiting", result.summary)
+
+    def test_the_branch_that_could_not_be_pushed_is_red_with_its_own_sentence(self):
+        result = notes_pr.outcome(False, False, False, self.TAG, self.BRANCH)
+        self.assertEqual(result.code, 1)
+        self.assertIn("could not be pushed", result.headline)
+        self.assertIn(self.BRANCH, result.headline)
+        self.assertIn("is not undone", result.headline)
+        self.assertIn("release_notes.py move", result.summary)     # how to finish it by hand
+        self.assertIn("::error::", notes_pr.annotation(result))
+
+    def test_the_pull_request_that_could_not_be_opened_is_red_with_its_own_sentence(self):
+        result = notes_pr.outcome(True, False, False, self.TAG, self.BRANCH)
+        self.assertEqual(result.code, 1)
+        self.assertIn("no pull request could be opened", result.headline)
+        self.assertIn("create and approve pull requests", result.summary)   # the setting
+        self.assertIn("::error::", notes_pr.annotation(result))
+
+    def test_the_two_red_ways_out_do_not_say_the_same_thing(self):
+        self.assertNotEqual(notes_pr.outcome(False, False, False, self.TAG, self.BRANCH).headline,
+                            notes_pr.outcome(True, False, False, self.TAG, self.BRANCH).headline)
+
+    def test_notes_that_went_to_main_are_green_and_say_so(self):
+        result = notes_pr.outcome(True, True, True, self.TAG, self.BRANCH, self.URL)
+        self.assertEqual(result.code, 0)
+        self.assertIn("on `main`", result.headline)
+        self.assertIn(self.URL, result.headline)
+
+    def test_every_way_out_says_the_release_is_published_and_begins_with_its_one_line(self):
+        for pushed, opened, merged in ((False, False, False), (True, False, False),
+                                       (True, True, False), (True, True, True)):
+            result = notes_pr.outcome(pushed, opened, merged, self.TAG, self.BRANCH, self.URL)
+            lines = result.summary.splitlines()
+            self.assertIn("published", result.headline)
+            self.assertIn(result.headline, lines[0])
+            self.assertTrue(lines[0].startswith("**") and lines[0].endswith("**"))
+            if len(lines) > 1:
+                self.assertEqual(lines[1], "")      # its own paragraph, at the top
+
+    def test_the_command_writes_the_summary_where_it_is_told_and_returns_the_code(self):
+        path = os.path.join(self.tmp, "summary.md")
+        self.write(path, "the move's own two lines\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = notes_pr.main(["outcome", "--tag", self.TAG, "--branch", self.BRANCH,
+                                  "--url", self.URL, "--pushed", "yes", "--opened", "yes",
+                                  "--merged", "no", "--summary", path])
+        self.assertEqual(code, 0)
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("the move's own two lines", text)       # appended, not replaced
+        self.assertIn("\n\n**%s" % self.TAG, text)            # and after a blank line
+        self.assertIn(self.URL, text)
+        self.assertIn("::notice::", out.getvalue())
+
+    def test_the_command_is_red_for_a_branch_that_was_not_pushed(self):
+        path = os.path.join(self.tmp, "summary.md")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = notes_pr.main(["outcome", "--tag", self.TAG, "--branch", self.BRANCH,
+                                  "--pushed", "no", "--summary", path])
+        self.assertEqual(code, 1)
+        self.assertIn("::error::", out.getvalue())
+
+    def test_a_flag_that_is_neither_yes_nor_no_is_a_mistake_and_says_so(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = notes_pr.main(["outcome", "--tag", self.TAG, "--branch", self.BRANCH,
+                                  "--pushed", "maybe", "--summary",
+                                  os.path.join(self.tmp, "summary.md")])
+        self.assertEqual(code, 2)
+        self.assertIn("takes yes or no", err.getvalue())
+
+    # ---------------------------------------------------------------- what the body says
+
+    def test_the_body_says_what_is_true_about_the_check_and_the_two_ways_to_finish(self):
+        text = notes_pr.body(self.TAG, "0.1.5", self.BRANCH,
+                             "https://github.com/twinoak/x/releases/tag/v0.1.4")
+        for phrase in ("`verify`", self.THE_HOLD, "Approve and run", "without waiting",
+                       "`VERSION` and `release-notes/` and nothing else",
+                       "release-notes/v0.1.4.md", "0.1.5", self.BRANCH):
+            self.assertIn(phrase, text)
+
+    def test_the_body_no_longer_says_that_no_check_runs_on_it(self):
+        self.assertNotRegex(notes_pr.body(self.TAG, "0.1.5", self.BRANCH), self.WAS_NOT_TRUE)
+
+    def test_neither_the_workflow_nor_the_page_says_it_either(self):
+        """The rail. The sentence was in the workflow's heredoc and in docs/release.md, and it is
+        what made Thomas ask on 13 November whether he had broken the repository."""
+        for relative in (".github/workflows/release.yml", "docs/release.md"):
+            self.assertNotRegex(
+                self.page(relative), self.WAS_NOT_TRUE,
+                "%s still says no check runs on the pull request a release leaves behind; GitHub "
+                "does start one and holds it for a maintainer's approval" % relative)
+
+    def test_the_workflow_asks_this_one_place_how_its_last_step_ends(self):
+        """So what is tested here is what a release runs, and not a second copy of it in YAML."""
+        text = self.page(".github/workflows/release.yml")
+        self.assertIn("notes_pr.py outcome", text)
+        self.assertIn("notes_pr.py body", text)
+
+    def test_the_page_a_person_reads_after_a_release_says_the_same(self):
+        text = self.page("docs/release.md")
+        self.assertIn(self.THE_HOLD, text)
+        self.assertIn("the run is green", text)
 
 
 # ------------------------------------------------------------------ the base under the application

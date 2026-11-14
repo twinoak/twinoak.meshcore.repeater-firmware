@@ -22,8 +22,11 @@ A rehearsal is refused for none of them.
 
 **The evidence.** A release is refused on a commit ci has not passed, and the commit the release
 workflow's own pull request leaves on `main` - `VERSION` and `release-notes/` and nothing else -
-**has no ci run of its own**: GitHub starts no workflow from a push or a pull request raised with
-the job's own token, so nothing ran on it and nothing ever will. `evidence_commit` walks back from
+**may have no ci run of its own**: nothing starts a run for a push raised with the job's own
+token, and the run GitHub does start for the pull request is held for a maintainer's approval and
+is the branch's commit's in any case, not that of the commit the merge puts on `main`
+(tools/release/notes_pr.py). Merged by a person it is an ordinary push and does have a run; the
+walk is what covers the times it does not. `evidence_commit` walks back from
 `main`'s head over exactly those commits - a commit that touched one other file stops the walk at
 once - to the newest commit that does have a run, and that run is what `ci-green` waits for. The
 images are still built from `main`'s head; what those commits carry cannot reach one.

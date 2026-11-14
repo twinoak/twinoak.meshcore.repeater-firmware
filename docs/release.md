@@ -58,15 +58,37 @@ already in the repository:
 4. **the move**, in the same job and only once the release is out: the lines
    become `release-notes/vX.Y.Z.md` as published, `release-notes/unreleased/`
    is emptied, `VERSION` goes to the next patch, and that one commit is filed
-   as a pull request the job opens and merges itself.
+   as a pull request the job opens, tries to merge, and leaves open for a
+   person when `main`'s rules do not let it.
 
-**The release stands whatever happens to that pull request.** If it cannot be
-merged it is left open, the run goes red and its summary says what is waiting;
-nothing is undone, and the next release is refused until the version has moved
-(*When a release is refused*). `main` requires a pull request before merging and
-asks for the `verify` check, and GitHub starts no workflow from an event raised
-with the job's own token — so until that rule changes, the pull request is
-merged by a person.
+**The release stands whatever happens to that pull request, and the run is green
+when the pull request is only waiting.** `main` requires a pull request before
+merging and asks for the `verify` check, so the job cannot merge the one it
+opened: **every release leaves it for a person**, and that is the ordinary end of
+a release rather than a failure of one. The step therefore ends green and the
+first line of the run's summary says which pull request is left
+(`tools/release/notes_pr.py`, where that is decided and tested). The run is
+**red** only for what did fail — the branch could not be pushed, or no pull
+request could be opened for it — and then nothing is waiting for a person,
+because there is nothing to merge. Either way nothing is undone, and the next
+release is refused until the version has moved (*When a release is refused*).
+
+**What to do with that pull request.** It is `VERSION` and `release-notes/` and
+nothing else, and either way of finishing it is right:
+
+- **approve its `ci` run and merge it when `verify` is green.** GitHub does
+  start a run for that pull request and it is **held for a maintainer's
+  approval** — *Actions* → the run of `release-notes/vX.Y.Z` → *Approve and
+  run*. Unapproved it never runs: after about an hour it expires and is listed
+  as a failed run, which is what the second red run of 13 November 2026 was;
+- **or merge it without waiting.** `ci` runs on `main` when that commit lands,
+  and the release after this one stands on that run — or, where there is none,
+  on the run of the commit below it (*The commit a release leaves behind*).
+
+Whether `main`'s rules change so that the job can finish by itself is Thomas's
+to decide (`tasks/phase-3.12/FOLLOWUPS.md`); `tools/release/notes_pr.py` says
+the same thing in the pull request's own body, so whichever of the two is read
+first is enough.
 
 ### A rehearsal
 
@@ -290,9 +312,12 @@ publishes what the file says.
 ### The commit a release leaves behind
 
 The pull request the workflow files touches `VERSION` and `release-notes/` and
-nothing else, and **it has no `ci` run of its own**: GitHub starts no workflow
-from a push or a pull request raised with the job's own token, so nothing ran on
-it and nothing ever will. The next release's *ci is green* gate therefore walks
+nothing else, and **it may have no `ci` run of its own**: nothing starts a run
+for a push raised with the job's own token, and the run GitHub does start for
+the *pull request* is the branch's commit's — held for a maintainer's approval —
+and never that of the commit a merge puts on `main`. Merged by a person, that
+commit arrives as an ordinary push and does have a run; the walk is what covers
+the times it does not. The next release's *ci is green* gate therefore walks
 back from `main`'s head over exactly those commits — a commit that touched one
 other file stops the walk at once — to the newest commit that does have a run,
 and that run is the evidence (`tools/release/gate.py`). The images are still
