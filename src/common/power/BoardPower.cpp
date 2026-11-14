@@ -180,6 +180,12 @@ static_assert(LPP_GENERIC_SENSOR_SIZE == 4, "the totals are four bytes each");
 static_assert(LPP_GENERIC_SENSOR_MULT == 1, "one step of a total is one unit on the wire");
 static_assert(kLppTemperature == LPP_TEMPERATURE && LPP_TEMPERATURE_SIZE == 2 &&
                   LPP_TEMPERATURE_MULT == 10, "temperature: 2 bytes, 0.1 C");
+static_assert(kLppRelativeHumidity == LPP_RELATIVE_HUMIDITY &&
+                  LPP_RELATIVE_HUMIDITY_SIZE == 1 && LPP_RELATIVE_HUMIDITY_MULT == 2,
+              "relative humidity: 1 byte, 0.5 %RH");
+static_assert(kLppBarometricPressure == LPP_BAROMETRIC_PRESSURE &&
+                  LPP_BAROMETRIC_PRESSURE_SIZE == 2 && LPP_BAROMETRIC_PRESSURE_MULT == 10,
+              "barometric pressure: 2 bytes, 0.1 hPa");
 static_assert(kLppVoltage == LPP_VOLTAGE && LPP_VOLTAGE_SIZE == 2 && LPP_VOLTAGE_MULT == 100,
               "voltage: 2 bytes, 0.01 V");
 static_assert(kLppCurrent == LPP_CURRENT && LPP_CURRENT_SIZE == 2 && LPP_CURRENT_MULT == 1000,
@@ -198,6 +204,12 @@ size_t appendOurFields(CayenneLPP& telemetry, uint8_t perm_mask) {
         break;
       case kLppTemperature:
         telemetry.addTemperature(fields[i].channel, fields[i].value);
+        break;
+      case kLppRelativeHumidity:
+        telemetry.addRelativeHumidity(fields[i].channel, fields[i].value);
+        break;
+      case kLppBarometricPressure:
+        telemetry.addBarometricPressure(fields[i].channel, fields[i].value);
         break;
       case kLppGenericSensor:
         telemetry.addGenericSensor(fields[i].channel, fields[i].value);
