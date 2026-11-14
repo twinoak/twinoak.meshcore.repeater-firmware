@@ -1,9 +1,12 @@
-# EVERY JOB HERE STAYS ON GITHUB'S RUNNERS, while everything that only checks moved to the
-# organisation's Unraid runners: this is what ships, it is signed with RELEASE_SIGNING_KEY, and the
-# shared self-hosted runner keeps its home - ~/.platformio and its toolchains - from one branch's
-# job to the next (tasks/phase-3.6/01-built-at-home.md; tools/ci/check-runners.ps1 is the guard,
-# and it runs as ci.yml's first step). It runs when a person presses a button, so its minutes are
-# few.
+# EVERY JOB HERE RUNS ON GITHUB'S RUNNERS, like every job of every workflow in this repository and
+# for the same one reason: it is public, hosted runners are free for a public repository, and a
+# self-hosted runner on one would run a fork's pull request on the Unraid host. The rule and its
+# reasons are at the top of tools/ci/check-runners.ps1, which ci.yml runs as a step; this file is
+# no exception to it and is named in it nowhere
+# (tasks/phase-3.12/03-ci-where-a-public-repository-may-run.md). It is also the file that ships -
+# the images every repeater's update trusts, signed with RELEASE_SIGNING_KEY - and a machine that
+# begins each job new and is gone after it is where a release should be built in any case
+# (keys/README.md). It runs when a person presses a button, so its minutes are few.
 #
 # The release: a GitHub Release a person, MeshMaster's catalogue and the Walter can all use.
 #

@@ -191,31 +191,64 @@ container provides it. The task piles that build the rest are run with
 
 ### Where CI runs
 
-**Everything that checks runs at home; everything that ships stays away.**
+**Every job of every workflow runs on a GitHub-hosted runner, because this
+repository is public.**
 
-| Workflow | Runs on | Why |
+| Workflow | Runs on | What it is |
 |---|---|---|
-| [`ci.yml`](.github/workflows/ci.yml) | `[self-hosted, unraid]` | it only checks — `tools/verify.ps1` and nothing else — and GitHub-hosted minutes got out of hand |
-| [`upstream.yml`](.github/workflows/upstream.yml) | `[self-hosted, unraid]` | it asks whether MeshCore moved and opens a pull request; it ships nothing |
-| [`release.yml`](.github/workflows/release.yml) | `ubuntu-latest` | it builds the images every repeater's update trusts and signs them with `RELEASE_SIGNING_KEY` ([`keys/README.md`](keys/README.md)). It runs when a person presses *Run workflow*, so its minutes are few |
+| [`ci.yml`](.github/workflows/ci.yml) | `ubuntu-latest` | one job, `verify`: `tools/verify.ps1` and nothing else. It is `main`'s required check |
+| [`upstream.yml`](.github/workflows/upstream.yml) | `ubuntu-latest` | it asks weekly whether MeshCore moved and opens the bump's pull request |
+| [`release.yml`](.github/workflows/release.yml) | `ubuntu-latest` | it builds the images every repeater's update trusts and signs them with `RELEASE_SIGNING_KEY` ([`keys/README.md`](keys/README.md)). A person presses *Run workflow* |
 
-`unraid` is the label on the organisation's own GitHub Actions runners
-(`unraid-1`…, `myoung34/github-runner` on the Unraid box).
-`tools/ci/check-runners.ps1` is the rule, in one place, over every job of
-`.github/workflows/`, and it runs as `ci.yml`'s first step — so neither half of
-it moves by accident. Run it by hand with
-`pwsh -File tools/ci/check-runners.ps1`.
+One rule, every file, and two reasons that both come of the same fact — this
+repository became public on 13 November 2026:
 
-What a runner must have for these two: **node** (every action is one),
-**pwsh**, **bash**, **git**, **curl**, **tar**, the usual `sed`/`awk`/`date`,
-and **`gh`** for `upstream.yml`. `g++` is the one `ci.yml` installs itself when
-it is missing, because without a host compiler `tools/verify.ps1` would run the
-native tests in a container — and a container started from inside the runner's
-own container bind-mounts a path the daemon's host does not have. Python is
-`actions/setup-python`'s; PlatformIO's platform, toolchain and libraries live in
-the runner's own `~/.platformio`, which is why the cache steps run on GitHub's
-runners only. Nothing a job starts outlives it, nothing writes outside its
-workspace and that home, and no step opens a port on the host.
+- **Running here costs nothing.** [Actions on standard GitHub-hosted runners are
+  free in a public repository](https://docs.github.com/en/actions/concepts/billing-and-usage),
+  so this repository spends no credit on CI. The minutes that got out of hand in
+  October 2026 are the private repositories' — `meshmaster.dk`'s among them —
+  and theirs is the CI that moved home to the organisation's Unraid runners.
+- **On a public repository a self-hosted runner runs a stranger's code.** Anyone
+  may fork this repository and open a pull request, a pull request can change a
+  workflow file, and it would then run on the Unraid host with its docker
+  socket, its LAN and its Tailscale. GitHub's own words:
+  [*self-hosted runners "should almost never be used for public
+  repositories"*](https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#hardening-for-self-hosted-runners).
+
+The organisation's one runner group is *All repositories, **excluding** public
+repositories*, which is what stops it from outside — and which is why between
+13 November 2026 and this change **no run of `ci` or `upstream` here was given a
+runner at all**: they queued, the required `verify` check never reported, and no
+pull request could be merged.
+[`tools/ci/check-runners.ps1`](tools/ci/check-runners.ps1) is what stops it from
+inside: the rule, its reasons and the shapes it refuses in one place, over every
+job of `.github/workflows/`, run as a step of `ci.yml` before anything is built.
+By hand, with the fifteen planted workflows of its self-test first:
+
+```powershell
+pwsh -File tools/ci/check-runners.ps1 -SelfTest
+```
+
+**If this repository is ever made private again**, the way back is
+`tasks/phase-3.6/01-built-at-home.md` and its commit `4cb2200` — *everything
+that checks runs at home, everything that ships stays away* — with its own
+version of that script. Its second argument is worth keeping either way: an
+Unraid runner is shared with every branch a task session pushes and keeps
+`~/.platformio` and its toolchains from one job to the next, so what *ships*
+should be built on a machine that begins each job new, which is what
+`release.yml` does today for nothing.
+
+What a runner must have: **node** (every action is one), **pwsh**, **bash**,
+**git**, **curl**, **tar**, **`g++`**, the usual `sed`/`awk`/`date`, and
+**`gh`** for `upstream.yml`. GitHub's images carry all of it;
+[`actions/runner-images`](https://github.com/actions/runner-images) is the list
+and `ci.yml` checks the six it cannot do without by name rather than installing
+them. `g++` is the one that decides where the work happens: with a host
+compiler `tools/verify.ps1` runs the native tests and the link loop on the
+runner, and without one it runs them in a container, which is fifteen minutes
+rather than two. Python is `actions/setup-python`'s. Nothing a job starts
+outlives it, nothing writes outside its workspace and `~/.platformio`, and no
+step opens a port.
 
 ## What it will be, in one table
 
