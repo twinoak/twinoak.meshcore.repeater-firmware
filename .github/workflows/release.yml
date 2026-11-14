@@ -507,63 +507,57 @@ jobs:
       # the release notes to master*): main requires a pull request before merging, and GitHub's
       # bypass lists take people, teams, roles and GitHub Apps - never the Actions token.
       #
-      # THE RELEASE STANDS EITHER WAY. If the pull request cannot be merged - main asks for a
-      # check that nothing will report on a pull request raised with the job's own token, or main
-      # moved - it is left open, this job goes red, and the summary says what is waiting. Nothing
-      # is undone: the release is published, and the next one is refused until VERSION has moved,
-      # which is the refusal that makes this impossible to forget.
+      # AND THE JOB CANNOT MERGE IT: main asks for the `verify` check as well, so every release
+      # leaves that one pull request for a person (tasks/phase-3.11/reports/01.md; whether main's
+      # rules change is Thomas's, tasks/phase-3.12/FOLLOWUPS.md). That is the ordinary end of a
+      # release and not a failure of one, so **this step ends green and the first line of the
+      # run's summary says which pull request is left** - the Walter firmware's release.yml ends
+      # the same way. Red is kept for what did fail: the branch not pushed, or no pull request
+      # opened for it, where nothing is waiting for a person because there is nothing to merge.
+      # One place decides all of that and has a test for each way out, and it also writes the
+      # pull request's body: tools/release/notes_pr.py.
+      #
+      # NOTHING IS UNDONE EITHER WAY. The release is published, and the next one is refused until
+      # VERSION has moved, which is the refusal that makes this impossible to forget.
       - name: Move the lines into the release's notes, and the version on
         if: needs.ci-green.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.ci-green.outputs.tag }}
         run: |
-          set -euo pipefail
-          python tools/release/release_notes.py move | tee -a "$GITHUB_STEP_SUMMARY"
+          set -uo pipefail
+          python tools/release/release_notes.py move | tee -a "$GITHUB_STEP_SUMMARY" || exit 1
+          next=$(python tools/release/version.py) || exit 1
 
           branch="release-notes/$TAG"
           title="Release notes: $TAG, and the version on"
+
+          # Pushed, opened and merged in; the exit code and the summary's first line out. No other
+          # exit in this step decides what colour a release that published is.
+          finish() {
+            python tools/release/notes_pr.py outcome --pushed "$1" --opened "$2" --merged "$3" \
+              --tag "$TAG" --branch "$branch" --url "${4:-}"
+            exit $?
+          }
+
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A -- VERSION release-notes
-          git commit -m "$title"
+          # The move has just written VERSION and release-notes/, so nothing to commit is a fault
+          # here and not something waiting for a person.
+          git commit -m "$title" || exit 1
 
-          cat > out/pr-body.md <<BODY
-          The notes of **$TAG**, moved out of \`release-notes/unreleased/\` into
-          \`release-notes/$TAG.md\` as published, and \`VERSION\` moved to the patch after it.
-          The release is already out: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG
-
-          Opened and merged by the publish job of \`.github/workflows/release.yml\`
-          (\`tools/release/release_notes.py move\`): \`main\` requires a pull request before
-          merging, and GitHub cannot give the Actions token a bypass.
-
-          **No check runs on this pull request.** GitHub starts no workflow from an event raised
-          with the job's own token. The change is \`VERSION\` and \`release-notes/\` alone, and
-          the next release's *ci is green* gate walks back over exactly those commits to the run
-          that stands for them (\`tools/release/gate.py\`).
-          BODY
+          python tools/release/notes_pr.py body --tag "$TAG" --next "$next" --branch "$branch" \
+            --release-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" \
+            > out/pr-body.md || exit 1
 
           # The commit sits on the detached HEAD this job checked out, and the push is what makes
           # the branch; --head then names it, because there is no local branch of that name.
-          if ! git push origin "HEAD:refs/heads/$branch"; then
-            printf '%s\n' \
-              '### The release is out; its notes are still waiting for main' '' \
-              "**$TAG is published and is not undone.** Only the branch \`$branch\`, which moves its lines into \`release-notes/$TAG.md\` and \`VERSION\` on, could not be pushed." '' \
-              'Do it by hand: `python tools/release/release_notes.py move` on a branch off `main`, then a pull request. Until that lands the next release is refused, and the refusal says the same thing (`docs/release.md`, *When a release is refused*).' \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          git push origin "HEAD:refs/heads/$branch" || finish no no no
 
           url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
                   --title "$title" --body-file out/pr-body.md | tail -n 1) || url=""
-          if [ -z "$url" ]; then
-            printf '%s\n' \
-              '### The release is out; its notes are still waiting for main' '' \
-              "**$TAG is published and is not undone.** The branch \`$branch\` is on origin, but no pull request could be opened for it - *Settings -> Actions -> General -> Allow GitHub Actions to create and approve pull requests* is the setting that lets the job do it." '' \
-              "Open and merge a pull request from \`$branch\` by hand. Until it lands the next release is refused (\`docs/release.md\`, *When a release is refused*)." \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
+          [ -n "$url" ] || finish yes no no
           echo "$url"
           number="${url##*/}"
 
@@ -571,8 +565,9 @@ jobs:
           # asked for in the same second can be told it is not ready yet: three tries, ten seconds
           # apart, rather than one coin flip at the end of a release that is already out. And the
           # STATE decides, not gh's exit code, because gh also tidies the branch up afterwards and
-          # this must not go red over that.
-          merged=""
+          # this must not go red over that. While main asks for `verify` all three are refused
+          # with *Required status check "verify" is expected*, and that is the green way out.
+          merged=no
           for attempt in 1 2 3; do
             if gh pr merge "$number" --repo "$GITHUB_REPOSITORY" --squash --delete-branch \
                  --subject "$title" --body ''; then merged=yes; break; fi
@@ -582,15 +577,7 @@ jobs:
             echo "attempt $attempt to merge pull request $number did not take"
             if [ "$attempt" -lt 3 ]; then sleep 10; fi
           done
-          if [ -z "$merged" ]; then
-            printf '%s\n' \
-              '### The release is out; its notes are still waiting for main' '' \
-              "**$TAG is published and is not undone.** Only $url, which moves its lines into \`release-notes/$TAG.md\` and \`VERSION\` on, is still open." '' \
-              "**Merge it.** It is the release's own two files and nothing else. \`main\` asks for the \`verify\` check, and nothing reports one on a pull request raised with the job's own token - so this one is merged by a person, or by a run of \`ci\` started by hand on its branch. Until it lands the next release is refused, and the refusal says the same thing (\`docs/release.md\`, *When a release is refused*)." \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "the notes of $TAG went to main as $url, squashed from $branch" >> "$GITHUB_STEP_SUMMARY"
+          finish yes yes "$merged" "$url"
 
       - name: The dry run's output, for the record
         uses: actions/upload-artifact@v4
