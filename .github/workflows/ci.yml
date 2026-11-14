@@ -17,12 +17,19 @@
 # A red job blocks the merge: tasks/RUNBOOK.md merges on green only, and the branch protection
 # of this repository makes GitHub insist too.
 #
-# IT RUNS AT HOME (tasks/phase-3.6/01-built-at-home.md). [self-hosted, unraid] is the
-# organisation's own runners on Unraid, because GitHub-hosted minutes got out of hand;
-# twinoak/meshmaster.dk moved the same way on 29 October 2026 and what it learned is in the steps
-# below. Everything that CHECKS runs at home; everything that SHIPS - release.yml, all of it -
-# stays on GitHub's runners, and the first step here is the guard that holds both halves of that
-# rule (tools/ci/check-runners.ps1).
+# WHERE THIS RUNS. On GitHub's runners (ubuntu-latest), like every job of every workflow here, for
+# two reasons that both come of the same fact: **this repository is public**, since 13 November
+# 2026. Actions on standard GitHub-hosted runners are free in a public repository, so this file
+# spends no credit - the minutes that got out of hand in October are the private repositories',
+# meshmaster.dk's among them, and theirs is the CI that runs at home on the organisation's Unraid
+# runners. And a public repository is the one place a self-hosted runner must not be: a fork can
+# open a pull request that changes this file, and it would then run on the Unraid host, with its
+# docker socket, its LAN and its Tailscale. GitHub's own guidance is that self-hosted runners
+# "should almost never be used for public repositories". From 13 November, when that group stopped
+# offering its runners here, until this file moved, no run of it was given a runner at all
+# (tasks/phase-3.12/03-ci-where-a-public-repository-may-run.md). README's *Where CI runs* is the
+# page, the guard below is what holds it, and tasks/phase-3.6/01-built-at-home.md with commit
+# 4cb2200 is the way home again if this repository is ever made private.
 
 name: ci
 
@@ -47,72 +54,42 @@ env:
 jobs:
   verify:
     name: verify
-    # At home: this job checks, it does not ship. tools/ci/check-runners.ps1 below is what holds
-    # it here, and release.yml on GitHub's runners.
-    runs-on: [self-hosted, unraid]
+    # On GitHub's own machine, like every job here: tools/ci/check-runners.ps1 below is the rule
+    # and this is the step that runs it.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       # The rule about where each workflow runs, over every job of .github/workflows/, before any
-      # of the work: a job in the wrong place is a finding, not something to discover at a tag.
-      # pwsh is on the runners (meshmaster.dk's CI uses it there) and on GitHub's images.
-      - name: Every job is where it belongs
+      # of the work: a job in the wrong place is a finding, not something to discover at a tag -
+      # or, as happened on 13 November, a queue nobody is told about. The self-test first, which
+      # is the shapes the rule must refuse (-SelfTest then runs the real check too). pwsh is on
+      # GitHub's images.
+      - name: Every job runs where it must
         shell: pwsh
-        run: ./tools/ci/check-runners.ps1
+        run: ./tools/ci/check-runners.ps1 -SelfTest
 
-      # A self-hosted runner keeps its workspace from one job to the next, and the branch that
-      # ran here last was somebody else's task. actions/checkout runs `git clean -ffdx`, which
-      # takes the ignored directories with it - .pio/ (PlatformIO's build output and the
-      # dependencies it clones, MeshCore among them, at that branch's pin) and out/. This is the
-      # proof rather than the hope. And it is the whole of what this job writes outside its own
-      # workspace and the runner's home, which is ~/.platformio and ~/.cache/pip and nothing
-      # else: no step here opens a port on the host or starts anything that outlives the job.
-      - name: Nothing of the last job is left in the workspace
-        shell: bash
-        run: |
-          set -euo pipefail
-          left=""
-          for path in .pio out; do
-            if [ -e "$path" ]; then left="$left $path"; fi
-          done
-          if [ -n "$left" ]; then
-            echo "::error::checkout left$left behind; this job would build on another branch's leftovers"
-            exit 1
-          fi
-          echo "the workspace is this checkout and nothing else"
-
-      # What this job calls that a runner may not have. GitHub's image carries all of it; the
-      # Unraid runner's is thinner, and g++ is the one that decides where work happens:
-      # tools/verify.ps1 runs the native tests and the link loop with the host compiler when
-      # there is one and in a python:3.11-slim container when there is not - and a container
-      # started from inside the runner's own container would bind-mount a path the daemon's host
-      # does not have. So the compiler is installed here and that step stays on the host, as it
-      # does on GitHub's runners.
+      # What this job calls, and which machine it is on - a check and a note, not an install.
       #
-      # `zip` is deliberately not in this list: no job of this repository calls it. The DFU .zip
-      # is written by adafruit-nrfutil (Python, from ~/.platformio) and the run's artifact by
-      # upload-artifact (Node). pwsh is not installed here either - it is a package feed rather
-      # than a package - so a runner without it fails here, naming itself, instead of failing
-      # inside the one step that matters. Python is actions/setup-python's, below.
-      - name: What this job needs that the runner may not have
+      # When this job ran at home, the step here installed g++ and friends when the Unraid image
+      # did not have them, and a step before it proved that checkout's `git clean -ffdx` had taken
+      # the last branch's .pio/ and out/ with it. Neither earns its place on a GitHub-hosted
+      # runner: the workspace is a machine that did not exist a minute ago, so there is nothing of
+      # another branch to find, and actions/runner-images carries all five of these tools. The
+      # check is what is kept, because g++ is the one that decides where the work happens -
+      # tools/verify.ps1 runs the native tests and the link loop with the host compiler when there
+      # is one and in a python:3.11-slim container when there is not, and the container is fifteen
+      # minutes rather than two. If GitHub's image ever drops it, this step says so by name
+      # instead of the run going slow and quiet.
+      #
+      # `zip` is deliberately not in this list: no job of this repository calls it. The DFU .zip is
+      # written by adafruit-nrfutil (Python, from ~/.platformio) and the run's artifact by
+      # upload-artifact (Node). Python is actions/setup-python's, below.
+      - name: What this job needs, and the machine it is on
         shell: bash
         run: |
           set -euo pipefail
-          needed="g++ git curl tar"
-          missing=""
-          for tool in $needed; do
-            if ! command -v "$tool" >/dev/null 2>&1; then missing="$missing $tool"; fi
-          done
-          if [ -n "$missing" ]; then
-            command -v apt-get >/dev/null 2>&1 \
-              || { echo "::error::this runner is missing$missing and has no apt-get to install it with"; exit 1; }
-            sudo=""
-            if [ "$(id -u)" != "0" ]; then sudo="sudo"; fi
-            echo "installing:$missing"
-            $sudo apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive $sudo apt-get install -y -qq $missing
-          fi
-          for tool in $needed bash pwsh; do
+          for tool in g++ git curl tar bash pwsh; do
             command -v "$tool" >/dev/null 2>&1 \
               || { echo "::error::$tool is not on this runner and this job cannot do without it"; exit 1; }
           done
@@ -122,7 +99,7 @@ jobs:
             echo "\`${RUNNER_NAME:-?}\` (\`${RUNNER_ENVIRONMENT:-?}\`, ${RUNNER_OS:-?}/${RUNNER_ARCH:-?})"
             echo
             echo '```'
-            for tool in $needed bash pwsh; do printf '%-6s %s\n' "$tool" "$(command -v "$tool")"; done
+            for tool in g++ git curl tar bash pwsh; do printf '%-6s %s\n' "$tool" "$(command -v "$tool")"; done
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -134,11 +111,12 @@ jobs:
       # turns a cold build of minutes into seconds. MeshCore is a git dependency, so the pin is
       # in the key through platformio.ini.
       #
-      # ON GITHUB'S RUNNERS ONLY (meshmaster.dk's 70b73ad). A self-hosted runner keeps its home
-      # between jobs, so ~/.platformio and ~/.cache/pip are already there - and the tarball would
-      # come over the WAN every job for nothing.
+      # It runs on every job again. While this job was at home it was `if: runner.environment ==
+      # 'github-hosted'` (meshmaster.dk's 70b73ad): a self-hosted runner keeps its home between
+      # jobs, so ~/.platformio and ~/.cache/pip were already there and the tarball would have come
+      # over the WAN for nothing. A GitHub-hosted runner has nothing on disk, so the cache is the
+      # difference between a cold build and a warm one.
       - name: Cache PlatformIO
-        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |

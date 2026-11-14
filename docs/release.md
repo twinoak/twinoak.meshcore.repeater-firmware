@@ -12,17 +12,16 @@ afterwards — is [`docs/flashing.md`](flashing.md).
 by hand starts nothing** — there is no tag trigger here any more; the tag of a
 release is made by the run that publishes it, on the commit it built.
 
-**And it is built away from home.** Every job of `release.yml` runs on a
-GitHub-hosted `ubuntu-latest`, while everything that only checks — `ci.yml`,
-`upstream.yml` — runs on the organisation's own Unraid runners
-(`[self-hosted, unraid]`; README.md, *Where CI runs*). This is what ships: the
-images every repeater's update trusts, signed with `RELEASE_SIGNING_KEY`. A
-self-hosted runner is shared with every branch a task session pushes and keeps
-its home — `~/.platformio` and its toolchains — from one job to the next, and
-signing somewhere else would keep the key off that runner but would still sign
-whatever it built. A release is rare, so the minutes are few.
-`tools/ci/check-runners.ps1`, which runs as `ci.yml`'s first step, fails when a
-job of this file moves home or when any other job stays away.
+**And it is built on GitHub's own machine.** Every job of `release.yml` runs on
+a GitHub-hosted `ubuntu-latest` — as does every job of every other workflow
+here, because this repository is public (README.md, *Where CI runs*). For this
+file that is more than the rule: this is what ships, the images every repeater's
+update trusts, signed with `RELEASE_SIGNING_KEY`, and a runner that begins each
+job new and is gone after it is where that should happen. Signing somewhere else
+would keep the key off a shared runner but would still sign whatever that runner
+built. A release is rare, so the minutes are few in any case.
+`tools/ci/check-runners.ps1`, which `ci.yml` runs as a step, fails when a job of
+any workflow here names a self-hosted runner.
 
 ## Making one
 

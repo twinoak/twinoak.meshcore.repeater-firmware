@@ -14,9 +14,12 @@
 # The comparison itself is tools/upstream-check.ps1, so that it can be run by hand and this
 # workflow is only the git and the gh around it.
 #
-# IT RUNS AT HOME, on [self-hosted, unraid], like ci.yml and for the same reason
-# (tasks/phase-3.6/01-built-at-home.md): it checks, it does not ship. ci.yml's first step is the
-# guard that holds it there.
+# IT RUNS ON GITHUB'S RUNNERS, on ubuntu-latest, like every job of every workflow here: this
+# repository is public, hosted runners are free for one, and a self-hosted runner on a public
+# repository runs a fork's pull request on the Unraid host
+# (tasks/phase-3.12/03-ci-where-a-public-repository-may-run.md; the rule and its reasons are at the
+# top of tools/ci/check-runners.ps1, which ci.yml runs as a step). This workflow is also the one
+# that opens a pull request with a token, which is a second reason not to run it on a shared host.
 #
 # REHEARSAL. With the pin_tag input this workflow proves itself without waiting for upstream: it
 # pushes a throwaway base branch whose pin is that older tag, then does the real thing on top of
@@ -47,16 +50,17 @@ concurrency:
 jobs:
   bump:
     name: is there a newer MeshCore?
-    # At home, like ci.yml: this job asks a question and opens a pull request, it ships nothing
-    # (tasks/phase-3.6/01-built-at-home.md; tools/ci/check-runners.ps1 holds it here). It calls
-    # git, sed, awk, date, pwsh and gh, all of which the runners have.
+    # On GitHub's own machine, like every job here (tools/ci/check-runners.ps1 is the rule). It
+    # calls git, sed, awk, date, pwsh and gh, all of which actions/runner-images carries.
     #
     # It writes nowhere but its workspace and $RUNNER_TEMP. The three files it used to put in
     # /tmp - the blobless clone of upstream, the pull request's body and the rewritten page - are
-    # in $RUNNER_TEMP now: on a GitHub-hosted runner /tmp was this job's alone, and on a shared
-    # one `git clone` into a directory last week's run left there fails. The runner empties
-    # $RUNNER_TEMP at the start of every job, which is exactly what /tmp was being trusted for.
-    runs-on: [self-hosted, unraid]
+    # in $RUNNER_TEMP now, which is the one thing worth keeping from the months this job ran at
+    # home: on a GitHub-hosted runner /tmp is this job's alone, and on a shared one `git clone`
+    # into a directory last week's run left there fails. The runner empties $RUNNER_TEMP at the
+    # start of every job, which is exactly what /tmp was being trusted for, so it is right on
+    # either kind of runner and stays.
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write

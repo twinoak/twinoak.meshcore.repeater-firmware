@@ -11,11 +11,12 @@ does that, and it has two halves that live in two very different places.
 
 **The private half never reaches a machine of ours.** Every job of
 `.github/workflows/release.yml` runs on a GitHub-hosted runner, which begins
-each job new and is gone after it; the organisation's own Unraid runners, where
-everything that merely *checks* now runs, never see the secret and never build
-what is signed (README.md, *Where CI runs*; `docs/release.md`).
-`tools/ci/check-runners.ps1` is the guard, and it runs as `ci.yml`'s first
-step.
+each job new and is gone after it — as does every job of every workflow here,
+because this repository is public (README.md, *Where CI runs*;
+`docs/release.md`). The organisation's own Unraid runners, which a private
+repository's CI uses, never see this secret and never build what is signed; the
+rule that keeps every job off them is `tools/ci/check-runners.ps1`, which
+`ci.yml` runs as a step.
 
 **Nothing secret goes in this directory.** Not the private key, not a copy of
 it "for convenience", not a key file with the private half commented out. A
