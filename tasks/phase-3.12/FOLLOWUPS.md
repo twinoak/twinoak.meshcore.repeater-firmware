@@ -46,3 +46,17 @@ its report, the three source files it changes, `test/test_cayennelpp`, `docs/lin
 - [ ] **[later] What I told Thomas on 13 November was wrong.** I read the queued run on `main`
   (43478441183) as waiting behind meshmaster.dk's pile on a busy runner. It was waiting for a
   runner this repository may no longer use.
+- [ ] **[Thomas to decide] The mesh client's own floods carry no scope.** Seen on 14 November,
+  when Thomas asked why the unit at Bellevue (repeater 41 on meshmaster.dk) seemed to advert
+  without one. Its adverts are upstream's and take the default scope
+  (`examples/simple_repeater/MyMesh.cpp:1037` and `:1299` at the pin; `region default dk` was
+  answered ` default scope is now dk` that morning and read back after a restart). What leaves
+  this firmware unscoped is every flood the mesh client sends for the Walter:
+  `TwinOakMesh::dispatch` calls `sendFlood(pkt, 0, kFloodPathHashSize)`
+  (`src/roles/repeater/app/TwinOakMesh.cpp:231`), and neither the client nor
+  `spec/LINK-PROTOCOL.md` has a word for a scope. `spec/SYSTEM.md`'s open point 4 says these
+  floods "follow the agent firmware (unscoped)". The agent firmware has changed since: the agent
+  library's `FloodScope` floods the scope first and keeps one unscoped try (meshmaster.dk D-47),
+  and by that file's own comment a repeater at `flood.max.unscoped 0` drops an unscoped flood at
+  the first hop. The Walter's copy of the library has `FloodScope` too; what its side of the link
+  does with it was not read.
