@@ -642,9 +642,12 @@ class SectionFive(WalkCase):
                      # p3.10-01: the conversion-ready flag, which only a real part raises
                      "a part that really raises that flag",
                      # p3.10-02: a total is read as a difference, which takes two answers
-                     "an hour of wall clock"):
+                     "an hour of wall clock",
+                     # p3.12-01: the humidity and the pressure on LPP channel 5, which only a
+                     # phone and the unit's own page on meshmaster.dk show
+                     "the unit's page on meshmaster.dk"):
             self.assertIn(owed, still)
-        self.assertEqual(still.count("- **5."), 8)
+        self.assertEqual(still.count("- **5."), 9)
         # the boot-voltage line is the lab supply's, but its three `get`s are read here
         self.assertIn("**section 5 get pwrmgt.bootmv** -> 0 mV", text)
         self.assertIn("**section 5 get pwrmgt.support** -> supported", text)

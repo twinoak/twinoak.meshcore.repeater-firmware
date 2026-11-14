@@ -34,6 +34,8 @@ struct EnvReadings {
   uint32_t pressure_pa = 0;
 
   bool temperatureValid() const { return (valid & 0x01) != 0; }
+  bool humidityValid() const { return (valid & 0x02) != 0; }
+  bool pressureValid() const { return (valid & 0x04) != 0; }
 };
 
 // The bits of `valid`, with the link's own names and values (src/common/link/codec/Numbers.h's EnvValid;

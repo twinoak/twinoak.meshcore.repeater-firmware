@@ -140,7 +140,7 @@ firmware's `tasks/phase-10/reports/03.md` and `release-notes/v0.1.3.md`; how it
 was installed is not written down there, and the unit's own first update over
 LTE failed that day for a reason in the Walter's download). So `v0.1.2` is on a
 board and **no board has run `v0.1.3`**.
-26 of the 120 lines of
+26 of the 121 lines of
 [`docs/bench.md`](docs/bench.md) are ticked; the rest need a radio, a phone, a
 scope or the roof, and that page is the walk that would prove them. `tools/verify.ps1` is what has been proved without one.
 

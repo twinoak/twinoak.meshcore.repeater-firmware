@@ -11,9 +11,12 @@
 //     of CayenneLPP's own `addField` and writes the same bytes.
 //
 // Why a mirror and not the library: LPP_GET must not perform I2C and must not depend on
-// upstream's request path, and the library is not host-portable. The mirror is twenty lines, its
-// arithmetic is copied from the library at the pinned version with the line cited, and
-// test/test_power holds the two compositions against each other and against hand-computed bytes.
+// upstream's request path, and the library puts its buffer on the heap. The mirror is twenty
+// lines and its arithmetic is copied from the library at the pinned version with the line cited.
+// Two tests hold it: `test/test_power` holds the two compositions against each other and against
+// hand-computed bytes, and since p3.12-01 `test/test_cayennelpp` links the **library itself** -
+// the same exact version, compiled for the host by `[env:native]` - and holds the mirror's bytes
+// against the library's for every type in the table below.
 // `docs/link.md` carries the channel table; the numbers are chosen once and never renumbered.
 //
 // Host-portable: no Arduino, no MeshCore, no heap.
@@ -47,7 +50,7 @@ enum LppChannel : uint8_t {
   kLppChannelPanel = 2,  // INA3221 channel 1
   kLppChannelBattery = 3,  // INA3221 channel 2
   kLppChannelLoad = 4,   // INA3221 channel 3
-  kLppChannelEnclosure = 5,  // the BME280
+  kLppChannelEnclosure = 5,  // the BME280: temperature, humidity and pressure (p3.12-01)
   // What has flowed since the firmware started (PowerTotals.h, p3.10-02). One channel each, all
   // of them the generic sensor below, and the step of each is in docs/link.md section 2d: a
   // charge is 0.01 mAh and an energy 0.1 mWh. A reader takes the difference between two answers.
@@ -67,6 +70,8 @@ enum LppChannel : uint8_t {
 enum LppType : uint8_t {
   kLppGenericSensor = 100,  // 4 bytes, 1 per step, **unsigned**
   kLppTemperature = 103,  // 2 bytes, 0.1 C, signed
+  kLppRelativeHumidity = 104,  // 1 byte, 0.5 %RH, unsigned
+  kLppBarometricPressure = 115,  // 2 bytes, 0.1 hPa, unsigned
   kLppVoltage = 116,      // 2 bytes, 0.01 V
   kLppCurrent = 117,      // 2 bytes, 0.001 A, signed
 };
@@ -147,14 +152,19 @@ struct LppField {
 };
 
 // Room for the longest list this firmware can produce: the base voltage, three channels of
-// voltage and current, the enclosure temperature, the nine totals, and the MCU temperature.
-constexpr size_t kMaxLppFields = 18;
+// voltage and current, the enclosure's temperature, humidity and pressure, the nine totals, and
+// the MCU temperature. Exactly the longest list and not one more, so that a field added without
+// raising this bound is a red test (test/test_power) and not a channel missing from the wire.
+constexpr size_t kMaxLppFields = 20;
 
-// **Ours**: the three INA3221 channels' voltage and current, the enclosure temperature, then the
-// nine totals of channels 6 to 14. Only with the environment permission, which is the gate
-// upstream's own manager uses (EnvironmentSensorManager::querySensors at the pin). A channel
-// whose validity bit is clear is left out entirely - a missing reading is not a reading of zero -
-// and the numbers of the channels that are there do not move because of it.
+// **Ours**: the three INA3221 channels' voltage and current, the enclosure's temperature,
+// humidity and pressure, then the nine totals of channels 6 to 14. Only with the environment
+// permission, which is the gate upstream's own manager uses
+// (EnvironmentSensorManager::querySensors at the pin). A channel whose validity bit is clear is
+// left out entirely - a missing reading is not a reading of zero - and the numbers of the
+// channels that are there do not move because of it. The same holds field by field inside
+// channel 5: the BME280's three quantities have a validity bit each, and one that is clear takes
+// its field out and leaves the other two where they were.
 size_t ourFields(const TelemetrySnapshot& s, uint8_t perm_mask, LppField* out, size_t cap);
 
 // **The whole reply**, in the order upstream's MyMesh::handleRequest builds it: the battery

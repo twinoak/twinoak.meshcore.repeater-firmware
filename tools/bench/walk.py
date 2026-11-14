@@ -225,6 +225,11 @@ _section("5", "Power", [
     PageLine("5.3", ("p1-06",), "**`linkcli.py env` against a thermometer**",
              "temperature, humidity and pressure against something trustworthy",
              person="a thermometer in the enclosure, a BME280 on the bus, and the link"),
+    PageLine("5.3a", ("p3.12-01",), "**The enclosure's three readings as a mesh",
+             "all three of the BME280's readings on LPP channel 5, each ENV_GET's own number "
+             "floored to its type's step, and the same from a phone and on meshmaster.dk",
+             person="a BME280 on the bus, the link, a phone on the mesh and the unit's page on "
+                    "meshmaster.dk - a session cannot hear a radio"),
     PageLine("5.4", ("p1-06",), "**The battery thresholds, with the simulator.**",
              "the minute below a threshold, the hysteresis and the hourly limit",
              person="the lab supply's knob (or a battery simulator) and the link, which is "
@@ -1125,7 +1130,7 @@ class Walker(object):
                              "as they were found, which is this walk's last step."
                              % (found_low, found_crit))
 
-            for key in ("5.1", "5.1a", "5.2", "5.2a", "5.3", "5.4"):
+            for key in ("5.1", "5.1a", "5.2", "5.2a", "5.3", "5.3a", "5.4"):
                 self.person(key)
 
             # 5.5 - settable, listed, and still there after a restart.

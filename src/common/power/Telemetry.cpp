@@ -29,10 +29,15 @@ bool push(LppField* out, size_t cap, size_t& n, uint8_t channel, uint8_t type, f
 // and getTypeSigned at version 1.6.1). Only the types this firmware writes are here, so a field
 // of a new type has to be added deliberately rather than silently encoded wrongly.
 //
-// The three the library refuses are worth knowing about and are in tasks/phase-1/reports/06.md:
-// its `isType()` gate does not list LPP_RELATIVE_HUMIDITY, LPP_BAROMETRIC_PRESSURE or LPP_POWER,
-// so addRelativeHumidity, addBarometricPressure and addPower write **nothing** and return 0.
-// That is why the enclosure's humidity and pressure are on the box link and not in the LPP.
+// **The library refuses none of these.** tasks/phase-1/reports/06.md said its `isType()` gate
+// does not list LPP_RELATIVE_HUMIDITY, LPP_BAROMETRIC_PRESSURE or LPP_POWER, so that adding one
+// would write nothing; that reading of the gate was wrong, and the enclosure's humidity and
+// pressure were left off the wire for a year because of it (p3.12-01, 14 November 2026). The gate
+// lists every type in it, each behind a `CAYENNE_DISABLE_*` that nothing in this build defines,
+// and `test/test_cayennelpp` now links the library and shows the bytes rather than citing the
+// source. Upstream's own BME280 writes the same two types (EnvironmentSensorManager.cpp's
+// query_bme280 at the pin 81dbae59). LPP_POWER stays out by choice: meshmaster.dk computes it
+// from the volts and the amps that are already here.
 struct TypeInfo {
   uint8_t type;
   uint8_t size;
@@ -48,6 +53,8 @@ struct TypeInfo {
 const TypeInfo kTypes[] = {
     {kLppGenericSensor, 4, 1, false},
     {kLppTemperature, 2, 10, true},
+    {kLppRelativeHumidity, 1, 2, false},
+    {kLppBarometricPressure, 2, 10, false},
     {kLppVoltage, 2, 100, true},
     {kLppCurrent, 2, 1000, true},
 };
@@ -92,9 +99,24 @@ size_t ourFields(const TelemetrySnapshot& s, uint8_t perm_mask, LppField* out, s
     push(out, cap, n, kMap[i].lpp_channel, kLppCurrent, float(r.current_ma) / 1000.0f);
   }
 
+  // Channel 5, the BME280's three quantities in the order ENV_GET carries them. Each is the same
+  // number ENV_GET reports, converted into the unit its Cayenne-LPP type takes - so the link's
+  // answer and the mesh's cannot differ by more than the type's own resolution - and each is
+  // there only while its validity bit is set (Environment.h). A quantity that is missing takes
+  // its field out and moves none of the others.
   if (s.env.temperatureValid()) {
     // The same centidegrees ENV_GET reports, so the link's number and the mesh's cannot differ.
     push(out, cap, n, kLppChannelEnclosure, kLppTemperature, float(s.env.temp_centi) / 100.0f);
+  }
+  if (s.env.humidityValid()) {
+    // Percent, from ENV_GET's hundredths of one. The type's step is half a per cent.
+    push(out, cap, n, kLppChannelEnclosure, kLppRelativeHumidity, float(s.env.rh_centi) / 100.0f);
+  }
+  if (s.env.pressureValid()) {
+    // Hectopascal, from ENV_GET's pascal - the unit the type takes, and the one upstream's own
+    // BME280 hands it (`readPressure() / 100`). The type's step is a tenth of a hectopascal.
+    push(out, cap, n, kLppChannelEnclosure, kLppBarometricPressure,
+         float(s.env.pressure_pa) / 100.0f);
   }
 
   // Channels 6 to 14: what has flowed since the firmware started (PowerTotals.h). **All nine or
@@ -141,7 +163,7 @@ size_t encodeLpp(const LppField* fields, size_t count, uint8_t* out, size_t cap)
   size_t cursor = 0;
   for (size_t i = 0; i < count; i++) {
     const TypeInfo* info = typeInfoOf(fields[i].type);
-    if (info == nullptr) continue;  // the library's isType() gate: nothing is written
+    if (info == nullptr) continue;  // not a type this firmware writes: nothing is written
     if (cursor + info->size + 2 > cap) continue;  // its overflow check: nothing is written
 
     // addField, line for line: the sign is taken off the float first, the product is truncated

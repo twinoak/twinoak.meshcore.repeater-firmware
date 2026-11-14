@@ -472,7 +472,7 @@ was told. **These channel numbers are chosen once and never renumbered**:
 | 2 | panel | voltage, current | | ours |
 | 3 | battery | voltage, current | | ours |
 | 4 | total load | voltage, current | | ours |
-| 5 | the enclosure | temperature | | ours |
+| 5 | the enclosure | temperature, humidity, pressure | 0.1 °C, 0.5 %RH, 0.1 hPa | ours |
 | 6 | panel, charge | total since start | 0.01 mAh | ours |
 | 7 | panel, energy | total since start | 0.1 mWh | ours |
 | 8 | battery, charge **in** | total since start | 0.01 mAh | ours |
@@ -486,7 +486,7 @@ was told. **These channel numbers are chosen once and never renumbered**:
 ```
 $ python3 tools/linkcli.py --port COM7 lpp
 LPP_GET perm_mask 0x05 (base, environment)
-  90 byte(s): 017401900274071102750078037401900375ffcc0474018e047500550567ffdd066400002edf0764000054d108640000000009640000144f0a64000000000b64000008230c64000021330d6400000d3a0e6400000e0f016700d4
+  97 byte(s): 017401900274071102750078037401900375ffcc0474018e047500550567ffdd0568a205732794066400002edf0764000054d108640000000009640000144f0a64000000000b64000008230c64000021330d6400000d3a0e6400000e0f016700d4
   channel 1  self       voltage                4.000 V
   channel 2  panel      voltage               18.090 V
   channel 2  panel      current                0.120 A
@@ -495,6 +495,8 @@ LPP_GET perm_mask 0x05 (base, environment)
   channel 4  load       voltage                3.980 V
   channel 4  load       current                0.085 A
   channel 5  enclosure  temperature           -3.500 C
+  channel 5  enclosure  humidity              81.000 %
+  channel 5  enclosure  pressure            1013.200 hPa
   channel 6  panel      charge               119.990 mAh
   channel 7  panel      energy              2171.300 mWh
   channel 8  battery    charge in              0.000 mAh
@@ -510,15 +512,26 @@ LPP_GET perm_mask 0x05 (base, environment)
 - Channels 2 to 14 need the **environment** permission (`0x04`), which is the
   gate upstream's own sensor manager uses. `lpp 1` — base alone, which is what a
   guest gets — is channel 1 and nothing else.
-- **The enclosure's humidity and pressure are not in the LPP.** CayenneLPP
-  1.6.1's own type gate does not list relative humidity or barometric pressure,
-  so `addRelativeHumidity` and `addBarometricPressure` write nothing at all —
-  upstream's library, not our choice. `ENV_GET` on this link carries all three,
-  which is where to read them until that is fixed upstream
-  (`tasks/phase-1/reports/06.md`).
+- **All three of the enclosure's readings are on channel 5**, in the order
+  `ENV_GET` carries them: the temperature (type 103, two bytes, 0.1 °C), the
+  relative humidity (type 104, **one** byte, half a per cent) and the barometric
+  pressure (type 115, two bytes, a tenth of a hectopascal). Each is there only
+  when `ENV_GET` would report it — a quantity the part could not read is left
+  out and the other two do not move. Up to **v0.1.4** the channel carried the
+  temperature alone, because this page and `tasks/phase-1/reports/06.md` said
+  CayenneLPP 1.6.1's type gate does not list the other two; it does, and
+  `test/test_cayennelpp` now links the library and shows the bytes rather than
+  taking anybody's word for it.
 - A voltage is 0.01 V per step and a current 0.001 A, both truncated towards
-  zero, so `4008 mV` reads back as `4.00 V`. That is Cayenne-LPP's resolution
-  and it is the same on the mesh.
+  zero, so `4008 mV` reads back as `4.00 V`. The same truncation is why
+  `81.25 %RH` reads back as `81.0 %` (half a per cent per step) and
+  `101 325 Pa` as `1013.2 hPa` (a tenth of a hectopascal): the LPP is always at
+  or below what `ENV_GET` says, by less than one step. That is Cayenne-LPP's
+  resolution and it is the same on the mesh — **`ENV_GET` is still where the
+  full-precision numbers are**, in centidegrees, hundredths of a per cent and
+  whole pascal.
+- **Watts are not on the wire** and are not meant to be: a reader has the volts
+  and the amps of every channel and multiplies them itself.
 
 ### Reading channels 6 to 14: subtract two answers
 

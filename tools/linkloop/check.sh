@@ -163,6 +163,14 @@ echo "   totals of what flowed through the hour this program's reader was steppe
 echo "   (--flowed, one hour by default), and a reader of them subtracts two answers."
 $cli lpp > "$out/lpp.log" 2>&1
 cat "$out/lpp.log"
+for want in "channel 5  enclosure  temperature" "channel 5  enclosure  humidity" \
+            "channel 5  enclosure  pressure"; do
+  grep -qF "$want" "$out/lpp.log" || {
+    echo "the lpp table did not name: $want" >&2
+    exit 1
+  }
+done
+echo "   all three of the BME280's readings on channel 5 (p3.12-01)"
 for want in "channel 6  panel      charge" "channel 7  panel      energy" \
             "channel 8  battery    charge in" "channel 9  battery    charge out" \
             "channel 10 battery    energy in" "channel 11 battery    energy out" \

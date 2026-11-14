@@ -144,6 +144,8 @@ LPP_PERM_NAMES = [(0x01, "base"), (0x02, "location"), (0x04, "environment")]
 LPP_TYPES = {
     100: ("total", 4, 1.0, False, ""),
     103: ("temperature", 2, 10.0, True, "C"),
+    104: ("humidity", 1, 2.0, False, "%"),
+    115: ("pressure", 2, 10.0, False, "hPa"),
     116: ("voltage", 2, 100.0, False, "V"),
     117: ("current", 2, 1000.0, True, "A"),
 }

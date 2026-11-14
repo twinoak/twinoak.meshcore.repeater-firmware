@@ -121,7 +121,7 @@ rest of this page is a person's, and so are the lines in the right-hand column:
 |---|---|---|
 | §1 | the console on a repeater: the banner's `Repeater ID`, `ver`, `board`, `get radio`, both `sensor list` pages with the cut digit, `sensor get fw.version`, `sensor set fw.version x` refused, and `get dutycycle` | the adverts and the repeating, a phone's login, `INFO.VARIANT`, the scope on SCL, the two USB serial numbers (a double-tap), and the refusals with `rf: antenna` in the config |
 | §3 | the clock on the USB console: `sensor get clock.state` on a node that has never had one, upstream's own `clock`, a `time <epoch>` set, `clock sync`, a `reboot` and a `clkreboot` — and `rtc` never said on a board with no RV-3028 | the `linkcli.py` lines, the reset switch, a minute without power, a companion's view of the adverts, and a hand-fitted RV-3028 |
-| §5 | the two thresholds on the USB console: `power.low_mv` set to 3600 and still 3600 after a `reboot`, and `3350`, `2400` and `4400` refused with nothing changed — **and both values put back as they were found**, which is the walk's last line | the DMM, the phone's telemetry, the thermometer, the simulator's steps, the unplugged I2C bus, and the boot-voltage question (its three `get`s are read and filled in here) |
+| §5 | the two thresholds on the USB console: `power.low_mv` set to 3600 and still 3600 after a `reboot`, and `3350`, `2400` and `4400` refused with nothing changed — **and both values put back as they were found**, which is the walk's last line | the DMM, the phone's telemetry (and meshmaster.dk's three charts on channel 5), the thermometer, the simulator's steps, the unplugged I2C bus, and the boot-voltage question (its three `get`s are read and filled in here) |
 | §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the four agreeing (`role`, `board`, `band`, `fw_version`) | the Walter's half, which is another repository's |
 | §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
 | §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the Danish standard's four (the advert interval computed from the key it read), the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
@@ -760,10 +760,26 @@ here needs a meter, a phone, the lab supply's knob or a hand on the I2C bus.
 - [ ] **p1-06** **[boards]** **`linkcli.py env` against a thermometer** in the
   enclosure, and
   the humidity and pressure against anything trustworthy (a weather station's
-  sea-level pressure minus about 12 Pa per 100 m of altitude). The temperature
-  must also appear on **LPP channel 5**; the humidity and pressure deliberately
-  do not, because CayenneLPP 1.6.1 cannot encode them (`reports/06.md`).
+  sea-level pressure minus about 12 Pa per 100 m of altitude). All three must
+  also appear on **LPP channel 5** — since `p3.12-01`; up to `v0.1.4` the
+  temperature was there alone, for a reason about the Cayenne-LPP library that
+  turned out not to be true (`reports/06.md`, and the dated note at the head of
+  that section of it).
   Enclosure → ______ °C / ______ %RH / ______ hPa.
+- [ ] **p3.12-01** **[boards]** **The enclosure's three readings as a mesh
+  reader gets them.** `linkcli.py lpp` must print `channel 5` three times —
+  temperature, humidity and pressure — and each must be the `env` line above
+  **floored to the type's own step**: a tenth of a degree, half a per cent, a
+  tenth of a hectopascal. So `81.25 %RH` on the link reads `81.0 %` in the LPP
+  and `101 325 Pa` reads `1013.2 hPa`; a number that is *higher* than `env`'s,
+  or more than one step below it, is a finding. Then the same from a phone's
+  telemetry view of the repeater, and then on meshmaster.dk's page for the unit,
+  where channel 5 is one chart today and must become three. The reply is
+  **97 bytes of Cayenne-LPP** where `v0.1.4` sent 90, which is 118 bytes on air
+  and about 1164 ms at SF8 — long enough to be worth noticing on a busy channel
+  and far inside the band's duty cycle (`tasks/phase-3.12/reports/01.md` has the
+  arithmetic). LPP → ______ °C / ______ % / ______ hPa;
+  the phone showed ______ ; meshmaster.dk showed ______ .
 - [ ] **p1-06** **The battery thresholds, with the simulator.** Step the pack
   below **3500 mV** and hold it: nothing for the first minute, then
   `EV_ATTENTION` **reason 2** with `detail` the millivolts. Below **3300 mV**,

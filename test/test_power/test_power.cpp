@@ -22,6 +22,10 @@
 //     nine or none, that channels 1 to 5 are byte for byte what v0.1.2 answered, that the whole
 //     reply fits the mesh's cap, that an unsigned type keeps its magnitude where a signed one is
 //     two's-complemented, and what a total does above 2^24 steps and at the top;
+//   - and since p3.12-01 the enclosure's **humidity and pressure** on channel 5 beside its
+//     temperature: the bytes, that each is ENV_GET's own number floored to its type's step, and
+//     that a quantity whose validity bit is clear takes its field out and moves no other. The
+//     proof that those bytes are the library's own is test/test_cayennelpp, which links it;
 //   - and POWER_GET's and ENV_GET's own bodies through src/common/power/LinkPower.h. Their *frames*,
 //     byte for byte against the fixture, are test/test_link_session's.
 
@@ -249,6 +253,13 @@ const char* const kOursHex =
     "0474018e"  // channel 4 load voltage, 3.98 V (398)
     "04750055"  // channel 4 load current, 0.085 A (85)
     "0567ffdd";  // channel 5 enclosure temperature, -3.5 C (-35)
+// The other two readings of the same BME280, after it on the same channel (p3.12-01). Both are
+// **unsigned** - neither is in getTypeSigned()'s list - and both are a floor: 81.25 %RH is 162
+// half-percents and not 162.5, and 1013.25 hPa is 10132 tenths and not 10132.5. test_cayennelpp
+// holds these six bytes against what the library itself writes for the same two values.
+const char* const kEnclosureHex =
+    "0568a2"      // channel 5 enclosure humidity, 81.25 % -> 162 half-percents (0xa2)
+    "05732794";   // channel 5 enclosure pressure, 101325 Pa = 1013.25 hPa -> 10132 (0x2794)
 // Channels 6 to 14, type 100 (0x64, four bytes, unsigned, one unit per step): the step counts
 // above, most significant byte first (p3.10-02).
 const char* const kTotalsHex =
@@ -263,9 +274,10 @@ const char* const kTotalsHex =
     "0e6400000e10";  // 14 seconds covered    3600 steps = 3600 s
 const char* const kMcuHex = "016700d4";  // channel 1, temperature, 21.25 -> 212, truncated
 
-// Every field of the longest reply this firmware builds, encoded: 36 bytes of channels 1 to 5
-// and 54 of the nine totals (p3.10-02's cost line).
-constexpr size_t kWholeReplyBytes = 90;
+// Every field of the longest reply this firmware builds, encoded: 36 bytes of what v0.1.2 already
+// answered, 7 of the enclosure's humidity and pressure (p3.12-01) and 54 of the nine totals
+// (p3.10-02's cost line). The report of p3.12-01 turns this number into a frame and an airtime.
+constexpr size_t kWholeReplyBytes = 97;
 
 // One charge total as the wire carries it, through the real field builder and the real mirror.
 // A default snapshot has no valid channel and no environment reading, so the nine totals are the
@@ -279,6 +291,34 @@ std::string chargeHex(uint64_t steps) {
   if (n == 0) return std::string();
   uint8_t out[kMeshLppCap] = {0};
   return toHex(out, encodeLpp(f, 1, out, sizeof(out)));
+}
+
+// One field out of encoded Cayenne-LPP, found by channel and type, as the unsigned integer its
+// bytes carry (most significant byte first). The walk needs a size per type, which is the one
+// thing a reader of this encoding cannot get from the bytes - so the mirror's own sizes are here,
+// and a type this firmware does not write cannot appear in bytes this firmware wrote.
+bool lppField(const uint8_t* raw, size_t len, uint8_t channel, uint8_t type, uint32_t& value) {
+  struct Size { uint8_t type; uint8_t bytes; };
+  static const Size kSizes[] = {{kLppGenericSensor, 4},       {kLppTemperature, 2},
+                                {kLppRelativeHumidity, 1},    {kLppBarometricPressure, 2},
+                                {kLppVoltage, 2},             {kLppCurrent, 2}};
+  size_t i = 0;
+  while (i + 2 <= len) {
+    const uint8_t ch = raw[i];
+    const uint8_t ty = raw[i + 1];
+    uint8_t bytes = 0;
+    for (const Size& e : kSizes) {
+      if (e.type == ty) bytes = e.bytes;
+    }
+    if (bytes == 0 || i + 2 + bytes > len) return false;
+    if (ch == channel && ty == type) {
+      value = 0;
+      for (uint8_t b = 0; b < bytes; b++) value = (value << 8) | raw[i + 2 + b];
+      return true;
+    }
+    i += size_t(2 + bytes);
+  }
+  return false;
 }
 
 // The four bytes of that field, as a number - what a reader of the LPP gets back.
@@ -1218,10 +1258,11 @@ TEST(TheTelemetry, TheFieldsAreOursOnTheChannelsThatNeverMove) {
   LppField f[kMaxLppFields];
 
   const size_t n = ourFields(s, kPermBase | kPermEnvironment, f, kMaxLppFields);
-  ASSERT_EQ(16u, n);
-  const uint8_t want_channel[] = {2, 2, 3, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+  ASSERT_EQ(18u, n);
+  const uint8_t want_channel[] = {2, 2, 3, 3, 4, 4, 5, 5, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
   const uint8_t want_type[] = {kLppVoltage, kLppCurrent, kLppVoltage, kLppCurrent,
                                kLppVoltage, kLppCurrent, kLppTemperature,
+                               kLppRelativeHumidity, kLppBarometricPressure,
                                kLppGenericSensor, kLppGenericSensor, kLppGenericSensor,
                                kLppGenericSensor, kLppGenericSensor, kLppGenericSensor,
                                kLppGenericSensor, kLppGenericSensor, kLppGenericSensor};
@@ -1237,6 +1278,11 @@ TEST(TheTelemetry, TheFieldsAreOursOnTheChannelsThatNeverMove) {
   static_assert(kLppChannelBattery == 3, "the battery is LPP channel 3");
   static_assert(kLppChannelLoad == 4, "the load is LPP channel 4");
   static_assert(kLppChannelEnclosure == 5, "the enclosure is LPP channel 5");
+  // And the two types p3.12-01 put on that channel, which MeshMaster reads by number as well
+  // (CayenneLPP's own values; src/common/power/BoardPower.cpp holds each against the library's
+  // own macro where the library is compiled, and test_cayennelpp against its bytes).
+  static_assert(kLppRelativeHumidity == 104, "relative humidity is type 104");
+  static_assert(kLppBarometricPressure == 115, "barometric pressure is type 115");
   static_assert(kLppChannelPanelCharge == 6, "the panel's charge is LPP channel 6");
   static_assert(kLppChannelPanelEnergy == 7, "the panel's energy is LPP channel 7");
   static_assert(kLppChannelBatteryChargeIn == 8, "the battery's charge in is LPP channel 8");
@@ -1255,19 +1301,21 @@ TEST(TheTelemetry, OursNeedTheEnvironmentPermissionAndAnInvalidChannelIsLeftOut)
   EXPECT_EQ(0u, ourFields(s, kPermBase, f, kMaxLppFields)) << "base alone gets none of ours";
   EXPECT_EQ(0u, ourFields(s, 0, f, kMaxLppFields));
   EXPECT_EQ(0u, ourFields(s, kPermLocation, f, kMaxLppFields));
-  EXPECT_EQ(16u, ourFields(s, 0xFF, f, kMaxLppFields)) << "an unknown bit is ignored";
+  EXPECT_EQ(18u, ourFields(s, 0xFF, f, kMaxLppFields)) << "an unknown bit is ignored";
 
   // A channel that could not be read is not reported as zero volts, and the channels that are
   // there keep their numbers.
   s.power.ch[1].valid = false;
-  ASSERT_EQ(14u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  ASSERT_EQ(16u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
   EXPECT_EQ(kLppChannelPanel, f[0].channel);
   EXPECT_EQ(kLppChannelLoad, f[2].channel) << "the load is still channel 4";
   EXPECT_EQ(kLppChannelEnclosure, f[4].channel);
-  EXPECT_EQ(kLppChannelPanelCharge, f[5].channel) << "and the totals follow it";
+  EXPECT_EQ(kLppChannelEnclosure, f[6].channel) << "all three of the enclosure's";
+  EXPECT_EQ(kLppChannelPanelCharge, f[7].channel) << "and the totals follow them";
 
   s.env.valid = 0;
-  EXPECT_EQ(13u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  EXPECT_EQ(13u, ourFields(s, kPermEnvironment, f, kMaxLppFields))
+      << "a part that is not there takes all three of its readings out";
 
   // **A total is not a reading.** With not one channel answering, the three readings are gone and
   // the nine totals are still the whole truth about the time before: they are history, and the
@@ -1286,14 +1334,14 @@ TEST(TheTelemetry, TheNineTotalsAreAllOrNoneUntilASweepHasCounted) {
   // A board in its first averaging window: the accumulator has added nothing up, so there is
   // nothing to subtract and a zero would read as a number.
   s.totals_counted = false;
-  ASSERT_EQ(7u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
-  for (size_t i = 0; i < 7; i++) EXPECT_LE(f[i].channel, kLppChannelEnclosure) << "field " << i;
+  ASSERT_EQ(9u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  for (size_t i = 0; i < 9; i++) EXPECT_LE(f[i].channel, kLppChannelEnclosure) << "field " << i;
 
   // And the accumulator itself decides it, through the one function that copies it out.
   PowerTotals totals;
   fillTotals(totals, s);
   EXPECT_FALSE(s.totals_counted) << "nothing has been noted";
-  EXPECT_EQ(7u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  EXPECT_EQ(9u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
 
   PowerReadings r;
   for (uint8_t i = 0; i < kChannels; i++) {
@@ -1305,7 +1353,7 @@ TEST(TheTelemetry, TheNineTotalsAreAllOrNoneUntilASweepHasCounted) {
   ASSERT_TRUE(totals.note(r, kConversionCycleMs));
   fillTotals(totals, s);
   EXPECT_TRUE(s.totals_counted) << "one sweep is enough";
-  EXPECT_EQ(16u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
+  EXPECT_EQ(18u, ourFields(s, kPermEnvironment, f, kMaxLppFields));
 }
 
 TEST(TheTelemetry, TheBytesAreWhatCayenneLppWrites) {
@@ -1315,7 +1363,7 @@ TEST(TheTelemetry, TheBytesAreWhatCayenneLppWrites) {
 
   const size_t n = ourFields(s, kPermEnvironment, f, kMaxLppFields);
   const size_t len = encodeLpp(f, n, out, sizeof(out));
-  EXPECT_EQ(std::string(kOursHex) + kTotalsHex, toHex(out, len));
+  EXPECT_EQ(std::string(kOursHex) + kEnclosureHex + kTotalsHex, toHex(out, len));
 
   // The whole reply: the base voltage, ours, then the MCU's own temperature - and 21.25 C comes
   // out as 212 and not 213, because CayenneLPP truncates where it could round.
@@ -1323,13 +1371,78 @@ TEST(TheTelemetry, TheBytesAreWhatCayenneLppWrites) {
   ASSERT_EQ(n + 2, all);
   ASSERT_EQ(kMaxLppFields, all) << "the longest list this firmware builds";
   const size_t all_len = encodeLpp(f, all, out, sizeof(out));
-  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kTotalsHex + kMcuHex, toHex(out, all_len));
+  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kEnclosureHex + kTotalsHex + kMcuHex,
+            toHex(out, all_len));
+}
+
+TEST(TheTelemetry, TheEnclosuresThreeReadingsAreOnChannelFiveAndSayWhatEnvGetSays) {
+  // The BME280 is read whole, and since p3.12-01 all three of its readings are on the wire a
+  // mesh reader gets. The numbers must be the ones ENV_GET reports for the same snapshot, to the
+  // resolution of each type: a tenth of a degree, half a per cent, a tenth of a hectopascal.
+  FakeSource source;
+  source.s = sampleSnapshot();
+  LinkPower link(source);
+
+  twinoak::link::EnvResponse env;
+  ASSERT_TRUE(link.readEnv(env));
+  ASSERT_EQ(kEnvTemperatureBit | kEnvHumidityBit | kEnvPressureBit, env.valid);
+
+  uint8_t lpp[kMeshLppCap] = {0};
+  const size_t len = link.readLpp(kPermBase | kPermEnvironment, lpp, sizeof(lpp));
+  ASSERT_EQ(kWholeReplyBytes, len);
+
+  uint32_t raw = 0;
+  ASSERT_TRUE(lppField(lpp, len, kLppChannelEnclosure, kLppTemperature, raw));
+  EXPECT_EQ(0xFFDDu, raw) << "-3.50 C, two's-complemented: a signed type";
+  EXPECT_NEAR(double(env.temp_centi) / 100.0, double(int16_t(uint16_t(raw))) / 10.0, 0.1);
+
+  // Both of the new ones are **unsigned** and both are a floor, so the wire reads at or below
+  // what ENV_GET says and never more than one step below it.
+  ASSERT_TRUE(lppField(lpp, len, kLppChannelEnclosure, kLppRelativeHumidity, raw));
+  EXPECT_EQ(162u, raw) << "81.25 % is 162 half-percents, truncated";
+  EXPECT_LE(double(raw) / 2.0, double(env.rh_centi) / 100.0);
+  EXPECT_GT(double(raw) / 2.0 + 0.5, double(env.rh_centi) / 100.0);
+
+  ASSERT_TRUE(lppField(lpp, len, kLppChannelEnclosure, kLppBarometricPressure, raw));
+  EXPECT_EQ(10132u, raw) << "101 325 Pa is 1013.25 hPa, which is 10 132 tenths, truncated";
+  EXPECT_LE(double(raw) / 10.0, double(env.pressure_pa) / 100.0);
+  EXPECT_GT(double(raw) / 10.0 + 0.1, double(env.pressure_pa) / 100.0);
+}
+
+TEST(TheTelemetry, AQuantityTheBme280CouldNotReadLeavesItsFieldOutAndKeepsTheOthers) {
+  // One part, three validity bits (Environment.h): nonsense in one quantity clears its bit, and
+  // a missing reading is left out rather than reported as zero. The two that are there do not
+  // move because the third is gone.
+  LppField f[kMaxLppFields];
+  uint8_t out[kMeshLppCap] = {0};
+  TelemetrySnapshot s = sampleSnapshot();
+
+  s.env.valid = uint8_t(kEnvTemperatureBit | kEnvPressureBit);
+  size_t n = ourFields(s, kPermEnvironment, f, kMaxLppFields);
+  ASSERT_EQ(17u, n) << "the humidity and nothing else is gone";
+  EXPECT_EQ(std::string(kOursHex) + "05732794" + kTotalsHex,
+            toHex(out, encodeLpp(f, n, out, sizeof(out))));
+
+  s.env.valid = uint8_t(kEnvTemperatureBit | kEnvHumidityBit);
+  n = ourFields(s, kPermEnvironment, f, kMaxLppFields);
+  ASSERT_EQ(17u, n) << "the pressure and nothing else is gone";
+  EXPECT_EQ(std::string(kOursHex) + "0568a2" + kTotalsHex,
+            toHex(out, encodeLpp(f, n, out, sizeof(out))));
+
+  // And the temperature is not special: with only the humidity readable, channel 5 is one field.
+  s.env.valid = kEnvHumidityBit;
+  n = ourFields(s, kPermEnvironment, f, kMaxLppFields);
+  ASSERT_EQ(16u, n);
+  EXPECT_EQ(std::string(kOursHex).substr(0, 48) + "0568a2" + kTotalsHex,
+            toHex(out, encodeLpp(f, n, out, sizeof(out))));
 }
 
 TEST(TheTelemetry, ChannelsOneToFiveAreByteForByteWhatTheReleaseBeforeThisAnswered) {
-  // v0.1.2 answered these bytes for this snapshot, and p3.10-02 only *adds* fields: nothing of
-  // channels 1 to 5 moved, so a reader of the release before this one reads the same numbers in
-  // the same places (tasks/phase-3.10/02-the-totals-told.md).
+  // v0.1.2 answered these bytes for this snapshot, and every task since has only *added* fields:
+  // nothing a reader of an older release already knew has moved, so it reads the same numbers in
+  // the same places (tasks/phase-3.10/02-the-totals-told.md). p3.12-01 adds its two inside
+  // channel 5, after the temperature, which is why those 36 bytes are still a prefix and the
+  // enclosure's humidity and pressure are the seven that follow them.
   const TelemetrySnapshot s = sampleSnapshot();
   LppField f[kMaxLppFields];
   uint8_t out[kMeshLppCap] = {0};
@@ -1338,12 +1451,16 @@ TEST(TheTelemetry, ChannelsOneToFiveAreByteForByteWhatTheReleaseBeforeThisAnswer
 
   const std::string before = std::string(kBaseHex) + kOursHex;  // v0.1.2's whole answer, bar the MCU
   EXPECT_EQ(before, hex.substr(0, before.size())) << "channels 1 to 5, unmoved";
+  EXPECT_EQ(std::string(kEnclosureHex), hex.substr(before.size(), 14))
+      << "then p3.12-01's two, after the temperature of the same channel";
   EXPECT_EQ(std::string(kMcuHex), hex.substr(hex.size() - 8)) << "and the MCU's own, still last";
-  // 36 bytes before, 90 after: the nine totals are the 54 between them (docs/link.md 2d, and
-  // p3.10-02's cost line - the bytes are what the airtime is computed from).
+  // 36 bytes before, 97 after: 7 of them the enclosure's humidity and pressure and 54 the nine
+  // totals (docs/link.md 2d, and p3.10-02's and p3.12-01's cost lines - the bytes are what the
+  // airtime is computed from).
   EXPECT_EQ(36u, before.size() / 2 + 4u) << "v0.1.2's whole reply was 36 bytes";
   EXPECT_EQ(kWholeReplyBytes, hex.size() / 2);
-  EXPECT_EQ(54u, hex.size() / 2 - 36u) << "the nine totals, six bytes each";
+  EXPECT_EQ(7u, std::string(kEnclosureHex).size() / 2) << "humidity is three bytes, pressure four";
+  EXPECT_EQ(54u, hex.size() / 2 - 36u - 7u) << "the nine totals, six bytes each";
 }
 
 TEST(TheTelemetry, TheWholeReplyFitsTheMeshCapWithEveryFieldPresent) {
@@ -1354,12 +1471,13 @@ TEST(TheTelemetry, TheWholeReplyFitsTheMeshCapWithEveryFieldPresent) {
   ASSERT_EQ(kMaxLppFields, all);
 
   // Nothing is dropped at the mesh's own cap, which is the cap LPP_GET uses as well: nine
-  // two-byte fields at four bytes each and nine totals at six.
+  // two-byte fields at four bytes each, nine totals at six, the one-byte humidity at three and
+  // the two-byte pressure at four.
   const size_t len = encodeLpp(f, all, out, kMeshLppCap);
   EXPECT_EQ(kWholeReplyBytes, len);
-  EXPECT_EQ(9u * 4u + 9u * 6u, len);
-  EXPECT_LE(len, kMeshLppCap) << "half of the 180 bytes upstream's buffer holds";
-  EXPECT_EQ(90u, kMeshLppCap - len) << "and ninety bytes still free for whatever comes next";
+  EXPECT_EQ(9u * 4u + 9u * 6u + 3u + 4u, len);
+  EXPECT_LE(len, kMeshLppCap) << "well inside the 180 bytes upstream's buffer holds";
+  EXPECT_EQ(83u, kMeshLppCap - len) << "and eighty-three bytes still free for what comes next";
 }
 
 TEST(TheTelemetry, ATotalIsFourUnsignedBytesAndTheFloorOfItsSteps) {
@@ -1496,7 +1614,7 @@ TEST(TheTelemetry, TheMcuTemperatureIsLeftOutWhenItIsNotANumber) {
   const size_t n = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
   uint8_t out[kMeshLppCap] = {0};
   const size_t len = encodeLpp(f, n, out, sizeof(out));
-  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kTotalsHex, toHex(out, len));
+  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kEnclosureHex + kTotalsHex, toHex(out, len));
 }
 
 TEST(TheTelemetry, AFieldThatWouldNotFitIsDroppedAsTheLibraryDropsIt) {
@@ -1505,25 +1623,33 @@ TEST(TheTelemetry, AFieldThatWouldNotFitIsDroppedAsTheLibraryDropsIt) {
   const size_t n = telemetryFields(s, kPermEnvironment, f, kMaxLppFields);
   uint8_t out[64] = {0};
 
-  // A two-byte field is four bytes on the wire, so a cap of five holds exactly one of them.
+  // A two-byte field is four bytes on the wire, so a cap of five holds exactly one of them - and
+  // the walk does not stop at the one it dropped: at a cap of **three** the only field of this
+  // reply that fits is the one-byte humidity of channel 5, so that is what three bytes carry.
   EXPECT_EQ(4u, encodeLpp(f, n, out, 5));
   EXPECT_EQ(std::string(kBaseHex), toHex(out, 4));
-  EXPECT_EQ(0u, encodeLpp(f, n, out, 3));
+  EXPECT_EQ(3u, encodeLpp(f, n, out, 3));
+  EXPECT_EQ(std::string("0568a2"), toHex(out, 3));
+  EXPECT_EQ(0u, encodeLpp(f, n, out, 2)) << "and two bytes carry nothing at all";
 
-  // A total is six, and the library's overflow check is per field and does not stop the walk: at
-  // a cap of 36 the nine totals do not fit (32 + 4 + 2 > 36) and the MCU's own temperature still
-  // does (32 + 2 + 2 = 36), because addField returns 0 for the one and writes the other. Which
-  // is v0.1.2's reply exactly - the shape a cap of 36 would have forced anyway.
-  EXPECT_EQ(36u, encodeLpp(f, n, out, 36));
-  EXPECT_EQ(std::string(kBaseHex) + kOursHex + kMcuHex, toHex(out, 36));
+  // The library's overflow check is **per field and does not stop the walk**, and the fields are
+  // not all one size: at a cap of 36 the first eight are 32 bytes, the one-byte humidity still
+  // fits (32 + 1 + 2 = 35), the two-byte pressure does not (35 + 2 + 2 > 36), and neither do the
+  // six-byte totals or the MCU's own temperature after it - because addField returns 0 for the
+  // ones that would not fit and writes the one that would.
+  EXPECT_EQ(35u, encodeLpp(f, n, out, 36));
+  EXPECT_EQ(std::string(kBaseHex) + kOursHex + "0568a2", toHex(out, 35));
 
-  // A type nothing here knows writes nothing at all - which is CayenneLPP's isType() gate, and
-  // the reason the enclosure's humidity and pressure are on the box link and not in the LPP.
-  LppField unknown;
-  unknown.channel = 6;
-  unknown.type = 104;  // LPP_RELATIVE_HUMIDITY, which CayenneLPP 1.6.1 refuses
-  unknown.value = 44.0f;
-  EXPECT_EQ(0u, encodeLpp(&unknown, 1, out, sizeof(out)));
+  // A type **this firmware** does not write writes nothing at all, which is the mirror's table
+  // standing in for CayenneLPP's isType() gate. LPP_POWER is the case that matters: the library
+  // encodes it perfectly well (test_cayennelpp), and this firmware leaves it out on purpose -
+  // meshmaster.dk computes the watts from the volts and the amps that are already here. So a
+  // field of that type added without a row in kTypes is dropped and not mis-encoded.
+  LppField unwritten;
+  unwritten.channel = 2;
+  unwritten.type = 128;  // LPP_POWER, which this firmware does not send
+  unwritten.value = 2.17f;
+  EXPECT_EQ(0u, encodeLpp(&unwritten, 1, out, sizeof(out)));
 }
 
 // ============================================================================= POWER_GET, ENV_GET

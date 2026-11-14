@@ -475,9 +475,13 @@ own difference against the clock says how much of the interval the other eight a
 The library takes a `float`, so a total above 2^24 steps reads as the nearest representable value —
 never lower than the answer before it — and at the top it **saturates** at 0xFFFFFF00 rather than
 wrapping, because converting a `float` of 2^32 or more to a `uint32_t` is undefined and the ceiling
-is a decision and not a conversion's accident. The whole reply is 90 bytes of the 180 upstream's
-buffer holds, against 36 before, and at the Danish channel's SF8/62.5 kHz/CR 4/8 that is 1033 ms
-of air for a telemetry reply instead of 640 (`tasks/phase-3.10/reports/02.md` has the arithmetic).
+is a decision and not a conversion's accident. The whole reply is **97 bytes** of the 180
+upstream's buffer holds - 36 of them what `v0.1.2` answered, 54 the nine totals and 7 the
+enclosure's humidity and pressure, which `p3.12-01` put on channel 5 beside its temperature - and
+at the Danish channel's SF8/62.5 kHz/CR 4/8 that is **1164 ms** of air for a telemetry reply where
+`v0.1.2` took 640 and the totals alone took 1033 (`tasks/phase-3.10/reports/02.md` and
+`tasks/phase-3.12/reports/01.md` have the arithmetic; the step from 1033 to 1164 is mostly the
+cipher's 16-byte block, which 97 bytes of payload crosses and 90 did not).
 `POWER_GET` does not change: the box link's three readings are the specification's, and whether it
 should carry a total is a change to `spec/LINK-PROTOCOL.md` where it lives.
 
