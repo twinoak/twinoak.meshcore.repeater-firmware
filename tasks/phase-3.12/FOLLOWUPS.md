@@ -15,3 +15,34 @@ Items for a later task of this phase are tagged with it. Only the reviewer ticks
 - [ ] **[Thomas to decide] `main`'s required check and the notes' pull request.** While `main`
   requires `verify`, every release leaves one pull request to merge by hand. meshmaster.dk's
   merges itself because its `master` requires a pull request and no check.
+
+## Review of 01 (14 November)
+
+Read: the branch `task/p3.12-01-humidity-and-pressure` (3804cb8, e125b55; pull request #51, open),
+its report, the three source files it changes, `test/test_cayennelpp`, `docs/link.md` §2d, and
+`logs/STOPPED-01.md`. **The work is done and right; it is not merged, because no CI run can start.**
+
+- The encoding is the library's, held two ways: `static_assert`s against the library's own
+  constants where a board build compiles them, and a native suite that links CayenneLPP 1.6.1 and
+  compares the mirror with it field by field. Types 104 and 115, one and two bytes, half a per
+  cent and a tenth of a hectopascal.
+- Checked outside this repository: both copies of the agent library (`ReplyCodec.cpp` in the
+  exit-node firmware and in the Walter's `components/agent-core`) and meshmaster.dk's
+  `CayenneLpp.cs` decode 104 and 115 at the same size and scale. A reader that did not know 115
+  would have stopped before the totals; none does.
+- The reply is 97 bytes of Cayenne-LPP where v0.1.4 sent 90, by arithmetic and not by a radio.
+- The session's own check of the runners was the finding of the day (below).
+
+- [ ] **[03] No job of this repository has had a runner since 13 November.** The organisation's
+  runner group *Default* is *All repositories, excluding public repositories* (five runners,
+  unraid-1 to 5), and this repository is public. `ci.yml` and `upstream.yml` ask for
+  `[self-hosted, unraid]`. The exit-node firmware and the Walter's, public too, run their CI on
+  `ubuntu-latest`. Task 03 was written for it on the day and runs first.
+- [ ] **[later] `STOPPED-01.md` says `release-notes/v0.1.4`'s pull request is still waiting.** It
+  is not: #50 was merged by hand on 13 November (00472a7). Nothing follows from it.
+- [ ] **[later] Seen on meshmaster.dk, after the release.** Channel 5 of the unit's repeater
+  should show three readings on its Monitoring tab and three charts. Nobody has looked yet,
+  because nothing is released.
+- [ ] **[later] What I told Thomas on 13 November was wrong.** I read the queued run on `main`
+  (43478441183) as waiting behind meshmaster.dk's pile on a busy runner. It was waiting for a
+  runner this repository may no longer use.

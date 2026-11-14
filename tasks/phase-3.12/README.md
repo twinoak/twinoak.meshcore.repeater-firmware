@@ -18,15 +18,23 @@ was wrong; nothing said so.
 | # | Task | Depends on | What it leaves behind |
 |---|---|---|---|
 | 01 | [humidity-and-pressure](01-humidity-and-pressure.md) | — | channel 5 of the telemetry carries the enclosure's humidity and pressure beside its temperature, in the mesh reply and in `LPP_GET` alike; the wrong sentence about the library corrected where it stands |
-| 02 | [the-release-says-what-is-left](02-the-release-says-what-is-left.md) | 01 | a release that published is a green run that names the one pull request left to merge, and that pull request says what is true about its check |
+| 02 | [the-release-says-what-is-left](02-the-release-says-what-is-left.md) | 01, 03 | a release that published is a green run that names the one pull request left to merge, and that pull request says what is true about its check |
+| 03 | [ci-where-a-public-repository-may-run](03-ci-where-a-public-repository-may-run.md) | — | every job of every workflow on a GitHub-hosted runner, the rule and its rail rewritten as the exit node's are; `verify` reports again and a pull request can be merged |
+
+**Order, since 14 November.** 01 stopped with its work done and its pull request (#51) open: this
+repository became public on 13 November and the organisation's runners are not offered to public
+repositories, so `verify` cannot report and nothing can be merged. 03 was added for that and
+**runs first**:
 
 ```powershell
-.\tasks\run-all.ps1 -Phase '3.12'
+.\tasks\run-all.ps1 -Phase '3.12' -From 03 -To 03
+# then, on github.com: pull request #51 -> Update branch -> wait for verify -> merge
+.\tasks\run-all.ps1 -Phase '3.12' -From 02 -To 02
 ```
 
 ## Models
 
-- **Opus**: 01, 02.
+- **Opus**: 01, 02, 03.
 
 ## Afterwards (Thomas)
 

@@ -1,6 +1,6 @@
 # 02 — The release says what is left
 
-**Depends on:** 01 (nothing shared; one pull request at a time).
+**Depends on:** 03 (until it lands no pull request here can be merged) and 01 (one pull request at a time).
 **Spec:** `.github/workflows/release.yml` (the last step ~L500–590: the pull request's body ~L530–545 with *No check runs on this pull request* ~L537; the three ways it ends `exit 1`: the branch not pushed ~L551, the pull request not opened ~L562, not merged after ~L574), `tools/release/` (`release_notes.py`, `gate.py`, their tests), `docs/release.md`, `tasks/phase-3.11/reports/01.md` (~L148–165: `main` requires `verify`); **the Walter firmware, read only, as the model:** its `.github/workflows/release.yml` ~L428–462 (`waiting`: the run stays green and its summary says what is waiting) and its `docs/release.md` (*Expect to merge that pull request by hand*).
 **Size:** one session, short.
 **Model:** claude-opus-5
@@ -19,6 +19,8 @@ What happened, as seen on github.com:
   approval (run 43467131534). Unapproved, it expires after about an hour and is listed as
   failed. The pull request's body says no run starts.
 - The step ends `exit 1`, so a release that published is a red run.
+- On those two days there was also no runner for this repository at all (03), so an approved run
+  would not have started either. After 03 it does.
 
 ## Deliverables
 
