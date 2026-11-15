@@ -5,16 +5,20 @@ RAK4630 and the Walter in the LTE box. The Walter does not exist yet, so this
 page is how a person talks to the link instead: a 3.3 V USB-UART dongle and
 [`tools/linkcli.py`](../tools/linkcli.py).
 
-**This firmware speaks 1.2** (`kProtoMinor` in
+**This firmware speaks 1.3** (`kProtoMinor` in
 [`src/common/link/codec/Numbers.h`](../src/common/link/codec/Numbers.h), which is
 also the image descriptor's `link_minor` and the release manifest's `link`).
 Each minor added one thing and changed nothing else. 1.1: `HELLO`'s answer and
 `EV_BOOT` end with **`band`**, the band the running image was built for. 1.2:
 **`LOCAL_REQUEST`** (§2i), the node's own status, access list, neighbour page or
 owner info over this link with nothing on the air, and the capability bit `0x80`
-that says it is there. A Walter that asks in 1.0 is answered in 1.0 and one that
-asks in 1.1 is answered in 1.1 — so the 0.1.0 Walter on the bench sees exactly
-the bytes it always saw.
+that says it is there. 1.3: the **flood scope** (§2j) — in a session of 1.3 the
+floods the mesh client originates take the radio's default scope, `FLOOD_SCOPE`
+reads that scope's name and asks for one flood without it, and a send's answer
+ends with a `scoped` byte. A Walter that asks in 1.0 is answered in 1.0 and one
+that asks in 1.1 is answered in 1.1 — so the 0.1.0 Walter on the bench sees
+exactly the bytes it always saw, and **a session of 1.2 or older is byte for
+byte and packet for packet what it was**.
 
 What the firmware answers today (phase 1's tasks 03 to 06, and phase 2's
 four): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
@@ -22,12 +26,15 @@ four): `HELLO`, `PING`, `STATUS`, `TIME_SET`, `TIME_GET`, `IDENTITY`,
 `LOCAL_REQUEST`, the four job
 requests `JOB_BEGIN`, `JOB_END`, `PATH_SET` and `PATH_GET`, the five sends
 `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY` and `SEND_TRACE`, the
-reply with `REPLY_GET`, `OBS_PULL` and `MESH_COUNTERS`, and `EV_BOOT`,
-`EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type the
-protocol defines** outside its two reserved ranges (provisioning, phase 3's
-task 03; the bridge role, later). `HELLO`'s `caps` is `0xff`, every bit of it,
+reply with `REPLY_GET`, `OBS_PULL`, `MESH_COUNTERS` and `FLOOD_SCOPE`, and
+`EV_BOOT`, `EV_ATTENTION` and `EV_MESH_REPLY` as events — which is **every type
+the protocol defines** outside its two reserved ranges (provisioning, phase 3's
+task 03; the bridge role, later). `HELLO`'s `caps` is `0x1ff`, every bit of it,
 because a capability is an interface that is there
-(`src/common/link/session/Interfaces.h`).
+(`src/common/link/session/Interfaces.h`) — except on the **released image of
+pile 3.13's task 01**, which answers `0xff`: the link's half of 1.3 is there and
+the board's half is task 02's, so `FLOOD_SCOPE` is `ERR_UNSUPPORTED` and the
+client's floods carry no transport code until that task is in an image.
 `LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
@@ -84,6 +91,7 @@ python3 tools/linkcli.py --port COM7 send-cli "get name"   # run a CLI line on t
 python3 tools/linkcli.py --port COM7 discover     # flood a path discovery to it
 python3 tools/linkcli.py --port COM7 reply        # the reply the last send is waiting for
 python3 tools/linkcli.py --port COM7 counters     # what the radio and the client have sent
+python3 tools/linkcli.py --port COM7 flood-scope  # which scope the next flood takes
 python3 tools/linkcli.py --port COM7 job end      # forget the peer
 python3 tools/linkcli.py --port COM7 obs          # collect the adverts the node heard
 ```
@@ -93,12 +101,12 @@ is how you learn what you are talking to:
 
 ```
 HELLO
-  protocol      1.2
+  protocol      1.3
   role          1 (repeater)
   slot          0
   max_payload   240
-  caps          0xff (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST,
-                LOCAL_REQUEST)
+  caps          0x1ff (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION, TIME_PERSIST,
+                LOCAL_REQUEST, FLOOD_SCOPE)
   boot_id       0x5eed1234
   fw_version    0.0.0-dev
   board         rak4630-single
@@ -106,22 +114,36 @@ HELLO
   band          868
 ```
 
+**Every other sub-command says `hello` first, quietly**, because since 1.3 what
+the session is decides what other messages do (§2j): `linkcli.py` opens its
+session with one `HELLO` before its first other request, exactly as the Walter
+does, rather than speaking 1.0 by accident. One invocation is one session — each
+one opens the port afresh — so `flood-scope --once-without` and the send it is
+for have to be **one** invocation to mean anything. `-v` shows that first frame.
+
 - `boot_id` is random and drawn once per boot, from the radio's noise listener.
   **A changed `boot_id` means the node restarted** and every piece of per-boot
   state is gone.
 - `fw_version` is the release's own version — `0.0.0-dev` in a local build —
   and `upstream` is the MeshCore it is built on, `<tag>+<pin8>`. The USB
   console's `sensor get fw.version` says both in one sentence instead.
-- `caps` is `0xff` — every bit the protocol defines (1.1 added none; 1.2 added
-  `LOCAL_REQUEST` `0x80`). A capability is an interface that is there, so a build
-  that left one out would simply not advertise it and would answer
-  `ERR_UNSUPPORTED` for its requests.
+- `caps` is `0x1ff` — every bit the protocol defines (1.1 added none; 1.2 added
+  `LOCAL_REQUEST` `0x80`; 1.3 added `FLOOD_SCOPE` `0x100`). A capability is an
+  interface that is there, so a build that left one out simply does not
+  advertise it and answers `ERR_UNSUPPORTED` for its requests — which is what
+  the image of pile 3.13's task 01 does for `FLOOD_SCOPE`, `caps` `0xff`.
+  **`caps` is what the radio can do, not what the session speaks**: a 1.3 radio
+  answering a 1.2 request says `protocol 1.2` with `0x100` still in its `caps`,
+  and §5.1 says a Walter ignores a bit it does not know.
 - `protocol` is the version **this session** speaks: the highest minor both ends
-  know (§5.1, *Versions*). `linkcli.py` asks in 1.2, so it is answered 1.2. A
+  know (§5.1, *Versions*). `linkcli.py` asks in 1.3, so it is answered 1.3. A
   1.1 Walter asks in 1.1 and is answered 1.1 — the same bytes it has always been
-  answered, with `caps` carrying one bit it does not know, which §5.1 says it
+  answered, with `caps` carrying bits it does not know, which §5.1 says it
   ignores. A 1.0 Walter asks in 1.0, is answered 1.0, and gets no `band` line —
-  which is the whole of what 1.1 changed.
+  which is the whole of what 1.1 changed. Since 1.3 the session's version is
+  **remembered**: it is what the last `HELLO`'s answer named, 1.0 before any
+  `HELLO` of this boot, and a `HELLO` of 1.2 after one of 1.3 is a session of
+  1.2 again (§2j).
 - `band` is `role` and `board`'s third: the three together are what a release's
   image is chosen by (`spec/FIRMWARE-MANIFEST.md`), and `HELLO` is where the
   Walter reads them until its first install through itself commits. It is read
@@ -150,8 +172,9 @@ into a report when a frame is refused.
 
 A capability is an interface that is there (`src/common/link/session/Interfaces.h`), so
 this table is `caps` read the other way round: what each bit buys, and what a
-build without it would answer. `0xff` is every bit the protocol defines, which is
-what this role has.
+build without it would answer. `0x1ff` is every bit the protocol defines; the
+image of pile 3.13's task 01 answers `0xff`, because `FLOOD_SCOPE`'s interface
+is the board's half and arrives with task 02.
 
 | Request | Capability bit | Where it is walked |
 |---|---|---|
@@ -166,6 +189,7 @@ what this role has.
 | `JOB_BEGIN`, `JOB_END`, `PATH_SET`, `PATH_GET` | `MESH_CLIENT` `0x08` | §2e |
 | `SEND_LOGIN`, `SEND_REQUEST`, `SEND_CLI`, `SEND_DISCOVERY`, `SEND_TRACE`, `REPLY_GET`, `MESH_COUNTERS` | `MESH_CLIENT` `0x08` | §2f, §2h |
 | `OBS_PULL` | `OBSERVATIONS` `0x10` | §2g |
+| `FLOOD_SCOPE` | `FLOOD_SCOPE` `0x100` | §2j |
 
 One exception among the five that are always there: a node that has **refused to make
 itself a key** (`src/roles/repeater/app/IdentityGuard.h`: its file system would not mount,
@@ -185,7 +209,7 @@ and `reboot` and answers every other line with the `IDENTITY LOST` explanation
 A request whose bit is absent is answered **`ERR_UNSUPPORTED`** and nothing
 else; a request type this protocol version does not define at all is
 `ERR_UNSUPPORTED` too. Nothing in the firmware keeps a second list of what a
-build can do, so a `caps` of `0xff` and this table cannot drift apart.
+build can do, so `caps` and this table cannot drift apart.
 
 ## 2a. The clock
 
@@ -643,6 +667,7 @@ SEND_LOGIN **********
   send          1 (sent as a flood)
   tag           0x00000000  (the next reply from the peer)
   sender_ts     1791720050 (2026-10-11 ...)
+  scoped        1 (the flood carried a transport code of the default scope)
 REPLY
   state         3 (response)
   tag           0x6acb7a72
@@ -694,6 +719,12 @@ REPLY
   and `obs_dropped`; §2g).
 - **`STATUS`'s flag bit 1** (`reply awaited`) is on from a send with a timeout
   until its reply or its deadline.
+- **`scoped`** is link 1.3's one addition, at the end of every send's answer
+  (§2j): 1 when the packet went out as a flood carrying a transport code of the
+  radio's default scope, 0 for a direct send, a flood without one, and when
+  nothing was sent. It is **what happened and not what was asked**. In a session
+  of 1.2 or older the line is not there at all, which is what a 1.2 Walter still
+  reads.
 
 ## 2g. Observations: the adverts the node heard
 
@@ -884,6 +915,62 @@ The four, with MeshCore's own numbers (§5.9's table):
   (bit `0x80` absent), which is why those jobs answered *Failed* and not
   *Unsupported* before.
 
+## 2j. The flood scope: which floods carry the region's code
+
+A repeater's **default scope** is the region its `region default` names.
+MeshCore sends the node's own flooded adverts in it — a transport code made from
+the region's key and the packet itself — and a repeater forwards such a flood
+when it holds that region with flood allowed. A flood with **no** code is
+forwarded only while a repeater's wildcard allows flood, and only for
+`flood.max.unscoped` hops.
+
+Until 1.3 every flood the mesh client originated went out with no code, whatever
+`region default` said: a unit's own adverts were scoped and the logins it sent
+for its Walter were not. **In a session of 1.3** those floods go out exactly as
+the node's own flooded advert does — through upstream's own `sendFloodScoped`
+with upstream's own default scope — and the Walter can ask for one flood without
+it, because a repeater that does not hold the region drops a scoped flood and
+would have forwarded the unscoped one (meshmaster.dk's D-47: the scope first,
+then one try without it).
+
+```
+$ python3 tools/linkcli.py --port COM7 flood-scope
+FLOOD_SCOPE mode 0
+  mode          1 (the next flood takes the default scope)
+  scope         dk
+$ python3 tools/linkcli.py --port COM7 flood-scope --once-without
+FLOOD_SCOPE mode 2
+  mode          2 (the next flood carries no transport code)
+  scope         dk
+```
+
+- **`flood-scope`** asks and changes nothing; **`--once-without`** is mode 2 and
+  **`--scoped`** is mode 1, which is what holds when nothing was asked. `mode`
+  in the answer is what the *next* send will be, and `scope` is the default
+  scope's name as `region default` prints it, without a leading `#` — 1 to 30
+  bytes, or empty on a radio that holds none.
+- **Mode 2 is for one send.** The next `SEND_*` the RAK executes puts the mode
+  back to 1 whatever that send came to — a flood, a direct send, nothing sent or
+  a refusal — and so do `job begin`, `job end`, and the job the RAK ends by
+  itself after 120 seconds of link silence. A link-level retry of a send is not
+  executed again and changes nothing. So the two have to be one invocation of
+  this tool, or the second one's `HELLO` finds the mode already back.
+- **No job is needed**, nothing goes on the air, and `client_tx` does not move.
+  With mode 0 this is how to read the scope's name — after `hello`, and whenever
+  a send's `scoped` was not what you expected.
+- **What is scoped**: a `login`, a `request` or a `send-cli` of a job with no
+  path, and every `discover`. A direct send and a `trace` carry no scope and are
+  untouched.
+- **The refusals**: `ERR_UNSUPPORTED` on a radio whose `caps` lack `FLOOD_SCOPE`
+  — which is the image of pile 3.13's task 01, and its floods carry no code;
+  `ERR_STATE` in a session older than 1.3 (nothing is scoped there, and there is
+  no mode to set); `ERR_RANGE` for a mode that is none of the three;
+  `ERR_MALFORMED` for a payload with no mode byte at all.
+- The RAK **derives no key and computes no code of its own**: the scope is
+  upstream's and the code is upstream's. A default scope that changes — a
+  `region default` over the mesh, or a `cli "region default dk"` on this link —
+  is in force for the next send.
+
 ## 3. When it says nothing
 
 - `linkcli.py` retries exactly as the protocol says: the same frame, the same
@@ -929,7 +1016,7 @@ docker run --rm -v "$PWD:/w" -w /w python:3.11-slim bash tools/linkloop/check.sh
 
 That builds the loopback, runs `hello`, `ping`, `status`, `identity`, `time`,
 `time set`, `cli`, `power`, `env`, `lpp`, `local` and its four refusals, the
-job, the five sends, `obs`,
+job, the five sends, `flood-scope` and the `scoped` byte, `obs`,
 `sleep`, an attention, the first-boot profile, `provision` and `reboot` against
 it, and times one pass of the link.
 **`tools/verify.ps1` runs it**, in the native step and with that step's own
@@ -963,7 +1050,9 @@ invocation is otherwise a fresh boot with neither). `--obs-wake` turns the
 which runs the shipped profile through the program's own stand-in for upstream's
 `set` branch - so `sensor get firstboot.state` says `done` rather than `never`,
 and `provision` has something that answers a `set`, a `region` line and a
-`password` line the way upstream does.
+`password` line the way upstream does. `--no-scope` is a node whose
+`region default` names nothing, which is how §2j's *empty name* and a flood that
+was asked scoped and went out without one are watched with no board.
 
 ## 5. Inside the firmware
 

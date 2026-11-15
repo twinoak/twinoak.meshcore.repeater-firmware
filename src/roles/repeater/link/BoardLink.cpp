@@ -244,6 +244,12 @@ void linkBegin(TwinOakMesh& mesh) {
   // (spec/LINK-PROTOCOL.md section 7). The ring is filled from TwinOakMesh::onAdvertRecv through
   // noteAdvert() below, not from here.
   g_services.observations = &g_observations;  // => kCapObservations; caps is now 0xff
+  // **No `flood_scope`, on purpose** (spec/LINK-PROTOCOL.md 6.5, link 1.3). The link's half of
+  // the flood scope is pile 3.13's task 01 - the session remembers its version, FLOOD_SCOPE is a
+  // message, a send's answer ends with `scoped`, and a flood's Route carries the request - and
+  // the board's half, which is upstream's own sendFloodScoped with upstream's own default scope,
+  // is its task 02. Until that task fills this in, `caps` carries no 0x100, FLOOD_SCOPE is
+  // kErrUnsupported and the client's floods go out with no transport code, as they always did.
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 

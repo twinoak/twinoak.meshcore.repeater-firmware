@@ -229,6 +229,15 @@ bool decodeSendTrace(Bytes payload, SendTrace& out) {
   return r.ok();
 }
 
+bool decodeFloodScope(Bytes payload, FloodScope& out) {
+  Reader r(payload);
+  out.mode = r.u8();
+  // "No mode at all" is the one malformed shape section 6.5 has: the Reader is not ok() when
+  // there was not a byte to read. A mode outside 0..2 is **decoded**, not refused here - it is
+  // kErrRange, and the session gives it (isFloodScopeMode, Numbers.h), as REBOOT's mode is.
+  return r.ok();
+}
+
 bool decodeObsPull(Bytes payload, ObsPull& out) {
   Reader r(payload);
   out.max = r.u8();
@@ -355,6 +364,25 @@ size_t encodeSendResponse(const SendResponse& in, uint8_t* out, size_t cap) {
   w.u8(in.send);
   w.u32(in.tag);
   w.u32(in.sender_ts);
+  // 1.3's one addition, at the end of the body, and only in a session of 1.3 or later (section
+  // 6.2, the `scoped` row): a Walter that does not know section 6.5 is answered the bytes it has
+  // always been answered. The field is filled in whatever the session's version is - the client
+  // reports what the packet actually carried - and an older session simply does not carry it. The
+  // reference does the same (spec/tools/linkref.py, the SEND_* branch of enc_fields).
+  if (in.session_minor >= 3) w.u8(in.scoped);
+  return w.ok() ? w.size() : 0;
+}
+
+size_t encodeFloodScopeResponse(const FloodScopeResponse& in, uint8_t* out, size_t cap) {
+  // "Response body: mode, 1 or 2, what the next send will be; then the default scope's name, 1 to
+  // 30 bytes, or empty" (section 6.5). kFloodScopeAsk is a request and never an answer, so a
+  // caller that passes it is refused rather than put on the wire.
+  if (in.mode != kFloodScopeOn && in.mode != kFloodScopeOnceOff) return 0;
+  if (in.scope.len > kScopeNameMax) return 0;
+  Writer w(out, cap);
+  w.u8(kOk);
+  w.u8(in.mode);
+  w.str8(in.scope);
   return w.ok() ? w.size() : 0;
 }
 

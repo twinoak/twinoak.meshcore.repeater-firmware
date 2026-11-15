@@ -13,6 +13,8 @@
 //   - a CLI line's timestamp is this node's unique second, strictly above the last the repeater
 //     saw from this key, or it is not run;
 //   - a discovery always floods, whatever path the job holds;
+//   - a flood of a session of 1.3 takes the node's default scope, and a direct send and a trace
+//     never do (link 1.3, spec/LINK-PROTOCOL.md 6.5; the session works out which);
 //   - a trace cannot carry three-byte hashes, because its flags byte states the hash size as an
 //     exponent;
 //   - no reciprocal path is ever sent: one packet per send.
@@ -108,6 +110,17 @@ class LinkMeshClient : public link::MeshClientAccess {
   bool takeReplyEvent(link::ReplyRecord& out, uint32_t now_ms) override;
   void getCounters(link::MeshCountersResponse& out) override;
 
+  // Link 1.3 (6.5). Whether the **next** flood takes the node's default scope is the session's
+  // to work out and is simply remembered here, for the route the next send builds; a direct send
+  // and a trace are never scoped whatever it says. The job the silence rule ended is reported
+  // once, because FLOOD_SCOPE's mode goes back with it.
+  void setFloodScoped(bool scoped) override { flood_scoped_ = scoped; }
+  bool takeSilentJobEnd() override {
+    const bool ended = silent_job_end_;
+    silent_job_end_ = false;
+    return ended;
+  }
+
   // --- the board's side -------------------------------------------------------------------
 
   // Once a pass, from the board's link loop: the job's silence rule (Job::loop) and the reply's
@@ -148,8 +161,9 @@ class LinkMeshClient : public link::MeshClientAccess {
   // and 2), a flood without one.
   Route routeOfJob() const;
   // What every successful send ends with: the count, the answer, and the wait armed in the same
-  // step when `timeout_ms` is not 0 (6.2, "no reply can slip between them").
-  void sent(uint8_t await_kind, uint32_t tag, uint32_t sender_ts, bool flooded,
+  // step when `timeout_ms` is not 0 (6.2, "no reply can slip between them"). `scoped` is the
+  // port's answer - what went on the packet - and is only ever reported for a flood.
+  void sent(uint8_t await_kind, uint32_t tag, uint32_t sender_ts, bool flooded, bool scoped,
             uint32_t timeout_ms, link::SendResponse& out, uint32_t now_ms);
   // The deadline, looked at: a pending reply whose time is up becomes a timeout, once.
   void checkDeadline(uint32_t now_ms);
@@ -160,6 +174,11 @@ class LinkMeshClient : public link::MeshClientAccess {
   Reply reply_;
   SendCeiling ceiling_;
   uint32_t client_tx_ = 0;
+  // Link 1.3 (6.5): what the session last said about the next flood, and the self-ended job
+  // waiting to be reported. Both are false on a boot, which is a session of 1.0 flooding
+  // unscoped - what every session did before 1.3.
+  bool flood_scoped_ = false;
+  bool silent_job_end_ = false;
 };
 
 // Zeroes `len` bytes at `p` through a volatile pointer, so that the optimiser keeps the stores:

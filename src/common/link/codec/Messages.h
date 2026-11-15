@@ -1,4 +1,4 @@
-// Every message of protocol 1.2 as a plain struct and the one function this firmware needs for
+// Every message of protocol 1.3 as a plain struct and the one function this firmware needs for
 // it: a decoder for every request, an encoder for every response and every event
 // (spec/LINK-PROTOCOL.md sections 5 to 8). Only the Walter sends requests and only the RAK sends
 // events, so the other half of each pair is the Walter's firmware's and is not here.
@@ -172,6 +172,13 @@ struct SendTrace {
   Bytes hashes;
 };
 
+// FLOOD_SCOPE (section 6.5, new in 1.3). `mode` is passed up whatever it is: "any other mode is
+// ERR_RANGE" and that is the session's answer to give, as REBOOT's mode is. A payload with no
+// mode at all - not one byte - is ERR_MALFORMED and the decoder refuses it.
+struct FloodScope {
+  uint8_t mode = kFloodScopeAsk;
+};
+
 struct ObsPull {
   uint8_t max = 0;
 };
@@ -196,6 +203,7 @@ bool decodeSendRequest(Bytes payload, SendRequest& out);
 bool decodeSendCli(Bytes payload, SendCli& out);
 bool decodeSendDiscovery(Bytes payload, SendDiscovery& out);
 bool decodeSendTrace(Bytes payload, SendTrace& out);
+bool decodeFloodScope(Bytes payload, FloodScope& out);
 bool decodeObsPull(Bytes payload, ObsPull& out);
 
 // ----------------------------------------------------------------------------- responses (encode)
@@ -264,10 +272,30 @@ struct LocalResponse {
 };
 
 // The answer to every one of the five sends (section 6.2).
+//
+// `scoped` is 1.3's one addition, at the end, and it is what *happened* and not what was asked:
+// 1 for a flood that carried a transport code of the default scope, 0 for a direct send, a flood
+// without one, and when nothing was sent (section 6.5). The encoder writes it only when
+// `session_minor` is 3 or more, so a session of 1.2 is answered byte for byte what it always was.
+//
+// `session_minor` is not on the wire. It is the version of the session this answer belongs to -
+// what the last HELLO's answer named (section 5.1, "The session's version") - and the session
+// fills it in; it is the same rule HelloBody's own `proto_minor` carries for 1.1's `band`, in the
+// one place that knows it.
 struct SendResponse {
   uint8_t send = kSendNothing;
   uint32_t tag = 0;
   uint32_t sender_ts = 0;
+  uint8_t scoped = 0;         // 1.3 only: written when session_minor >= 3
+  uint8_t session_minor = 0;  // not on the wire: the session's version (section 5.1)
+};
+
+// FLOOD_SCOPE's answer (section 6.5): the mode the next send will have - kFloodScopeOn or
+// kFloodScopeOnceOff, never kFloodScopeAsk - and the default scope's name, 0 to kScopeNameMax
+// bytes. An empty name is a radio that holds no default scope, and is a legal answer.
+struct FloodScopeResponse {
+  uint8_t mode = kFloodScopeOn;
+  Bytes scope;
 };
 
 struct ObsPullResponse {
@@ -315,6 +343,7 @@ size_t encodeSendResponse(const SendResponse& in, uint8_t* out, size_t cap);
 size_t encodeReplyGetResponse(const ReplyRecord& in, uint8_t* out, size_t cap);
 size_t encodeObsPullResponse(const ObsPullResponse& in, uint8_t* out, size_t cap);
 size_t encodeMeshCountersResponse(const MeshCountersResponse& in, uint8_t* out, size_t cap);
+size_t encodeFloodScopeResponse(const FloodScopeResponse& in, uint8_t* out, size_t cap);
 
 // ----------------------------------------------------------------------------- events (encode)
 

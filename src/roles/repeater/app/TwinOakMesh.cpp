@@ -215,8 +215,10 @@ uint32_t TwinOakMesh::uniqueTime() {
 
 void TwinOakMesh::randomBytes(uint8_t* dest, size_t len) { getRNG()->random(dest, len); }
 
-bool TwinOakMesh::dispatch(mesh::Packet* pkt, const twinoak::meshclient::Route& route) {
-  if (pkt == nullptr) return false;  // the pool was empty: nothing was built, nothing is sent
+twinoak::meshclient::PacketSent TwinOakMesh::dispatch(
+    mesh::Packet* pkt, const twinoak::meshclient::Route& route) {
+  twinoak::meshclient::PacketSent put;
+  if (pkt == nullptr) return put;  // the pool was empty: nothing was built, nothing is sent
   // The packet carries this node's unique second: a backwards TIME_SET is unsafe from here on
   // (src/roles/repeater/clock/ClockKeeper.h), and the keeper is told before the packet is in the queue.
   twinoak::clock::noteTimestampEmitted();
@@ -230,11 +232,18 @@ bool TwinOakMesh::dispatch(mesh::Packet* pkt, const twinoak::meshclient::Route& 
     // defaults the argument to 1 (src/Mesh.h), the agent firmware passes 2, and so does this.
     sendFlood(pkt, 0, twinoak::meshclient::kFloodPathHashSize);
   }
-  return true;
+  put.queued = true;
+  // `put.scoped` stays false, and `route.scoped` is not read: **this board does not scope a
+  // flood yet.** The link's half of 1.3 is behind `FloodScopeAccess`, which nothing here
+  // implements (src/roles/repeater/link/BoardLink.cpp hands the session no `flood_scope`), so
+  // `caps` carries no 0x100, FLOOD_SCOPE is ERR_UNSUPPORTED, and the two upstream calls above are
+  // what they were. Pile 3.13's task 02 is the one that reaches `sendFloodScoped(default_scope,
+  // ...)` and answers this byte from what went on the packet (spec/LINK-PROTOCOL.md 6.5).
+  return put;
 }
 
-bool TwinOakMesh::sendAnonRequest(const uint8_t* plain, size_t len,
-                                  const twinoak::meshclient::Route& route) {
+twinoak::meshclient::PacketSent TwinOakMesh::sendAnonRequest(
+    const uint8_t* plain, size_t len, const twinoak::meshclient::Route& route) {
   // Mesh::createAnonDatagram (src/Mesh.cpp:512-538): PAYLOAD_TYPE_ANON_REQ, the peer's hash,
   // this node's **public key** in the clear, then the plaintext encrypted and MACed with the
   // ECDH secret of the two - which the receiving repeater recomputes from that key
@@ -246,8 +255,9 @@ bool TwinOakMesh::sendAnonRequest(const uint8_t* plain, size_t len,
   return dispatch(pkt, route);
 }
 
-bool TwinOakMesh::sendDatagram(uint8_t payload_type, const uint8_t* plain, size_t len,
-                               const twinoak::meshclient::Route& route) {
+twinoak::meshclient::PacketSent TwinOakMesh::sendDatagram(
+    uint8_t payload_type, const uint8_t* plain, size_t len,
+    const twinoak::meshclient::Route& route) {
   // Mesh::createDatagram (src/Mesh.cpp:488-510): the type (REQ or TXT_MSG here), the peer's hash,
   // this node's hash, then the plaintext encrypted and MACed with the job's secret - which the
   // repeater has from the login (MyMesh::handleLoginReq copies it into the ACL entry,
@@ -258,8 +268,9 @@ bool TwinOakMesh::sendDatagram(uint8_t payload_type, const uint8_t* plain, size_
   return dispatch(pkt, route);
 }
 
-bool TwinOakMesh::sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags, const uint8_t* path,
-                            uint8_t path_bytes) {
+twinoak::meshclient::PacketSent TwinOakMesh::sendTrace(uint32_t tag, uint32_t auth_code,
+                                                       uint8_t flags, const uint8_t* path,
+                                                       uint8_t path_bytes) {
   // Mesh::createTrace (src/Mesh.cpp:605-619): a 9-byte payload - tag, auth code, flags - to which
   // sendDirect appends the path (:698-701): "for TRACE packets, path is appended to end of
   // PAYLOAD (path is used for SNR's)", and the packet's own path_len is 0 for the hops to fill

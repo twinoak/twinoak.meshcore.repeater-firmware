@@ -78,11 +78,15 @@ Route LinkMeshClient::routeOfJob() const {
   r.direct = job_.pathMode() != kPathNone;
   r.path = job_.pathBytes();
   r.path_len = job_.pathLen();
+  // Link 1.3 (6.5): "a direct send and a trace carry no scope and are untouched", so the scope is
+  // asked for only where this route is a flood - and then whatever the session last said.
+  r.scoped = !r.direct && flood_scoped_;
   return r;
 }
 
 void LinkMeshClient::sent(uint8_t await_kind, uint32_t tag, uint32_t sender_ts, bool flooded,
-                          uint32_t timeout_ms, link::SendResponse& out, uint32_t now_ms) {
+                          bool scoped, uint32_t timeout_ms, link::SendResponse& out,
+                          uint32_t now_ms) {
   client_tx_++;  // one per send, and nothing else (6.4)
   // The ceiling is counted in the same two lines as client_tx, and nowhere else: whatever counts
   // as a send for the Walter's transaction count counts as one against the ceiling
@@ -91,6 +95,11 @@ void LinkMeshClient::sent(uint8_t await_kind, uint32_t tag, uint32_t sender_ts, 
   out.send = flooded ? link::kSendFlood : link::kSendDirect;
   out.tag = tag;
   out.sender_ts = sender_ts;
+  // "1 for a flood that carried the code; 0 for a direct send, a flood without one, and nothing
+  // sent" (6.2's `scoped` row). The port's answer and this route's both have to hold: a port that
+  // said yes to a direct send could not make this byte a 1. Whether the byte is on the wire at
+  // all is the session's version, and the session fills that in.
+  out.scoped = (flooded && scoped) ? 1 : 0;
   if (timeout_ms == 0) {
     // "timeout_ms of 0 means nothing is awaited" - and the record held from the last exchange
     // is let go, as any send lets it go.
@@ -128,12 +137,12 @@ uint8_t LinkMeshClient::sendLogin(const link::SendLogin& m, link::SendResponse& 
   memcpy(plain, &ts, 4);
   if (m.password.len > 0) memcpy(&plain[4], m.password.ptr, m.password.len);
   const Route route = routeOfJob();
-  const bool ok = port_.sendAnonRequest(plain, 4 + m.password.len, route);
+  const PacketSent put = port_.sendAnonRequest(plain, 4 + m.password.len, route);
   // The one plaintext copy this file ever holds of a password, gone before this returns - sent or
   // not. The packet's own body is ciphertext.
   wipeBytes(plain, sizeof plain);
-  if (!ok) return link::kErrFailed;
-  sent(kAwaitResponse, /*tag=*/0, ts, !route.direct, m.timeout_ms, out, now_ms);
+  if (!put.queued) return link::kErrFailed;
+  sent(kAwaitResponse, /*tag=*/0, ts, !route.direct, put.scoped, m.timeout_ms, out, now_ms);
   return link::kOk;
 }
 
@@ -155,10 +164,11 @@ uint8_t LinkMeshClient::sendRequest(const link::SendRequest& m, link::SendRespon
   plain[4] = m.req_type;
   if (m.data.len > 0) memcpy(&plain[kRequestHeader], m.data.ptr, m.data.len);
   const Route route = routeOfJob();
-  const bool ok = port_.sendDatagram(kPayloadTypeReq, plain, kRequestHeader + m.data.len, route);
+  const PacketSent put =
+      port_.sendDatagram(kPayloadTypeReq, plain, kRequestHeader + m.data.len, route);
   wipeBytes(plain, sizeof plain);
-  if (!ok) return link::kErrFailed;
-  sent(kAwaitResponse, ts, ts, !route.direct, m.timeout_ms, out, now_ms);
+  if (!put.queued) return link::kErrFailed;
+  sent(kAwaitResponse, ts, ts, !route.direct, put.scoped, m.timeout_ms, out, now_ms);
   return link::kOk;
 }
 
@@ -184,13 +194,14 @@ uint8_t LinkMeshClient::sendCli(const link::SendCli& m, link::SendResponse& out,
   plain[4] = uint8_t(kTxtTypeCliData << 2);
   memcpy(&plain[kCliHeader], m.text.ptr, m.text.len);
   const Route route = routeOfJob();
-  const bool ok = port_.sendDatagram(kPayloadTypeTxtMsg, plain, kCliHeader + m.text.len, route);
+  const PacketSent put =
+      port_.sendDatagram(kPayloadTypeTxtMsg, plain, kCliHeader + m.text.len, route);
   // Wiped whether or not the Walter flagged the line sensitive: a `password <new>` it forgot to
   // flag is gone all the same, and the cost is a loop over 167 bytes.
   wipeBytes(plain, sizeof plain);
-  if (!ok) return link::kErrFailed;
+  if (!put.queued) return link::kErrFailed;
   // Tag 0: a CLI reply carries the repeater's own timestamp and no tag (6.2).
-  sent(kAwaitText, /*tag=*/0, ts, !route.direct, m.timeout_ms, out, now_ms);
+  sent(kAwaitText, /*tag=*/0, ts, !route.direct, put.scoped, m.timeout_ms, out, now_ms);
   return link::kOk;
 }
 
@@ -213,10 +224,14 @@ uint8_t LinkMeshClient::sendDiscovery(const link::SendDiscovery& m, link::SendRe
   plain[6] = plain[7] = plain[8] = 0;
   port_.randomBytes(&plain[9], 4);
   Route flood;  // never direct
-  const bool ok = port_.sendDatagram(kPayloadTypeReq, plain, sizeof plain, flood);
+  // "That is a SEND_LOGIN, SEND_REQUEST or SEND_CLI of a job with no path, and every
+  // SEND_DISCOVERY" (6.5): a discovery is a flood whatever path the job holds, so it takes the
+  // scope whenever the session says so.
+  flood.scoped = flood_scoped_;
+  const PacketSent put = port_.sendDatagram(kPayloadTypeReq, plain, sizeof plain, flood);
   wipeBytes(plain, sizeof plain);
-  if (!ok) return link::kErrFailed;
-  sent(kAwaitResponse, ts, ts, /*flooded=*/true, m.timeout_ms, out, now_ms);
+  if (!put.queued) return link::kErrFailed;
+  sent(kAwaitResponse, ts, ts, /*flooded=*/true, put.scoped, m.timeout_ms, out, now_ms);
   return link::kOk;
 }
 
@@ -249,9 +264,11 @@ uint8_t LinkMeshClient::sendTrace(const link::SendTrace& m, link::SendResponse& 
   const uint32_t ts = port_.uniqueTime();
   uint32_t auth = 0;
   port_.randomBytes(reinterpret_cast<uint8_t*>(&auth), 4);
-  // Always direct: the hops are the path, and every one appends its SNR on the way.
-  if (!port_.sendTrace(ts, auth, flags, m.hashes.ptr, m.hashes.len)) return link::kErrFailed;
-  sent(kAwaitTrace, ts, ts, /*flooded=*/false, m.timeout_ms, out, now_ms);
+  // Always direct: the hops are the path, and every one appends its SNR on the way. And never
+  // scoped - a trace is not a flood (6.5) - which `flooded` false already settles.
+  const PacketSent put = port_.sendTrace(ts, auth, flags, m.hashes.ptr, m.hashes.len);
+  if (!put.queued) return link::kErrFailed;
+  sent(kAwaitTrace, ts, ts, /*flooded=*/false, put.scoped, m.timeout_ms, out, now_ms);
   return link::kOk;
 }
 
@@ -268,7 +285,12 @@ void LinkMeshClient::checkDeadline(uint32_t now_ms) {
 void LinkMeshClient::loop(uint32_t now_ms) {
   checkDeadline(now_ms);
   // The silence rule ends the job - and with it anything awaited or held (6.1, JOB_END's words).
-  if (job_.loop(now_ms)) reply_.clear();
+  // It is noted for the link too: "so do JOB_BEGIN and JOB_END" of 6.5 covers the job the RAK
+  // ends by itself, so the session asks once a pass (takeSilentJobEnd) and puts the mode back.
+  if (job_.loop(now_ms)) {
+    reply_.clear();
+    silent_job_end_ = true;
+  }
 }
 
 void LinkMeshClient::fill(link::ReplyRecord& out, uint32_t now_ms) const {

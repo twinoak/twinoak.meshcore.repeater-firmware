@@ -49,11 +49,18 @@ job.
     python3 tools/linkcli.py --port COM7 trace 7f3aa1b27f3a46f6
     python3 tools/linkcli.py --port COM7 reply                 # the reply record as it stands
     python3 tools/linkcli.py --port COM7 counters              # MESH_COUNTERS
+    python3 tools/linkcli.py --port COM7 flood-scope           # which scope the next flood takes
+    python3 tools/linkcli.py --port COM7 flood-scope --once-without
 
 The five sends (phase 2's task 02): on the job's behalf the RAK logs in to its peer, asks it
 something, sends it a CLI line, floods a discovery or traces a path, and reports the reply as an
 `EV_MESH_REPLY` event (which `listen` shows) and on `reply`. Each send is one packet on the air.
 A password is read from a prompt, never the command line, and printed as stars.
+
+`flood-scope` (pile 3.13, **link 1.3**, §6.5) reads the default scope the next flood will take and
+can ask for **one** flood without it; every send's answer then says whether a transport code went
+on the packet. It needs a session of 1.3, which this tool always asks for, and a radio whose
+`caps` carry `FLOOD_SCOPE` - an older one answers `ERR_UNSUPPORTED` and floods as it always did.
 
     python3 tools/linkcli.py --port COM7 obs                   # the adverts the node heard
     python3 tools/linkcli.py --port COM7 obs 2 --names         # ... with the names decoded here
@@ -108,7 +115,7 @@ CAP_NAMES = [
     (ref.CAP_CLI, "CLI"), (ref.CAP_POWER, "POWER"), (ref.CAP_ENV, "ENV"),
     (ref.CAP_MESH_CLIENT, "MESH_CLIENT"), (ref.CAP_OBSERVATIONS, "OBSERVATIONS"),
     (ref.CAP_ATTENTION, "ATTENTION"), (ref.CAP_TIME_PERSIST, "TIME_PERSIST"),
-    (ref.CAP_LOCAL_REQUEST, "LOCAL_REQUEST"),
+    (ref.CAP_LOCAL_REQUEST, "LOCAL_REQUEST"), (ref.CAP_FLOOD_SCOPE, "FLOOD_SCOPE"),
 ]
 RESET_NAMES = {
     0: "unknown", 1: "power-on", 2: "reset pin", 3: "watchdog", 4: "software", 5: "lockup",
@@ -183,6 +190,13 @@ TIME_FORCE = 0x01  # TIME_SET's flags, bit 0 (LINK-PROTOCOL.md 5.4)
 REBOOT_MODE_NAMES = {
     0: "restart the application", 1: "UF2 bootloader", 2: "serial DFU", 3: "over-the-air DFU",
 }
+# FLOOD_SCOPE's `mode` in words (LINK-PROTOCOL.md 6.5, link 1.3).
+FLOOD_SCOPE_MODE_NAMES = {
+    ref.FLOOD_ASK: "ask (nothing changes)",
+    ref.FLOOD_SCOPED: "the next flood takes the default scope",
+    ref.FLOOD_UNSCOPED: "the next flood carries no transport code",
+}
+
 # A send response's `send` (LINK-PROTOCOL.md 6.2) and a reply record's `state` (6.3).
 SEND_RESULT_NAMES = {0: "nothing sent", 1: "sent as a flood", 2: "sent direct"}
 REPLY_STATE_NAMES = {
@@ -366,6 +380,14 @@ class Link:
         self._seq = 0
         self.events = []
         self.last_status = None  # the status byte of the last response, for a caller's messages
+        # "HELLO is the first request of a session" (LINK-PROTOCOL.md 5.1), and since 1.3 what the
+        # session is decides what other messages do: a flood is scoped in a session of 1.3 and not
+        # in an older one, FLOOD_SCOPE is ERR_STATE below 1.3, and a send's answer carries the
+        # `scoped` byte only at 1.3 or later (6.2, 6.5). So this tool opens its session before its
+        # first other request, exactly as the Walter does, rather than speaking 1.0 by accident.
+        # One invocation is one session, because each one is a fresh connection to the RAK.
+        self._greeted = False
+        self.session_minor = None  # the minor the RAK's HELLO answer named, once it has
 
     def _next_seq(self):
         # "The Walter picks seq for each new request, any value different from the previous
@@ -379,6 +401,10 @@ class Link:
         On silence it sends the same frame again, same seq, up to `attempts` times in all; after
         that the link is down as far as this tool is concerned (section 3, section 9).
         """
+        if msg_type == ref.HELLO:
+            self._greeted = True  # this request is the session's own greeting (section 5.1)
+        elif not self._greeted:
+            self._open_session()
         payload = ref.encode("request", msg_type, fields or {})
         seq = self._next_seq()
         want = msg_type | ref.RESPONSE_BIT
@@ -405,6 +431,24 @@ class Link:
             "the link is down: %d attempts at %s went unanswered"
             % (attempts, ref.NAMES.get(msg_type, "0x%02x" % msg_type))
         )
+
+    def _open_session(self):
+        """The HELLO that opens the session, sent once per invocation and printed by nothing.
+
+        It says the minor this tool speaks - the reference implementation's, which is the
+        specification's - and remembers the minor the RAK answered. A radio that does not speak
+        our major refuses it (section 5.1, "Versions"); that is its answer to give and not a
+        reason to stop, so the command the person asked for is still sent.
+        """
+        f = self.request(ref.HELLO, {
+            "proto_major": ref.PROTO_MAJOR,
+            "proto_minor": ref.PROTO_MINOR,
+            "peer_kind": PEER_KIND_BENCH_TOOL,
+            "max_payload": ref.MAX_PAYLOAD,
+            "fw_version": OUR_VERSION,
+        })
+        if f.get("status") == ref.OK:
+            self.session_minor = f["proto_minor"]
 
     def _note_event(self, msg_type, seq, payload):
         fields = ref.decode("event", msg_type, payload)
@@ -537,10 +581,22 @@ def print_fields(msg_type, f, indent=""):
         print("%stag           0x%08x%s"
               % (indent, f["tag"], "  (the next reply from the peer)" if f["tag"] == 0 else ""))
         print("%ssender_ts     %d (%s)" % (indent, f["sender_ts"], utc(f["sender_ts"])))
+        # Link 1.3's one addition, at the end of the body (LINK-PROTOCOL.md 6.2). A radio that
+        # answered a session of 1.2 sends nothing for it, and then there is nothing to print.
+        if "scoped" in f:
+            print("%sscoped        %d (%s)"
+                  % (indent, f["scoped"],
+                     "the flood carried a transport code of the default scope" if f["scoped"]
+                     else "no transport code"))
     elif msg_type in (ref.REPLY_GET, ref.EV_MESH_REPLY):
         print_reply(f, indent)
     elif msg_type == ref.OBS_PULL:
         print_observations(f, indent)
+    elif msg_type == ref.FLOOD_SCOPE:
+        print("%smode          %d (%s)"
+              % (indent, f["mode"], FLOOD_SCOPE_MODE_NAMES.get(f["mode"], "?")))
+        print("%sscope         %s"
+              % (indent, f["scope"] or "(none: this radio holds no default scope)"))
     elif msg_type == ref.MESH_COUNTERS:
         print("%srx            %d" % (indent, f["rx"]))
         print("%stx            %d" % (indent, f["tx"]))
@@ -1401,6 +1457,28 @@ def cmd_counters(link, args):
     return 0 if f.get("status") == ref.OK else 1
 
 
+def cmd_flood_scope(link, args):
+    """FLOOD_SCOPE (6.5, link 1.3): the scope the next flood the mesh client originates will take,
+    and - with --once-without - one flood without it. Nothing goes on the air."""
+    mode = ref.FLOOD_ASK
+    if args.once_without:
+        mode = ref.FLOOD_UNSCOPED
+    elif args.scoped:
+        mode = ref.FLOOD_SCOPED
+    f = link.request(ref.FLOOD_SCOPE, {"mode": mode})
+    print("FLOOD_SCOPE mode %d" % mode)
+    print_fields(ref.FLOOD_SCOPE, f, indent="  ")
+    if f.get("status") != ref.OK:
+        if f.get("status") == ref.ERR_UNSUPPORTED:
+            print("this radio cannot scope a flood: `hello` says whether `caps` carries "
+                  "FLOOD_SCOPE, and its floods carry no transport code (6.5)", file=sys.stderr)
+        elif f.get("status") == ref.ERR_STATE:
+            print("the session is older than 1.3: say `hello` first, and look at what minor the "
+                  "radio answered (5.1, 6.5)", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_obs(link, args):
     """OBS_PULL (section 7): the adverts the node heard, oldest first. The records it hands over
     **leave its ring**, so this empties what it returns."""
@@ -1430,7 +1508,7 @@ def cmd_listen(link, args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="linkcli.py",
-        description="Speak the TwinOak box link (spec/LINK-PROTOCOL.md 1.2) to a repeater.",
+        description="Speak the TwinOak box link (spec/LINK-PROTOCOL.md 1.3) to a repeater.",
         epilog="docs/link.md has the wiring and a worked session.",
     )
     where = p.add_mutually_exclusive_group(required=True)
@@ -1584,6 +1662,13 @@ def build_parser():
     subs.add_parser("reply", help="the reply record as it stands (6.3)").set_defaults(
         run=cmd_reply)
     subs.add_parser("counters", help="the mesh counters (6.4)").set_defaults(run=cmd_counters)
+    scope = subs.add_parser("flood-scope",
+                            help="the scope the next flood takes, and one without it (6.5)")
+    scope.add_argument("--once-without", action="store_true",
+                       help="mode 2: the next flood carries no transport code. One send only")
+    scope.add_argument("--scoped", action="store_true",
+                       help="mode 1: back to the default scope, which is what holds anyway")
+    scope.set_defaults(run=cmd_flood_scope)
     obs = subs.add_parser("obs", help="collect the adverts the node heard (7)")
     obs.add_argument("max", nargs="?", type=int, default=255,
                      help="the most records wanted; the node returns as many as fit one payload")
