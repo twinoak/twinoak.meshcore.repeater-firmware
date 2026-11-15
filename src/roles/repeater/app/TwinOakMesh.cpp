@@ -4,6 +4,7 @@
 
 #include "roles/repeater/clock/BoardClock.h"
 #include "roles/repeater/link/BoardLink.h"
+#include "roles/repeater/link/FloodScope.h"
 #include "roles/repeater/meshclient/PeerSlot.h"
 
 // The mesh client's portable constants are upstream's own numbers, held together here - the one
@@ -226,19 +227,27 @@ twinoak::meshclient::PacketSent TwinOakMesh::dispatch(
     // Mesh::sendDirect (src/Mesh.cpp:693-715): ROUTE_TYPE_DIRECT, the path copied into the
     // packet (path_len 0 is zero hops), marked seen, queued at priority 0.
     sendDirect(pkt, route.path, route.path_len);
+  } else if (route.scoped) {
+    // **The advert's road** (link 1.3, spec/LINK-PROTOCOL.md 6.5): upstream's own
+    // MyMesh::sendFloodScoped with upstream's own default_scope, which is how
+    // MyMesh::sendSelfAdvertisement sends this node's flooded advert (MyMesh.cpp:1037). The key
+    // and the transport code are upstream's; this file does not name either member, because both
+    // are private at the pin and src/roles/repeater/link/FloodScope.cpp is the one file that
+    // reaches them (S-2's second exception, docs/upstream.md place 9). `scoped` comes back as
+    // what actually went on the packet: false when the node holds no default scope, where
+    // upstream's sendFloodScoped is the plain sendFlood below (MyMesh.cpp:999-1008).
+    put.scoped = twinoak::link::floodInDefaultScope(*this, pkt);
   } else {
     // Mesh::sendFlood (src/Mesh.cpp:637-662): ROUTE_TYPE_FLOOD with the path hash size and a
     // count of 0 (:649), marked seen, queued at priority 1. **Two-byte hashes** (S-12): upstream
     // defaults the argument to 1 (src/Mesh.h), the agent firmware passes 2, and so does this.
+    // This is the unscoped road, and the only call of sendFlood this firmware makes: a session of
+    // 1.2 or older, a Walter that asked for the one send without the scope, a direct send's
+    // fallback - every flood the route did not mark (LinkMeshClient.cpp, Session.h's
+    // floodScopedNow).
     sendFlood(pkt, 0, twinoak::meshclient::kFloodPathHashSize);
   }
   put.queued = true;
-  // `put.scoped` stays false, and `route.scoped` is not read: **this board does not scope a
-  // flood yet.** The link's half of 1.3 is behind `FloodScopeAccess`, which nothing here
-  // implements (src/roles/repeater/link/BoardLink.cpp hands the session no `flood_scope`), so
-  // `caps` carries no 0x100, FLOOD_SCOPE is ERR_UNSUPPORTED, and the two upstream calls above are
-  // what they were. Pile 3.13's task 02 is the one that reaches `sendFloodScoped(default_scope,
-  // ...)` and answers this byte from what went on the packet (spec/LINK-PROTOCOL.md 6.5).
   return put;
 }
 

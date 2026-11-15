@@ -12,6 +12,7 @@
 #include "roles/repeater/app/IdentityGuard.h"  // kFaultCodeIdentityLost
 #include "roles/repeater/clock/BoardClock.h"
 #include "roles/repeater/clock/LinkClock.h"
+#include "roles/repeater/link/FloodScope.h"
 #include "roles/repeater/link/LocalRequest.h"
 #include "roles/repeater/meshclient/LinkObservations.h"
 
@@ -163,6 +164,11 @@ AttentionMachine g_attention;
 // same reason the ring below is.
 BoardLocalRequest g_local_request;
 
+// FLOOD_SCOPE (link 1.3, spec/LINK-PROTOCOL.md 6.5): the node's default scope, read out of
+// upstream's own region map (src/roles/repeater/link/FloodScope.h). Holds nothing but a pointer
+// to the node; the name it answers with is a view into upstream's own storage.
+BoardFloodScope g_flood_scope;
+
 // The clock keeper as ClockAccess: twenty lines in src/roles/repeater/clock/LinkClock.h, and what puts
 // TIME_PERSIST in HELLO's caps. It binds a reference to the keeper of another translation unit,
 // whose constructor may not have run yet - which is safe because that is all it does with it;
@@ -243,13 +249,16 @@ void linkBegin(TwinOakMesh& mesh) {
   // OBS_PULL, STATUS's obs_pending and obs_dropped, and MESH_COUNTERS' three advert counts
   // (spec/LINK-PROTOCOL.md section 7). The ring is filled from TwinOakMesh::onAdvertRecv through
   // noteAdvert() below, not from here.
-  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0xff
-  // **No `flood_scope`, on purpose** (spec/LINK-PROTOCOL.md 6.5, link 1.3). The link's half of
-  // the flood scope is pile 3.13's task 01 - the session remembers its version, FLOOD_SCOPE is a
-  // message, a send's answer ends with `scoped`, and a flood's Route carries the request - and
-  // the board's half, which is upstream's own sendFloodScoped with upstream's own default scope,
-  // is its task 02. Until that task fills this in, `caps` carries no 0x100, FLOOD_SCOPE is
-  // kErrUnsupported and the client's floods go out with no transport code, as they always did.
+  g_services.observations = &g_observations;  // => kCapObservations
+  // FLOOD_SCOPE (spec/LINK-PROTOCOL.md 6.5, link 1.3). The repeater is the role whose mesh client
+  // can scope a flood, so it is the one that advertises this bit: `caps` is now 0x1ff. With it,
+  // in a session of 1.3 or later, the client's floods leave through upstream's own
+  // sendFloodScoped with upstream's own default scope (TwinOakMesh::dispatch,
+  // src/roles/repeater/link/FloodScope.cpp), and a send's answer says whether a transport code
+  // really went on the packet. A session of 1.2 or older is untouched - the session's own version
+  // decides, not this pointer (session/Session.h, floodScopedNow).
+  g_flood_scope.attach(&mesh);
+  g_services.flood_scope = &g_flood_scope;  // => kCapFloodScope
   // Every other interface stays null until the task that implements it fills it in, and its
   // capability bit is then absent from HELLO by itself (session/Interfaces.h, capsOf).
 

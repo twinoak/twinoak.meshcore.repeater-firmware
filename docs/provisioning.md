@@ -167,6 +167,15 @@ region save
   -> OK
 ```
 
+**From link 1.3 that line sets two things at once.** It has always been the
+scope the unit's own flooded adverts go out in; since 1.3 it is also the scope
+the unit's **logins and jobs for its Walter** flood in — the same scope, the
+same key, upstream's own (`docs/link.md` §2j, `spec/LINK-PROTOCOL.md` §6.5). So
+a unit left without it does not merely advertise unscoped: every flood it sends
+for MeshMaster is carried only by repeaters whose wildcard allows flood, and
+only for `flood.max.unscoped` hops. `region save` is what makes it survive a
+reboot.
+
 Those answer with a sentence rather than with `OK`, and every failure of theirs
 begins with `Err` — which is the rule `linkcli.py provision` judges them by.
 **`region load` is the one line never to send over the link**: it puts the

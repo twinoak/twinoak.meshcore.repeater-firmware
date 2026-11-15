@@ -104,6 +104,7 @@ We need none of it, because what we add hangs on three kinds of thing that are *
 | write the clock's file before a restart (§5) | `MainBoard::reboot()`, `MainBoard::powerOff()` | virtual on the board |
 | make the first boot's one write one write (§4a) | `savePrefs()` (public, `CommonCLICallbacks`) | virtual |
 | originate a packet | `createAnonDatagram`, `createDatagram`, `createTrace`, `sendDirect`, `sendFlood` | public on `Mesh` |
+| send a flood in the node's own default scope (link 1.3, §6.5) | `MyMesh::sendFloodScoped` | public on `MyMesh` — but the scope it takes, `default_scope`, and the map the name comes from, `region_map`, are **private**: `src/roles/repeater/link/FloodScope.cpp` is the one file that reaches them, the way `LocalRequest.cpp` reaches 1.2's two (`spec/SYSTEM.md` S-2's two exceptions, `docs/upstream.md` place 9) |
 
 `TwinOakMesh : public MyMesh` overrides those virtuals, calls the base for everything that is
 not ours, and adds the link. `main.cpp` constructs it where upstream's constructs `MyMesh`.

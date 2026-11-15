@@ -26,7 +26,13 @@
 //      is 2, every call of upstream's sendFlood in src/ passes that constant, and no line passes
 //      a literal 1. Does not catch: a *path the Walter gives us* with one-byte hashes, which the
 //      link deliberately allows (`kPathHashSizeMin` is 1) because that path was chosen by
-//      somebody else - S-12 is about the hashes **this firmware chooses**.
+//      somebody else - S-12 is about the hashes **this firmware chooses**. Since link 1.3 there
+//      are **two** roads out and the rule holds both: one `sendFlood` in the board's half of
+//      MeshPort and one `sendFloodScoped` in the one file that may reach upstream's default
+//      scope, each at `kFloodPathHashSize`. And beside them, because it is the same bargain,
+//      **the four private members of upstream's MyMesh are named in one file each** - the two
+//      of link 1.2's LOCAL_REQUEST and the two of 1.3's flood scope, which is what keeps
+//      `docs/upstream.md`'s place 9 one place to re-read per name.
 //   5. **onPeerPathRecv returns false for the client's peer**: no reciprocal path, one packet per
 //      send. The branch that handles our peer is read out of src/roles/repeater/app/TwinOakMesh.cpp and must
 //      return false and nothing else. Does not catch: upstream's own path return for upstream's
@@ -819,6 +825,91 @@ TEST(Rails, Rule4_TheFirstBootProfileAsksForTwoByteHashesInAdvertsToo) {
          " profile's table or its reply rule";
 }
 
+TEST(Rails, Rule4_TheClientsTwoFloodRoadsAreOneEachAndBothCarryTwoByteHashes) {
+  // Link 1.3 gave the mesh client a **second** road out (spec/LINK-PROTOCOL.md 6.5): a flood the
+  // session marked scoped goes through upstream's `MyMesh::sendFloodScoped` with upstream's own
+  // `default_scope`, exactly as this node's flooded advert does, and every other flood goes
+  // through `Mesh::sendFlood` as it always did. The rail is that there is **one** of each, that
+  // each is where it should be, and that both pass `kFloodPathHashSize` - the second road being
+  // the one a pin could quietly default back to one byte, because `sendFloodScoped` passes its
+  // `path_hash_size` straight to `sendFlood` (MyMesh.cpp:999-1008 at the pin 81dbae59).
+  //
+  // Does not catch: the decision of *which* flood is scoped, which is the session's and the
+  // client's (test/test_link_session's TheFloodScope drives all of it against a fake port).
+  const fs::path root = projectRoot();
+  std::vector<std::string> plain, scoped;
+  for (const fs::path& file : filesUnder(root / "src")) {
+    int n = 0;
+    for (const std::string& raw : linesOf(file)) {
+      n++;
+      const std::string code = withoutComment(raw);
+      const bool is_scoped = code.find("sendFloodScoped(") != std::string::npos;
+      const bool is_plain = !is_scoped && code.find("sendFlood(") != std::string::npos;
+      if (!is_scoped && !is_plain) continue;
+      const std::string where = rel(root, file) + ":" + std::to_string(n);
+      (is_scoped ? scoped : plain).push_back(where);
+      if (code.find("kFloodPathHashSize") == std::string::npos) {
+        ADD_FAILURE() << where
+                      << ": a flood whose path-hash size is not kFloodPathHashSize - upstream"
+                         " defaults that argument to 1 and this firmware never floods at one"
+                         " byte (S-12)";
+      }
+    }
+  }
+  ASSERT_EQ(1u, plain.size())
+      << "the unscoped road is one call of upstream's sendFlood, in TwinOakMesh::dispatch; a"
+         " second one is a flood nothing in test/test_link_session can see";
+  ASSERT_EQ(1u, scoped.size())
+      << "the scoped road is one call of upstream's sendFloodScoped, in"
+         " src/roles/repeater/link/FloodScope.cpp - the only file that may name the default"
+         " scope at all (spec/SYSTEM.md S-2's second exception)";
+  EXPECT_EQ("src/roles/repeater/app/TwinOakMesh.cpp", plain[0].substr(0, plain[0].rfind(':')))
+      << "the client's unscoped flood has moved out of the board's half of MeshPort";
+  EXPECT_EQ("src/roles/repeater/link/FloodScope.cpp", scoped[0].substr(0, scoped[0].rfind(':')))
+      << "the scoped flood has moved out of the one file that reaches upstream's default scope";
+}
+
+TEST(Rails, Rule4_UpstreamsPrivateMembersAreNamedInOneFileEach) {
+  // The four members of upstream's `MyMesh` this firmware reaches around an access specifier,
+  // each in the **one** file `docs/upstream.md`'s place 9 names for it. `spec/SYSTEM.md` S-2's
+  // two exceptions are narrow on purpose: the reach is the explicit-instantiation idiom of
+  // src/common/cxx/PrivateMember.h, it costs a tag and a template instantiation per member, and
+  // the bargain only holds while a bump has one place to re-read per name. A second file naming
+  // one of them is a second place to find, and the finding would be made on the air.
+  //
+  // Comments may name them - that is how those files explain themselves - so each line is read
+  // without its comment, the way rule 2 and rule 4's first half read theirs.
+  //
+  // Does not catch: a member reached under a name this list has not got. Any such reach is a new
+  // tag in one of the two files, which is where a reviewer looks.
+  const fs::path root = projectRoot();
+  const std::pair<const char*, const char*> kPrivate[] = {
+      // link 1.2, LOCAL_REQUEST (spec/SYSTEM.md S-2's exception of 7 November 2026)
+      {"handleRequest", "src/roles/repeater/link/LocalRequest.cpp"},
+      {"reply_data", "src/roles/repeater/link/LocalRequest.cpp"},
+      // link 1.3, the flood scope (its second exception, of 14 November 2026)
+      {"region_map", "src/roles/repeater/link/FloodScope.cpp"},
+      {"default_scope", "src/roles/repeater/link/FloodScope.cpp"},
+  };
+  for (const auto& entry : kPrivate) {
+    std::set<std::string> files;
+    for (const fs::path& file : filesUnder(root / "src")) {
+      for (const std::string& raw : linesOf(file)) {
+        if (withoutComment(raw).find(entry.first) != std::string::npos) {
+          files.insert(rel(root, file));
+          break;
+        }
+      }
+    }
+    const std::set<std::string> want{std::string(entry.second)};
+    EXPECT_EQ(want, files) << "MyMesh::" << entry.first
+                           << " is private at the pin and may be named in one file of ours only ("
+                           << entry.second
+                           << "): docs/upstream.md place 9 is what a pin bump re-reads, and it"
+                              " names one place per member";
+  }
+}
+
 // ------------------------------------------------------------------------------------- rule 5
 
 TEST(Rails, Rule5_OnPeerPathRecvReturnsFalseForTheClientsPeer) {
@@ -907,6 +998,10 @@ TEST(Rails, Rule6_NothingThatCarriesAPasswordNamesTheFileSystem) {
   }
   files.push_back(root / "src" / "roles" / "repeater" / "app" / "TwinOakMesh.h");
   files.push_back(root / "src" / "roles" / "repeater" / "app" / "TwinOakMesh.cpp");
+  // Link 1.3 put a second file between that packet and upstream's queue: the scoped road
+  // (src/roles/repeater/link/FloodScope.cpp). What it is handed is ciphertext and not the
+  // plaintext above - but it is on the send path, and the fence is cheaper than the argument.
+  files.push_back(root / "src" / "roles" / "repeater" / "link" / "FloodScope.cpp");
   EXPECT_GT(files.size(), 15u) << "almost nothing on the password's path - is PROJECT_DIR right?";
 
   for (const fs::path& file : files) {

@@ -17,8 +17,9 @@
 //
 // The fakes answer with the values docs/link.md quotes, so a session through the pipe looks like
 // a session with a board that has what phase 1's tasks 03 to 06, phase 2's tasks 01 to 03 and
-// pile 3.9's task 02 implement: caps 0xff (CLI, POWER, ENV, MESH_CLIENT, OBSERVATIONS, ATTENTION,
-// TIME_PERSIST, LOCAL_REQUEST). Six things in it are the firmware's own code and not a stub:
+// pile 3.9's task 02 and pile 3.13's task 02 implement: caps 0x1ff (CLI, POWER, ENV, MESH_CLIENT,
+// OBSERVATIONS, ATTENTION, TIME_PERSIST, LOCAL_REQUEST, FLOOD_SCOPE - and `--no-scope` is the
+// node that holds no default scope). Six things in it are the firmware's own code and not a stub:
 //
 //   - the **ClockKeeper** (src/roles/repeater/clock/), with out/linkloop/clock where the board has its flash
 //     file, so `time` and `time set` exercise the rules the firmware will run; one run of this

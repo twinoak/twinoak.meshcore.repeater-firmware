@@ -715,6 +715,59 @@ the link dongle.
   code** (→ ______). That is the line that would catch a board accidentally
   scoping a flood a task early.
 
+### The flood scope, the radio's half (link 1.3)
+
+`docs/link.md` §2j, `spec/LINK-PROTOCOL.md` §6.5. Pile 3.13's task 02 is the
+board's side: the mesh client's floods now leave through upstream's own
+`sendFloodScoped` with upstream's own default scope, so a login this unit sends
+for its Walter carries the same transport code its adverts carry. The image says
+so in `caps`, and the only place the rest of it can be seen is **on the air** —
+which is why these lines need a second repeater that logs what it hears, and why
+none of them is a native test. Needs the radio's image of this pile's task 02,
+the link dongle, a repeater within earshot that holds `#dk` with flood allowed
+and prints what it forwards, and — for the last line only — a Walter of its own
+pile 14.
+
+- [ ] **p3.13-02** **The image advertises the bit.** `linkcli.py --port <port>
+  hello` says `protocol 1.3` and **`caps 0x1ff`** with `FLOOD_SCOPE` in the list
+  → ______. On the image before this one it was `0xff`, so this one line is what
+  tells the two apart on a bench.
+- [ ] **p3.13-02** **The name comes from the node's own region map.** With the
+  unit provisioned as `docs/provisioning.md` §2 says — `region default dk`, then
+  `region save` — `linkcli.py --port <port> flood-scope` answers `mode 1` and
+  `scope dk` → ______, and it answers the same after a reboot (→ ______), which
+  is what `region save` is for. Then `cli "region default <null>"` and
+  `flood-scope` again: an **empty** `scope` → ______. Put `dk` back and save
+  before going on.
+- [ ] **p3.13-02** **A flooded login carries the code, and a repeater that holds
+  `#dk` forwards it.** `job begin <key of a repeater this unit holds no path
+  for>`, then `linkcli.py --port <port> login <password> --no-wait`: the answer
+  says `sent as a flood` and **`scoped 1`** → ______. On the listening repeater,
+  the packet is logged with a **transport code** and is forwarded → ______.
+  (`region` on that repeater must show `#dk` with flood allowed, or it drops the
+  packet instead, which is the whole reason for the next line.)
+- [ ] **p3.13-02** **And the one send without it is a plain flood.**
+  `linkcli.py --port <port> flood-scope --once-without && ...` — **one
+  invocation**, because one invocation is one session (`docs/link.md` §2) — so
+  in a single command line: `flood-scope --once-without` then the same `login`
+  again. The answer says **`scoped 0`** → ______; the listening repeater logs
+  that second packet with **no transport code** → ______. The send after it is
+  scoped again (`flood-scope` says `mode 1` → ______).
+- [ ] **p3.13-02** **A unit with no default scope floods as it always did.**
+  `cli "region default <null>"`, then the same login: `scoped 0` → ______ and
+  the listening repeater sees a packet byte for byte like `v0.1.5`'s — two-byte
+  path hashes, no transport code → ______. This is the line that proves the new
+  road costs nothing on a unit that holds no region. Put `dk` back and
+  `region save`.
+- [ ] **p3.13-02** **From the Walter, once its pile 14 is on the unit.** `rak
+  scope` on the Walter's console says the name this radio answered, and a job
+  MeshMaster sends through the unit floods the scope first and then once without
+  it (meshmaster.dk's D-47) → ______. Until that pile is there the session is
+  1.2 and every flood is unscoped, which is correct and is what
+  `tasks/phase-3.13/FOLLOWUPS.md` says to expect. That line is the Walter's
+  bench and not this one's; it is here because the radio's half is what this task
+  shipped.
+
 ## 5. Power
 
 The hardware repository's `hardware/pcb/CURRENT-SENSE.md` §6 is the fuller
