@@ -229,10 +229,13 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // is where it is wiped when the job ends.
   const uint8_t* sharedSecret();
   // One packet of the client's, queued along its route: direct along the job's path, or flooded
-  // with two-byte hashes. Tells the clock keeper first. `queued` false when `pkt` is null (the
-  // pool was empty and nothing was built), and `scoped` whether a transport code of the node's
-  // default scope went on the packet - **always false here**, because this board's floods are
-  // upstream's plain sendFlood until pile 3.13's task 02 (spec/LINK-PROTOCOL.md 6.5).
+  // with two-byte hashes - and a flood the route marks scoped takes the road this node's own
+  // flooded advert takes, upstream's sendFloodScoped with upstream's default scope
+  // (spec/LINK-PROTOCOL.md 6.5; src/roles/repeater/link/FloodScope.h, the one file that names
+  // either private member). Tells the clock keeper first. `queued` false when `pkt` is null (the
+  // pool was empty and nothing was built), and `scoped` whether a transport code really went on
+  // the packet - false for a direct send, for an unscoped flood, and for a scoped one on a node
+  // that holds no default scope.
   twinoak::meshclient::PacketSent dispatch(mesh::Packet* pkt,
                                            const twinoak::meshclient::Route& route);
   // The reply's SNR as the record carries it: quarter-decibels, from the packet.

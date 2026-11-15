@@ -31,11 +31,8 @@ reply with `REPLY_GET`, `OBS_PULL`, `MESH_COUNTERS` and `FLOOD_SCOPE`, and
 the protocol defines** outside its two reserved ranges (provisioning, phase 3's
 task 03; the bridge role, later). `HELLO`'s `caps` is `0x1ff`, every bit of it,
 because a capability is an interface that is there
-(`src/common/link/session/Interfaces.h`) — except on the **released image of
-pile 3.13's task 01**, which answers `0xff`: the link's half of 1.3 is there and
-the board's half is task 02's, so `FLOOD_SCOPE` is `ERR_UNSUPPORTED` and the
-client's floods carry no transport code until that task is in an image.
-`LPP_GET` has no capability bit of its own: §4 gates it on `CLI`.
+(`src/common/link/session/Interfaces.h`). `LPP_GET` has no capability bit of its
+own: §4 gates it on `CLI`.
 
 ## 1. Wiring the dongle
 
@@ -131,7 +128,8 @@ for have to be **one** invocation to mean anything. `-v` shows that first frame.
   `LOCAL_REQUEST` `0x80`; 1.3 added `FLOOD_SCOPE` `0x100`). A capability is an
   interface that is there, so a build that left one out simply does not
   advertise it and answers `ERR_UNSUPPORTED` for its requests — which is what
-  the image of pile 3.13's task 01 does for `FLOOD_SCOPE`, `caps` `0xff`.
+  every image up to and including pile 3.13's task 01 did for `FLOOD_SCOPE`,
+  `caps` `0xff`.
   **`caps` is what the radio can do, not what the session speaks**: a 1.3 radio
   answering a 1.2 request says `protocol 1.2` with `0x100` still in its `caps`,
   and §5.1 says a Walter ignores a bit it does not know.
@@ -172,9 +170,9 @@ into a report when a frame is refused.
 
 A capability is an interface that is there (`src/common/link/session/Interfaces.h`), so
 this table is `caps` read the other way round: what each bit buys, and what a
-build without it would answer. `0x1ff` is every bit the protocol defines; the
-image of pile 3.13's task 01 answers `0xff`, because `FLOOD_SCOPE`'s interface
-is the board's half and arrives with task 02.
+build without it would answer. `0x1ff` is every bit the protocol defines, and
+this firmware has them all since pile 3.13's task 02 put `FLOOD_SCOPE`'s own
+interface — the board's half of the flood scope — behind the bit.
 
 | Request | Capability bit | Where it is walked |
 |---|---|---|
@@ -962,10 +960,21 @@ FLOOD_SCOPE mode 2
   path, and every `discover`. A direct send and a `trace` carry no scope and are
   untouched.
 - **The refusals**: `ERR_UNSUPPORTED` on a radio whose `caps` lack `FLOOD_SCOPE`
-  — which is the image of pile 3.13's task 01, and its floods carry no code;
+  — every image before pile 3.13's task 02, whose floods carry no code;
   `ERR_STATE` in a session older than 1.3 (nothing is scoped there, and there is
   no mode to set); `ERR_RANGE` for a mode that is none of the three;
   `ERR_MALFORMED` for a payload with no mode byte at all.
+- **`scope` is the name and `scoped` is the key, and they are read from two
+  different places** — the name from the node's region map, the key from the
+  scope MeshCore keeps beside it. They can disagree, and MeshCore is where that
+  is decided: a `region default` naming a **private `$` region** whose keys are
+  not in the key store leaves the old key in force, so `flood-scope` says the
+  new name while the floods still carry the previous region's code (or none);
+  and a `region load` clears the default region without clearing the key, so
+  `flood-scope` says an **empty name** while the floods still carry the last
+  code. `scoped` is always what went on the packet. After either, `region
+  default <name>` sets both again, and `region default` on its own says which
+  name the node thinks it has.
 - The RAK **derives no key and computes no code of its own**: the scope is
   upstream's and the code is upstream's. A default scope that changes — a
   `region default` over the mesh, or a `cli "region default dk"` on this link —
