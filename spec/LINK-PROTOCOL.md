@@ -1,8 +1,8 @@
-# The box link — protocol 1.2
+# The box link — protocol 1.3
 
 The UART between the LoRa box and the LTE box of a TwinOak standard repeater v2: the RAK4630 on one
 end, the Walter on the other. This document is the specification. `tools/linkref.py` is the same
-thing as code, and `fixtures/link/link-v1.2.json` is what it generates; both firmware repositories
+thing as code, and `fixtures/link/link-v1.3.json` is what it generates; both firmware repositories
 carry a copy of the fixtures and test their codecs against every case in it.
 
 **Status:** 1.0, written 2026-10-11, before either firmware exists. It changes only here, and a
@@ -21,6 +21,17 @@ its owner info. So the first unit's repeater stayed *stale* on meshmaster.dk and
 graphs a status read feeds. `LOCAL_REQUEST` answers those four with the bytes MeshCore's own handler
 answers them with over the mesh. Nothing else changed. `link-v1.1.json` is 1.1's and keeps its
 bytes; `link-v1.2.json` is every case of 1.1 and the ones 1.2 adds.
+
+**1.3, 2026-11-14:** the flood scope (§6.5): `FLOOD_SCOPE`, its capability bit `0x100`, and one byte
+at the end of a send's answer. Until 1.3 every flood the mesh client originated went out with no
+transport code, whatever the repeater's `region default` said: a unit's own adverts were scoped and
+the logins it sent for its Walter were not. The exit nodes that are companions have flooded their
+region first and kept one unscoped try since meshmaster.dk's D-47, and a repeater that stops
+forwarding unscoped floods would drop a unit's login at the first hop. In a session of 1.3 the
+client's floods take the RAK's default scope, as its adverts do, and the Walter can ask for one
+flood without it. A session of 1.2 or older is byte for byte and packet for packet what it was.
+`link-v1.2.json` is 1.2's and keeps its bytes; `link-v1.3.json` is every case of 1.2 and the ones
+1.3 adds.
 
 Words used: **RAK** is the radio firmware in the LoRa box (a repeater, later a bridge), **Walter**
 is the management firmware in the LTE box. *Must* and *never* are requirements; everything else is
@@ -159,6 +170,7 @@ also be fetched with a request.
 | `0x29` | `REPLY_GET` | `MESH_CLIENT` | 6.3 |
 | `0x2A` | `OBS_PULL` | `OBSERVATIONS` | 7 |
 | `0x2B` | `MESH_COUNTERS` | `MESH_CLIENT` | 6.4 |
+| `0x2C` | `FLOOD_SCOPE` | `FLOOD_SCOPE` | 6.5 |
 | `0x30`–`0x3F` | *reserved: bridge role* | | |
 | `0x60` | `EV_BOOT` | always | 5.1 |
 | `0x61` | `EV_MESH_REPLY` | `MESH_CLIENT` | 6.3 |
@@ -175,7 +187,7 @@ Request:
 | Field | Type | |
 |---|---|---|
 | `proto_major` | u8 | 1 |
-| `proto_minor` | u8 | the highest minor the sender speaks: 2 for a sender of 1.2 |
+| `proto_minor` | u8 | the highest minor the sender speaks: 3 for a sender of 1.3 |
 | `peer_kind` | u8 | 1 = Walter firmware, 2 = a bench tool |
 | `max_payload` | u8 | the largest payload the sender accepts; 240 |
 | `fw_version` | str8 | the sender's own version string |
@@ -197,13 +209,17 @@ Response body (after `status`):
 | `band` | str8 | **1.1.** The band the running image was built for, as its descriptor says it (`FIRMWARE-MANIFEST.md`): `868`. Present when this body's `proto_minor` is 1 or more, absent in a 1.0 body |
 
 Capability bits: `0x01 CLI`, `0x02 POWER`, `0x04 ENV`, `0x08 MESH_CLIENT`, `0x10 OBSERVATIONS`,
-`0x20 ATTENTION`, `0x40 TIME_PERSIST`, `0x80 LOCAL_REQUEST` (1.2). Unknown bits are ignored.
+`0x20 ATTENTION`, `0x40 TIME_PERSIST`, `0x80 LOCAL_REQUEST` (1.2), `0x100 FLOOD_SCOPE` (1.3). Unknown
+bits are ignored.
 
 **Versions.** A RAK that speaks the request's major answers with the highest minor both ends know.
 A RAK that does not speak that major answers `ERR_UNSUPPORTED`, and the Walter may try another
 major it knows. Within a major, a minor adds things — new types, new capability bits, new fields
 *at the end* of a payload — and never changes what exists. A receiver ignores trailing bytes it does
 not know.
+
+**The session's version** is the one the last `HELLO`'s answer named, and 1.0 before any `HELLO` of
+this boot. Until 1.3 nothing but `HELLO`'s own body depended on it; §6.5 is the first rule that does.
 
 **The band, and why it is here** (1.1). With `role` and `board` it is what a release's image is
 chosen by (`FIRMWARE-MANIFEST.md`; meshmaster.dk's offer). The Walter reads all three from its
@@ -387,6 +403,8 @@ The rules of that firmware hold here too, and the RAK enforces them:
   sensitive are wiped from every buffer the RAK copied them to as soon as the packet is built. They
   are never stored and never printed.
 - **Floods the client originates use two-byte path hashes**, never one.
+- **Floods the client originates take the RAK's default scope** in a session of 1.3 or later
+  (§6.5), and carry no transport code in an older one.
 - Being a repeater comes first: nothing here may hold up forwarding.
 
 ### 6.1 The job and its path
@@ -422,6 +440,7 @@ send is answered at once with:
 | `send` | u8 | 0 nothing was sent · 1 sent as a flood · 2 sent direct |
 | `tag` | u32 | what the reply will be matched by; 0 means "the next reply from the peer" |
 | `sender_ts` | u32 | the timestamp the RAK put in the packet |
+| `scoped` | u8 | **1.3.** 1 when the packet went out as a flood carrying a transport code of the default scope (§6.5); 0 for a direct send, a flood without one, and when nothing was sent. Present in a session of 1.3 or later, absent in an older one |
 
 `timeout_ms` of 0 means nothing is awaited. Otherwise the RAK is *awaiting* from the moment the
 packet is queued until a matching reply arrives or the time is up, and it then reports the outcome
@@ -482,6 +501,63 @@ included), `client_tx : u32` (packets the mesh client originated — **one per s
 else**; an exit node's transaction count is held against it), `adverts : u32` (adverts that
 verified), `adverts_dropped : u32`, `obs_dropped : u32`, `noise_floor : i16` (dBm), `last_rssi :
 i16`, `last_snr_q4 : i8`.
+
+### 6.5 The flood scope: `FLOOD_SCOPE` (1.3)
+
+A repeater's **default scope** is the region its `region default` names. Upstream sends the node's
+own flooded adverts in it: `MyMesh::sendFloodScoped` puts a transport code on the packet, made from
+the region's key and the packet itself, and a repeater forwards it when it holds that region with
+flood allowed. A flood with no transport code is forwarded only while a repeater's wildcard allows
+flood, and only for `flood.max.unscoped` hops.
+
+**The rule.** In a session of 1.3 or later, every flood the client originates is sent exactly as
+the node's own flooded advert is: through upstream's `sendFloodScoped` with upstream's own default
+scope, so in that scope when the RAK holds one and with no transport code when it holds none. That
+is a `SEND_LOGIN`, `SEND_REQUEST` or `SEND_CLI` of a job with no path, and every `SEND_DISCOVERY`.
+A direct send and a trace carry no scope and are untouched. The RAK derives no key and computes no
+code of its own, and a default scope that changes — a `region default` over the mesh, or a `CLI`
+line on this link — is in force for the next send.
+
+In a session of 1.2 or older the client's floods carry no transport code, as they always did: a
+Walter that does not know this section gets the link it was written for. The session's version is
+per boot (§5.1), so a RAK that restarted floods unscoped until the next `HELLO`.
+
+**One flood without it.** A repeater that does not hold the region drops a scoped flood, and would
+have forwarded the unscoped one. The agent's rule is therefore *the scope first, then one try
+without it* (meshmaster.dk D-47; `agent/FloodScope.h` in the agent library), and it is the Walter's
+to apply. The RAK retries nothing (§6).
+
+`FLOOD_SCOPE` — request: `mode : u8`.
+
+| `mode` | |
+|---:|---|
+| 0 | ask: nothing changes |
+| 1 | the next send, if it floods, takes the default scope. This is what holds when nothing was asked |
+| 2 | the next send, if it floods, carries no transport code |
+
+Response body: `mode : u8`, 1 or 2, what the next send will be; then `scope : str8`, the default
+scope's name as `region default` prints it, without a leading `#`, 1 to 30 bytes, or empty when the
+RAK holds none.
+
+- `mode` 2 is for **one send**. The next `SEND_*` request the RAK executes puts the mode back to 1,
+  whatever that send came to: a flood, a direct send, nothing sent, or a refusal. So do `JOB_BEGIN`
+  and `JOB_END`. A link-level retry of a send (§3) is not executed again and changes nothing.
+- No job is needed. With `mode` 0 this is how the Walter reads the scope's name, after `HELLO` and
+  whenever a send's `scoped` (§6.2) was not what it expected.
+- Any other `mode` is `ERR_RANGE`. In a session older than 1.3 the answer is `ERR_STATE`: nothing
+  is scoped there, and there is no mode to set.
+- Nothing goes on the air, and `client_tx` does not move.
+
+`FLOOD_SCOPE` is the capability of a role whose mesh client can scope a flood: the repeater's, from
+1.3. A RAK without it answers `ERR_UNSUPPORTED` (§3), and its floods carry no transport code.
+
+**What the Walter does with it.** With the capability and a name, the Walter's mesh tells the agent
+library that name as its flood scope, and the library's own rule decides which send is which; the
+Walter sends `FLOOD_SCOPE` with `mode` 2 immediately before the one send that goes without. With the
+capability and no name it says `*`, the library's word for *no transport code at all*. Without the
+capability it says nothing about scope, as before 1.3. The three counts the library keeps — floods
+answered scoped, answered unscoped, and not at all — go to meshmaster.dk in the heartbeat, which is
+how anyone tells whether the unscoped try still earns its airtime.
 
 ## 7. Observations: `OBS_PULL`
 
@@ -571,10 +647,11 @@ Text is never mixed with frames in one session.
 
 ## 11. The fixtures
 
-`fixtures/link/link-v1.2.json`, generated by `tools/linkref.py gen` (1.2: every case of 1.1, and
-the ones 1.2 adds). The older ones never change, because firmware that speaks them has been
-released: `fixtures/link/link-v1.1.json` is 1.1's (`tools/linkref.py gen <file> 1`) and
-`fixtures/link/link-v1.json` is 1.0's (`gen <file> 0`). Each holds:
+`fixtures/link/link-v1.3.json`, generated by `tools/linkref.py gen` (1.3: every case of 1.2, and
+the ones 1.3 adds). The older ones never change, because firmware that speaks them has been
+released: `fixtures/link/link-v1.2.json` is 1.2's (`tools/linkref.py gen <file> 2`),
+`fixtures/link/link-v1.1.json` is 1.1's (`gen <file> 1`) and `fixtures/link/link-v1.json` is 1.0's
+(`gen <file> 0`). Each holds:
 
 - `crc16` — data and its CRC.
 - `cobs` — raw bytes and their encoding.

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Reference implementation of the TwinOak box link, protocol 1.2.
+"""Reference implementation of the TwinOak box link, protocol 1.3.
 
 The link is the UART between the LoRa box (RAK4630) and the LTE box (Walter); LINK-PROTOCOL.md
 is the specification and this file is the same thing as code. It is the source of the fixtures
 both firmware repositories test against:
 
-    python3 linkref.py gen   ../fixtures/link/link-v1.2.json      write the fixtures of 1.2
-    python3 linkref.py gen   ../fixtures/link/link-v1.1.json 1    1.1's, which never change: the same bytes
+    python3 linkref.py gen   ../fixtures/link/link-v1.3.json      write the fixtures of 1.3
+    python3 linkref.py gen   ../fixtures/link/link-v1.2.json 2    1.2's, which never change: the same bytes
+    python3 linkref.py gen   ../fixtures/link/link-v1.1.json 1    1.1's, likewise
     python3 linkref.py gen   ../fixtures/link/link-v1.json 0      1.0's, likewise
-    python3 linkref.py check ../fixtures/link/link-v1.2.json      re-derive every case and compare
+    python3 linkref.py check ../fixtures/link/link-v1.3.json      re-derive every case and compare
     python3 linkref.py decode 0003010203...00                  print what one frame says
 
 Standard library only. Nothing here talks to a serial port: it is a codec, on purpose.
@@ -19,8 +20,9 @@ import struct
 import sys
 
 PROTO_MAJOR = 1
-PROTO_MINOR = 2  # 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with the band
+PROTO_MINOR = 3  # 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with the band
                  # 1.2 (2026-11-07): LOCAL_REQUEST, the node's own answer to a mesh request
+                 # 1.3 (2026-11-14): FLOOD_SCOPE, the scope of the floods the mesh client originates
 MAX_PAYLOAD = 240          # bytes of payload in one packet
 MAX_PACKET = MAX_PAYLOAD + 4  # type + seq + payload + crc16
 
@@ -112,7 +114,7 @@ HELLO, PING, STATUS, TIME_SET, TIME_GET, REBOOT, IDENTITY, SLEEP_NOTICE = 0x01, 
 CLI, POWER_GET, ENV_GET, LPP_GET, LOCAL_REQUEST = 0x09, 0x0A, 0x0B, 0x0C, 0x0D
 JOB_BEGIN, JOB_END, PATH_SET, PATH_GET = 0x20, 0x21, 0x22, 0x23
 SEND_LOGIN, SEND_REQUEST, SEND_CLI, SEND_DISCOVERY, SEND_TRACE = 0x24, 0x25, 0x26, 0x27, 0x28
-REPLY_GET, OBS_PULL, MESH_COUNTERS = 0x29, 0x2A, 0x2B
+REPLY_GET, OBS_PULL, MESH_COUNTERS, FLOOD_SCOPE = 0x29, 0x2A, 0x2B, 0x2C
 # Events (RAK -> Walter), never answered.
 EV_BOOT, EV_MESH_REPLY, EV_ATTENTION = 0x60, 0x61, 0x62
 
@@ -125,7 +127,7 @@ NAMES = {
     JOB_BEGIN: "JOB_BEGIN", JOB_END: "JOB_END", PATH_SET: "PATH_SET", PATH_GET: "PATH_GET",
     SEND_LOGIN: "SEND_LOGIN", SEND_REQUEST: "SEND_REQUEST", SEND_CLI: "SEND_CLI",
     SEND_DISCOVERY: "SEND_DISCOVERY", SEND_TRACE: "SEND_TRACE", REPLY_GET: "REPLY_GET",
-    OBS_PULL: "OBS_PULL", MESH_COUNTERS: "MESH_COUNTERS",
+    OBS_PULL: "OBS_PULL", MESH_COUNTERS: "MESH_COUNTERS", FLOOD_SCOPE: "FLOOD_SCOPE",
     EV_BOOT: "EV_BOOT", EV_MESH_REPLY: "EV_MESH_REPLY", EV_ATTENTION: "EV_ATTENTION",
 }
 
@@ -137,10 +139,16 @@ ROLE_UNKNOWN, ROLE_REPEATER, ROLE_BRIDGE, ROLE_SCANNER = 0, 1, 2, 3
 # HELLO: caps
 CAP_CLI, CAP_POWER, CAP_ENV, CAP_MESH_CLIENT, CAP_OBSERVATIONS, CAP_ATTENTION, CAP_TIME_PERSIST, CAP_LOCAL_REQUEST = (
     1 << n for n in range(8))
+CAP_FLOOD_SCOPE = 1 << 8  # 1.3
 
 # LOCAL_REQUEST: the request types it answers (LINK-PROTOCOL.md section 5.9), MeshCore's numbers
 REQ_STATUS, REQ_ACCESS_LIST, REQ_NEIGHBOURS, REQ_OWNER_INFO = 0x01, 0x05, 0x06, 0x07
 LOCAL_REQUEST_MAX_DATA = 32
+
+# FLOOD_SCOPE: its mode (LINK-PROTOCOL.md section 6.5), and the longest name a region has - MeshCore's
+# RegionEntry holds 31 bytes with the terminator
+FLOOD_ASK, FLOOD_SCOPED, FLOOD_UNSCOPED = 0, 1, 2
+FLOOD_SCOPE_MAX_NAME = 30
 
 # path_mode
 PATH_NONE, PATH_DIRECT, PATH_HOPS = 0, 1, 2
@@ -297,7 +305,15 @@ def encode(kind: str, msg_type: int, f: dict) -> bytes:
         if t == LOCAL_REQUEST: return out + bytes.fromhex(f["data"])
         if t == PATH_GET: return out + enc_path(f)
         if t in (SEND_LOGIN, SEND_REQUEST, SEND_CLI, SEND_DISCOVERY, SEND_TRACE):
-            return out + u8(f["send"]) + u32(f["tag"]) + u32(f["sender_ts"])
+            # 1.3: `scoped` at the end, in a session of 1.3 or later and absent in an older one
+            return (out + u8(f["send"]) + u32(f["tag"]) + u32(f["sender_ts"])
+                    + (u8(f["scoped"]) if "scoped" in f else b""))
+        if t == FLOOD_SCOPE:
+            if f["mode"] not in (FLOOD_SCOPED, FLOOD_UNSCOPED):
+                raise ValueError("a flood scope answer says scoped or unscoped")
+            if len(f["scope"].encode("utf-8")) > FLOOD_SCOPE_MAX_NAME:
+                raise ValueError("scope name over %d bytes" % FLOOD_SCOPE_MAX_NAME)
+            return out + u8(f["mode"]) + str8(f["scope"])
         if t == REPLY_GET: return out + enc_reply(f)
         if t == OBS_PULL:
             out += u8(f["remaining"]) + u16(f["dropped"]) + u8(len(f["records"]))
@@ -332,6 +348,7 @@ def encode(kind: str, msg_type: int, f: dict) -> bytes:
         if t == SEND_DISCOVERY: return u32(f["timeout_ms"])
         if t == SEND_TRACE: return u32(f["timeout_ms"]) + u8(f["hash_size"]) + bytes.fromhex(f["hashes"])
         if t == OBS_PULL: return u8(f["max"])
+        if t == FLOOD_SCOPE: return u8(f["mode"])
     elif kind == "event":
         if t == EV_BOOT: return u8(f["reset_reason"]) + enc_hello_body(f)
         if t == EV_MESH_REPLY: return enc_reply(f)
@@ -364,6 +381,7 @@ def decode(kind: str, msg_type: int, payload: bytes) -> dict:
         elif t == PATH_GET: dec_path(r, f)
         elif t in (SEND_LOGIN, SEND_REQUEST, SEND_CLI, SEND_DISCOVERY, SEND_TRACE):
             f["send"], f["tag"], f["sender_ts"] = r.u8(), r.u32(), r.u32()
+            if r.i < len(r.d): f["scoped"] = r.u8()  # 1.3
         elif t == REPLY_GET: dec_reply(r, f)
         elif t == OBS_PULL:
             f["remaining"], f["dropped"] = r.u8(), r.u16()
@@ -372,6 +390,7 @@ def decode(kind: str, msg_type: int, payload: bytes) -> dict:
             for k in ("rx", "tx", "client_tx", "adverts", "adverts_dropped", "obs_dropped"):
                 f[k] = r.u32()
             f["noise_floor"], f["last_rssi"], f["last_snr_q4"] = r.i16(), r.i16(), r.i8()
+        elif t == FLOOD_SCOPE: f["mode"], f["scope"] = r.u8(), r.str8()
     elif kind == "request":
         if t == HELLO:
             f["proto_major"], f["proto_minor"], f["peer_kind"], f["max_payload"] = r.u8(), r.u8(), r.u8(), r.u8()
@@ -393,6 +412,7 @@ def decode(kind: str, msg_type: int, payload: bytes) -> dict:
         elif t == SEND_DISCOVERY: f["timeout_ms"] = r.u32()
         elif t == SEND_TRACE: f["timeout_ms"], f["hash_size"], f["hashes"] = r.u32(), r.u8(), r.rest().hex()
         elif t == OBS_PULL: f["max"] = r.u8()
+        elif t == FLOOD_SCOPE: f["mode"] = r.u8()
     elif kind == "event":
         if t == EV_BOOT:
             f["reset_reason"] = r.u8()
@@ -607,6 +627,51 @@ CASES_1_2 = [
 ]
 
 
+# What 1.3 adds (LINK-PROTOCOL.md section 6.5). In link-v1.3.json only.
+#
+# The send answers of 1.2 and before stay as they are above, without `scoped`: that is what a
+# session older than 1.3 carries, and a 1.3 reader has to take both.
+HELLO_FIELDS_1_3 = dict(HELLO_FIELDS_1_2, proto_minor=3, caps=HELLO_FIELDS_1_2["caps"] | CAP_FLOOD_SCOPE,
+                        fw_version="0.1.5+abc1234")
+FLOOD_SCOPE_LONGEST = "dk-midtjylland-oestjylland-nor"
+assert len(FLOOD_SCOPE_LONGEST) == FLOOD_SCOPE_MAX_NAME
+
+CASES_1_3 = [
+    ("hello request, 1.3", "w2r", "request", HELLO, 52,
+     {"proto_major": 1, "proto_minor": 3, "peer_kind": 1, "max_payload": 240, "fw_version": "0.1.7+def5678"}),
+    ("hello response, 1.3: its client's floods take the default scope", "r2w", "response", HELLO, 52,
+     dict(status=OK, **HELLO_FIELDS_1_3)),
+    ("hello response from a 1.2 radio to a 1.3 request: its floods carry no scope", "r2w", "response", HELLO, 53,
+     dict(status=OK, **HELLO_FIELDS_1_2)),
+    ("hello response from a 1.3 radio to a 1.2 request: a session of 1.2, the bit still in its caps", "r2w",
+     "response", HELLO, 54, dict(status=OK, **dict(HELLO_FIELDS_1_3, proto_minor=2))),
+    ("boot event, 1.3: the bit in its caps", "r2w", "event", EV_BOOT, 0, dict(reset_reason=1, **HELLO_FIELDS_1_3)),
+    ("flood scope: ask", "w2r", "request", FLOOD_SCOPE, 55, {"mode": FLOOD_ASK}),
+    ("flood scope: scoped next, and the default scope is dk", "r2w", "response", FLOOD_SCOPE, 55,
+     {"status": OK, "mode": FLOOD_SCOPED, "scope": "dk"}),
+    ("flood scope: the next send without it", "w2r", "request", FLOOD_SCOPE, 56, {"mode": FLOOD_UNSCOPED}),
+    ("flood scope: unscoped next", "r2w", "response", FLOOD_SCOPE, 56,
+     {"status": OK, "mode": FLOOD_UNSCOPED, "scope": "dk"}),
+    ("flood scope: back to the scope", "w2r", "request", FLOOD_SCOPE, 57, {"mode": FLOOD_SCOPED}),
+    ("flood scope: a radio with no default scope", "r2w", "response", FLOOD_SCOPE, 58,
+     {"status": OK, "mode": FLOOD_SCOPED, "scope": ""}),
+    ("flood scope: the longest name a region has", "r2w", "response", FLOOD_SCOPE, 59,
+     {"status": OK, "mode": FLOOD_SCOPED, "scope": FLOOD_SCOPE_LONGEST}),
+    ("flood scope refused: a mode that is none of the three", "r2w", "response", FLOOD_SCOPE, 60, {"status": ERR_RANGE}),
+    ("flood scope refused: the session is older than 1.3", "r2w", "response", FLOOD_SCOPE, 61, {"status": ERR_STATE}),
+    ("flood scope refused: a radio that cannot scope a flood", "r2w", "response", FLOOD_SCOPE, 62,
+     {"status": ERR_UNSUPPORTED}),
+    ("login sent as a flood in the default scope", "r2w", "response", SEND_LOGIN, 63,
+     {"status": OK, "send": 1, "tag": 0, "sender_ts": 1794665000, "scoped": 1}),
+    ("login sent as a flood without it", "r2w", "response", SEND_LOGIN, 64,
+     {"status": OK, "send": 1, "tag": 0, "sender_ts": 1794665013, "scoped": 0}),
+    ("request sent direct: a path has no scope", "r2w", "response", SEND_REQUEST, 65,
+     {"status": OK, "send": 2, "tag": 1794665020, "sender_ts": 1794665020, "scoped": 0}),
+    ("discovery sent in the default scope", "r2w", "response", SEND_DISCOVERY, 66,
+     {"status": OK, "send": 1, "tag": 1794665031, "sender_ts": 1794665031, "scoped": 1}),
+]
+
+
 def reject_reason(frame: bytes) -> str:
     """Why parse_frame refuses a frame: 'cobs', 'short', 'oversize' or 'crc'. Informative - a receiver
     has to refuse the frame and count it; it does not have to agree on the word."""
@@ -637,7 +702,8 @@ def invalid_frames():
 def build_fixtures(minor=PROTO_MINOR):
     cases = []
     for name, direction, kind, t, seq, fields in (CASES + (CASES_1_1 if minor >= 1 else [])
-                                                  + (CASES_1_2 if minor >= 2 else [])):
+                                                  + (CASES_1_2 if minor >= 2 else [])
+                                                  + (CASES_1_3 if minor >= 3 else [])):
         payload = encode(kind, t, fields)
         wire_type = t | RESPONSE_BIT if kind == "response" else t
         cases.append({

@@ -72,7 +72,11 @@ a fork to merge by hand. *How it is possible:* the three calls a mesh client nee
 by building it, and says so if it is wrong. *The exception (2026-11-07):* link 1.2's `LOCAL_REQUEST`
 answers with upstream's own `handleRequest`, which is private at the pin (`MyMesh.h`). The repeater
 firmware's pile 3.9 reaches it without editing upstream, writes in `docs/upstream.md` how, and drafts
-the request to upstream that would make it protected.
+the request to upstream that would make it protected. *A second (2026-11-14):* link 1.3 sends the
+mesh client's floods through upstream's own `sendFloodScoped` with upstream's own `default_scope`,
+and names that scope from `region_map`; both are private at the pin. The repeater firmware reaches
+them the same way, reads them and never writes them, and lists them in `docs/upstream.md` beside
+the first.
 
 **S-3 · A purpose-built link, not the companion protocol.** The two boxes speak
 [`LINK-PROTOCOL.md`](LINK-PROTOCOL.md): framed, checksummed, request/response from the Walter with
@@ -299,9 +303,9 @@ the Walter waits for two piles elsewhere (§8): `meshmaster.dk` 4.14 and the exi
 3. **The bootloader's settings page** after an SWD flash — the Adafruit bootloader checks a CRC it
    recorded at the last DFU; the flasher has to leave that page in a state the bootloader accepts.
    The flasher task reads the bootloader's source and decides; the bench confirms.
-4. **Scoped floods** — whether the mesh client's floods should carry the repeater's default-scope
-   transport codes. They follow the agent firmware (unscoped) until the Danish network's use of
-   scopes says otherwise.
+4. **Scoped floods** — decided 2026-11-14 (Thomas): the mesh client's floods carry the repeater's
+   default scope, as its adverts do, and the Walter applies the agent's own rule over them: the
+   scope first, then one try without it (meshmaster.dk D-47). `LINK-PROTOCOL.md` 1.3, §6.5.
 5. **The Walter's draw asleep, and the check-in interval the battery can pay for** — measured on
    the bench; the policy table has placeholders until then.
 6. **Whether the Walter stays** (the cheaper-MCU question of 2026-09) — deferred by the order; the
