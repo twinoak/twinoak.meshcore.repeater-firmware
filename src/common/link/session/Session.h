@@ -101,6 +101,15 @@ class Session {
   // The retry memory's proof, and nothing else reads it.
   uint32_t executed() const { return executed_; }
 
+  // The version of this session (section 5.1, "The session's version"): what the last HELLO's
+  // answer named, and 1.0 before any HELLO of this boot. 1.3 is the first minor whose rules for
+  // other messages depend on it - section 6.5's - and nothing else reads it.
+  uint8_t sessionMinor() const { return session_minor_; }
+  // FLOOD_SCOPE's mode as it stands (section 6.5): what the next flood will carry, kFloodScopeOn
+  // or kFloodScopeOnceOff. The link's own state, kept here whether or not a board can scope
+  // anything.
+  uint8_t floodScopeMode() const { return flood_mode_; }
+
   // How many CLI replies filled the 160-byte window upstream's console gives its interpreter, or
   // wrote past it into the guard behind it (Session.cpp's cliHandler). Zero on a healthy node;
   // what a bench reads when a console reply comes back cut short.
@@ -124,6 +133,11 @@ class Session {
   size_t sendHandler(uint8_t type, Bytes body, uint32_t now_ms);
   // Section 6.3's event, when nothing else wants the wire: true when one was built.
   bool pumpMeshReply(uint32_t now_ms);
+  // Whether the next flood the mesh client originates takes the node's default scope (6.5): the
+  // capability, a session of 1.3 or later, and the mode - all three, and nothing else.
+  bool floodScopedNow() const {
+    return s_.flood_scope != nullptr && session_minor_ >= 3 && flood_mode_ == kFloodScopeOn;
+  }
   // Section 8's sequence, when nothing else wants the wire: the wake bytes, then the events.
   void pumpAttention(uint32_t now_ms);
   // Whether the line has been idle long enough to prefix the frame with 0x00 (section 2).
@@ -163,6 +177,14 @@ class Session {
   uint8_t mem_type_ = 0;
   uint8_t mem_seq_ = 0;
   bool have_memory_ = false;
+
+  // Section 5.1, "The session's version": the minor the last HELLO's answer named, 0 until the
+  // first HELLO of this boot. A HELLO of 1.2 after one of 1.3 makes it 1.2 again.
+  uint8_t session_minor_ = 0;
+  // Section 6.5's mode. kFloodScopeOn is "what holds when nothing was asked"; kFloodScopeOnceOff
+  // is for one send and is put back by the next SEND_* executed, by JOB_BEGIN, by JOB_END and by
+  // the job the client ends itself after 120 seconds.
+  uint8_t flood_mode_ = kFloodScopeOn;
 
   uint8_t event_seq_ = 0;
   uint32_t executed_ = 0;

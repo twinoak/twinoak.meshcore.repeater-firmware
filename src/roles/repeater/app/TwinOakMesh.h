@@ -97,12 +97,13 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // the pin.
   uint32_t uniqueTime() override;
   void randomBytes(uint8_t* dest, size_t len) override;
-  bool sendAnonRequest(const uint8_t* plain, size_t len,
-                       const twinoak::meshclient::Route& route) override;
-  bool sendDatagram(uint8_t payload_type, const uint8_t* plain, size_t len,
-                    const twinoak::meshclient::Route& route) override;
-  bool sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags, const uint8_t* path,
-                 uint8_t path_bytes) override;
+  twinoak::meshclient::PacketSent sendAnonRequest(
+      const uint8_t* plain, size_t len, const twinoak::meshclient::Route& route) override;
+  twinoak::meshclient::PacketSent sendDatagram(
+      uint8_t payload_type, const uint8_t* plain, size_t len,
+      const twinoak::meshclient::Route& route) override;
+  twinoak::meshclient::PacketSent sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags,
+                                            const uint8_t* path, uint8_t path_bytes) override;
   void radioCounters(twinoak::meshclient::RadioCounters& out) override;
 
  protected:
@@ -228,9 +229,12 @@ class TwinOakMesh : public MyMesh, public twinoak::meshclient::MeshPort {
   // is where it is wiped when the job ends.
   const uint8_t* sharedSecret();
   // One packet of the client's, queued along its route: direct along the job's path, or flooded
-  // with two-byte hashes. Tells the clock keeper first. False when `pkt` is null (the pool was
-  // empty and nothing was built).
-  bool dispatch(mesh::Packet* pkt, const twinoak::meshclient::Route& route);
+  // with two-byte hashes. Tells the clock keeper first. `queued` false when `pkt` is null (the
+  // pool was empty and nothing was built), and `scoped` whether a transport code of the node's
+  // default scope went on the packet - **always false here**, because this board's floods are
+  // upstream's plain sendFlood until pile 3.13's task 02 (spec/LINK-PROTOCOL.md 6.5).
+  twinoak::meshclient::PacketSent dispatch(mesh::Packet* pkt,
+                                           const twinoak::meshclient::Route& route);
   // The reply's SNR as the record carries it: quarter-decibels, from the packet.
   static int8_t snrQ4Of(const mesh::Packet* pkt);
   // The RSSI of this packet, from the note logRx took, or kRssiUnknown when there is none. Taken

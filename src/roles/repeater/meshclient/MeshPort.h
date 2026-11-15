@@ -43,10 +43,29 @@ constexpr uint8_t kFloodPathHashSize = 2;
 
 // How a packet leaves: direct along a path in MeshCore's own path_len encoding (0 is zero hops,
 // sent direct with an empty path), or as a flood with two-byte hashes.
+//
+// `scoped` is link 1.3's one addition (spec/LINK-PROTOCOL.md 6.5): what the port has to know of a
+// flood beyond its hash size. True asks for the flood to go out exactly as the node's own flooded
+// advert does - through upstream's sendFloodScoped with upstream's own default scope - and it is
+// true only when the link said so (Session.h's floodScopedNow: the capability, a session of 1.3
+// or later, and FLOOD_SCOPE's mode) and the route is a flood. A direct send and a trace are never
+// scoped.
 struct Route {
   bool direct = false;
   const uint8_t* path = nullptr;
   uint8_t path_len = 0;  // (hash_size - 1) << 6 | hop_count; the Job's pathLen()
+  bool scoped = false;   // 1.3: this flood takes the node's default scope
+};
+
+// What one send came to. `queued` is what the three sends used to return: a packet was built and
+// put in the queue, false when the pool was empty and nothing was built. `scoped` is what
+// actually went on the packet and not what the Route asked for - "a radio with no default scope
+// answers 0 to a flood that was asked scoped" (6.2's `scoped` row, 6.5) - and it is what the
+// link's answer carries. A port that cannot scope anything answers false to both questions at
+// once by leaving it alone.
+struct PacketSent {
+  bool queued = false;
+  bool scoped = false;
 };
 
 // What MESH_COUNTERS reads from the radio (6.4).
@@ -68,15 +87,17 @@ struct MeshPort {
   virtual void randomBytes(uint8_t* dest, size_t len) = 0;
 
   // Each builds **one** packet to the job's peer from the plaintext given, queues it along the
-  // route, and returns false when no packet could be built (the pool is empty). The plaintext is
-  // the caller's buffer and the caller wipes it; what the packet holds is ciphertext.
-  virtual bool sendAnonRequest(const uint8_t* plain, size_t len, const Route& route) = 0;
-  virtual bool sendDatagram(uint8_t payload_type, const uint8_t* plain, size_t len,
-                            const Route& route) = 0;
+  // route, and answers with a PacketSent: `queued` false when no packet could be built (the pool
+  // is empty), and `scoped` whether a transport code of the default scope went on it. The
+  // plaintext is the caller's buffer and the caller wipes it; what the packet holds is ciphertext.
+  virtual PacketSent sendAnonRequest(const uint8_t* plain, size_t len, const Route& route) = 0;
+  virtual PacketSent sendDatagram(uint8_t payload_type, const uint8_t* plain, size_t len,
+                                  const Route& route) = 0;
   // One TRACE packet, always direct, along `path_bytes` bytes of round-trip hashes whose size the
-  // flags byte states as an exponent (Mesh::onRecvPacket, the TRACE branch).
-  virtual bool sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags, const uint8_t* path,
-                         uint8_t path_bytes) = 0;
+  // flags byte states as an exponent (Mesh::onRecvPacket, the TRACE branch). Never scoped: a
+  // trace is not a flood.
+  virtual PacketSent sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags,
+                               const uint8_t* path, uint8_t path_bytes) = 0;
 
   virtual void radioCounters(RadioCounters& out) = 0;
 };

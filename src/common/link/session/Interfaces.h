@@ -186,6 +186,30 @@ struct LocalRequestAccess {
   virtual int localRequest(uint8_t req_type, Bytes data, uint8_t* out, size_t cap) = 0;
 };
 
+// FLOOD_SCOPE (link 1.3, spec/LINK-PROTOCOL.md 6.5; pile 3.13). Present => kCapFloodScope, and
+// with it the floods the mesh client originates take the node's default scope in a session of
+// 1.3 or later. It is the capability of a role whose mesh client can scope a flood - the
+// repeater's, from 1.3 - and a build without it answers FLOOD_SCOPE kErrUnsupported and floods
+// with no transport code, as every build did before 1.3.
+//
+// One method, because that is all the link needs of the board: **the name**. Whether the next
+// flood is scoped is the link's own state (Session.h's flood_mode_ and the session's version);
+// whether a transport code actually went on the packet is the port's answer
+// (src/roles/repeater/meshclient/MeshPort.h); and the key is upstream's, never derived here
+// (6.5: "the RAK derives no key and computes no code of its own").
+struct FloodScopeAccess {
+  virtual ~FloodScopeAccess() {}
+
+  // The default scope's name as `region default` prints it, without a leading `#`: 1 to
+  // kScopeNameMax bytes, or empty when the node holds no default scope. A view into the
+  // implementation's own storage, valid until the next request - which is long enough, because
+  // the session encodes the answer inside this request's own handler.
+  //
+  // Read afresh every time: "a default scope that changes - a `region default` over the mesh, or
+  // a `CLI` line on this link - is in force for the next send" (6.5), so nothing here is cached.
+  virtual Bytes scopeName() const = 0;
+};
+
 // The mesh client (phase 2; src/roles/repeater/meshclient/LinkMeshClient.h implements it over the job of
 // src/roles/repeater/meshclient/Job.h and the reply record of src/roles/repeater/meshclient/Reply.h). Present => kCapMeshClient.
 //
@@ -234,6 +258,19 @@ struct MeshClientAccess {
   // MESH_COUNTERS (6.4): rx, tx, client_tx and the radio's floor, RSSI and SNR. The observation
   // fields (adverts, adverts_dropped, obs_dropped) are the ring's and the session fills them.
   virtual void getCounters(MeshCountersResponse& out) = 0;
+
+  // --- the flood scope (6.5, link 1.3) ----------------------------------------------------
+  //
+  // Whether the **next** flood this client originates takes the node's default scope. The
+  // session works it out before every send - the capability, the session's version and
+  // FLOOD_SCOPE's mode, and nothing else - and the client puts it on the route it hands the
+  // port; a direct send and a trace are never scoped whatever this says.
+  virtual void setFloodScoped(bool scoped) = 0;
+
+  // "The job the RAK ends by itself when 120 seconds pass with no request on the link" (6.1),
+  // reported **once**: FLOOD_SCOPE's mode goes back to 1 with it, as JOB_END's does (6.5). True
+  // at most once per self-end; the session asks once a pass.
+  virtual bool takeSilentJobEnd() = 0;
 };
 
 // The observation ring (phase 2's task 03; src/roles/repeater/meshclient/LinkObservations.h implements it over
@@ -277,6 +314,7 @@ struct Services {
   EnvAccess* env = nullptr;
   LppAccess* lpp = nullptr;
   LocalRequestAccess* local_request = nullptr;
+  FloodScopeAccess* flood_scope = nullptr;
   MeshClientAccess* mesh = nullptr;
   ObservationAccess* observations = nullptr;
 };
@@ -292,6 +330,7 @@ inline uint32_t capsOf(const Services& s) {
   if (s.attention != nullptr) caps |= kCapAttention;
   if (s.clock != nullptr) caps |= kCapTimePersist;
   if (s.local_request != nullptr) caps |= kCapLocalRequest;  // 1.2
+  if (s.flood_scope != nullptr) caps |= kCapFloodScope;      // 1.3
   return caps;
 }
 

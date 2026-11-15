@@ -1,7 +1,8 @@
 // src/common/link/codec/: the box link as bytes, held against *every* file of
 // spec/fixtures/link/ - link-v1.json, which is 1.0's and whose bytes never change because
 // firmware that speaks 1.0 has been released; link-v1.1.json, which is every case of 1.0 and the
-// four 1.1 adds; and link-v1.2.json, which is every case of 1.1 and the fourteen 1.2 adds
+// four 1.1 adds; link-v1.2.json, which is every case of 1.1 and the fourteen 1.2 adds; and
+// link-v1.3.json, which is every case of 1.2 and the nineteen 1.3 adds
 // (spec/LINK-PROTOCOL.md section 11). spec/tools/linkref.py generates them from that document,
 // and the Walter's firmware tests its own codec against the same files in its own repository.
 //
@@ -88,7 +89,7 @@ std::string asText(Bytes b) {
 
 // ----------------------------------------------------------------------------- the fixture file
 
-// The two files of spec/fixtures/link/, and what each says its `link` is. `least_cases` is the
+// The files of spec/fixtures/link/, and what each says its `link` is. `least_cases` is the
 // count this task was written against: fewer is a copy that lost something.
 struct FixtureFile {
   const char* file;
@@ -99,6 +100,7 @@ const FixtureFile kFixtures[] = {
     {"link-v1.json", "1.0", 69},
     {"link-v1.1.json", "1.1", 73},
     {"link-v1.2.json", "1.2", 87},
+    {"link-v1.3.json", "1.3", 106},
 };
 constexpr size_t kFixtureCount = sizeof(kFixtures) / sizeof(kFixtures[0]);
 
@@ -411,6 +413,13 @@ bool exerciseRequest(const Case& c) {
       expectNum(c, "max", m.max);
       return true;
     }
+    case kMsgFloodScope: {
+      FloodScope m;
+      EXPECT_TRUE(decodeFloodScope(in, m)) << c.where();
+      expectNum(c, "mode", m.mode);
+      EXPECT_EQ(1u, c.payload.size()) << c.where() << ": a mode byte and nothing else (6.5)";
+      return true;
+    }
     // The requests with no fields at all (section 5.1, "Versions": trailing bytes are ignored).
     case kMsgStatus:
     case kMsgTimeGet:
@@ -571,7 +580,23 @@ bool exerciseOutgoing(const Case& c, std::vector<uint8_t>& out) {
       m.send = f["send"].as<uint8_t>();
       m.tag = f["tag"].as<uint32_t>();
       m.sender_ts = f["sender_ts"].as<uint32_t>();
+      // 1.3's `scoped`, at the end and only in a session of 1.3 or later (section 6.2's `scoped`
+      // row). A case of 1.2 or before carries no `scoped` field at all, and what the encoder is
+      // then held to is writing nothing for it - which is what leaving `session_minor` at 0 asks.
+      // The reference decides the same way (spec/tools/linkref.py: `u8(f["scoped"]) if "scoped"
+      // in f else b""`).
+      if (f["scoped"].is<long long>()) {
+        m.scoped = f["scoped"].as<uint8_t>();
+        m.session_minor = 3;
+      }
       n = encodeSendResponse(m, buf, sizeof(buf));
+      break;
+    }
+    case kMsgFloodScope: {
+      FloodScopeResponse m;
+      m.mode = f["mode"].as<uint8_t>();
+      m.scope = store.text(f, "scope");
+      n = encodeFloodScopeResponse(m, buf, sizeof(buf));
       break;
     }
     case kMsgReplyGet:
@@ -996,6 +1021,118 @@ TEST(TheLocalRequest, AnEmptyAnswerIsTheStatusByteAndNothingElse) {
   EXPECT_EQ(unsigned(kOk), unsigned(out[0]));
 }
 
+// ----------------------------------------------------------------------------- 1.3's scope
+
+TEST(TheFloodScope, ItsNumbersAreSectionSixPointFives) {
+  EXPECT_EQ(0x2C, kMsgFloodScope);
+  EXPECT_EQ(0xAC, responseType(kMsgFloodScope));
+  EXPECT_EQ(0x100u, uint32_t(kCapFloodScope));
+  EXPECT_EQ(0, kFloodScopeAsk);
+  EXPECT_EQ(1, kFloodScopeOn);
+  EXPECT_EQ(2, kFloodScopeOnceOff);
+  EXPECT_EQ(30, kScopeNameMax);
+  // "Any other mode is ERR_RANGE": three values and no more, which is why there is a list.
+  for (unsigned m = 0; m < 256; m++) {
+    EXPECT_EQ(m <= 2, isFloodScopeMode(uint8_t(m))) << "mode " << m;
+  }
+}
+
+TEST(TheFloodScope, AnEmptyPayloadIsMalformedAndAnyModeIsDecoded) {
+  FloodScope m;
+  EXPECT_FALSE(decodeFloodScope(bytesOf(nullptr, 0), m)) << "not even a mode byte";
+
+  // A mode outside the three is **decoded**, not refused: it is kErrRange and the session's
+  // answer to give, as REBOOT's mode is.
+  const uint8_t three[] = {3};
+  ASSERT_TRUE(decodeFloodScope(bytesOf(three, sizeof(three)), m));
+  EXPECT_EQ(3, m.mode);
+  EXPECT_FALSE(isFloodScopeMode(m.mode));
+
+  // And a trailing byte a later minor may add is ignored (section 5.1, "Versions").
+  const uint8_t and_more[] = {kFloodScopeOnceOff, 0x77};
+  ASSERT_TRUE(decodeFloodScope(bytesOf(and_more, sizeof(and_more)), m));
+  EXPECT_EQ(kFloodScopeOnceOff, m.mode);
+}
+
+TEST(TheFloodScope, TheAnswerRefusesAModeThatIsNotOneOfTheTwoAndANameTooLong) {
+  uint8_t out[kMaxPayload];
+  FloodScopeResponse r;
+
+  // "Response body: mode, 1 or 2, what the next send will be." kFloodScopeAsk is a request and
+  // never an answer.
+  r.mode = kFloodScopeAsk;
+  EXPECT_EQ(0u, encodeFloodScopeResponse(r, out, sizeof(out)));
+  r.mode = 3;
+  EXPECT_EQ(0u, encodeFloodScopeResponse(r, out, sizeof(out)));
+
+  // The longest name a region has is thirty bytes; thirty-one is a caller's bug and not
+  // something to put on the wire cut short.
+  std::vector<uint8_t> name(size_t(kScopeNameMax) + 1, 'd');
+  r.mode = kFloodScopeOn;
+  r.scope = bytesOf(name.data(), name.size());
+  EXPECT_EQ(0u, encodeFloodScopeResponse(r, out, sizeof(out)));
+  name.pop_back();
+  r.scope = bytesOf(name.data(), name.size());
+  EXPECT_EQ(3u + size_t(kScopeNameMax), encodeFloodScopeResponse(r, out, sizeof(out)))
+      << "status, mode, the length byte and thirty characters";
+
+  // An empty name is a legal answer - a radio that holds no default scope - and is a
+  // zero-length str8 and not an omission.
+  r.scope = Bytes();
+  const size_t n = encodeFloodScopeResponse(r, out, sizeof(out));
+  ASSERT_EQ(3u, n);
+  EXPECT_EQ(0x00, out[2]);
+}
+
+TEST(TheScopedByte, IsWrittenOnlyInASessionOfOnePointThreeOrLater) {
+  // Section 6.2's `scoped` row: "present in a session of 1.3 or later, absent in an older one".
+  // The two fixture cases below are the same send answered in the two sessions; here the same
+  // SendResponse is encoded twice, with nothing changed but the session's version.
+  const Case* at_13 = nullptr;
+  for (const Case& c : casesOf(kFixtureCount - 1)) {
+    if (c.name == "login sent as a flood in the default scope") at_13 = &c;
+  }
+  ASSERT_NE(nullptr, at_13) << "link-v1.3.json has no scoped login answer";
+
+  SendResponse m;
+  m.send = at_13->fields["send"].as<uint8_t>();
+  m.tag = at_13->fields["tag"].as<uint32_t>();
+  m.sender_ts = at_13->fields["sender_ts"].as<uint32_t>();
+  m.scoped = 1;
+  m.session_minor = 3;
+
+  uint8_t out[kMaxPayload];
+  size_t n = encodeSendResponse(m, out, sizeof(out));
+  ASSERT_GT(n, 0u);
+  EXPECT_EQ(toHex(at_13->payload), toHex(out, n)) << "the byte at the end of a 1.3 answer";
+  EXPECT_EQ(11u, n) << "status, send, tag, sender_ts, scoped";
+
+  // The same answer in a session of 1.2: one byte shorter, and the ten before it unchanged -
+  // which is what "a minor adds fields at the end of a payload and never changes what exists"
+  // means here.
+  for (uint8_t minor : {uint8_t(0), uint8_t(1), uint8_t(2)}) {
+    m.session_minor = minor;
+    uint8_t older[kMaxPayload];
+    const size_t n0 = encodeSendResponse(m, older, sizeof(older));
+    ASSERT_EQ(10u, n0) << "minor " << unsigned(minor);
+    EXPECT_EQ(toHex(out, n0), toHex(older, n0)) << "minor " << unsigned(minor);
+  }
+
+  // And `scoped` 0 in a 1.3 session is still a byte: the fixture's unscoped login.
+  const Case* unscoped = nullptr;
+  for (const Case& c : casesOf(kFixtureCount - 1)) {
+    if (c.name == "login sent as a flood without it") unscoped = &c;
+  }
+  ASSERT_NE(nullptr, unscoped);
+  m.sender_ts = unscoped->fields["sender_ts"].as<uint32_t>();
+  m.scoped = 0;
+  m.session_minor = 3;
+  n = encodeSendResponse(m, out, sizeof(out));
+  ASSERT_EQ(11u, n);
+  EXPECT_EQ(toHex(unscoped->payload), toHex(out, n));
+  EXPECT_EQ(0x00, out[n - 1]);
+}
+
 // ----------------------------------------------------------------------------- invalid and stream
 
 TEST(InvalidFrames, EveryOneIsRefusedAndCounted) {
@@ -1184,6 +1321,7 @@ size_t minimumPayload(uint8_t type) {
     case kMsgSendDiscovery: return 4;
     case kMsgSendTrace: return 5;
     case kMsgObsPull: return 1;
+    case kMsgFloodScope: return 1;             // a mode byte: "no mode at all" is malformed (6.5)
     default: return 0;                         // the requests with no fields
   }
 }
@@ -1210,6 +1348,7 @@ bool decodeAccepts(uint8_t type, const uint8_t* data, size_t len) {
     case kMsgSendDiscovery: { SendDiscovery m; return decodeSendDiscovery(in, m); }
     case kMsgSendTrace: { SendTrace m; return decodeSendTrace(in, m); }
     case kMsgObsPull: { ObsPull m; return decodeObsPull(in, m); }
+    case kMsgFloodScope: { FloodScope m; return decodeFloodScope(in, m); }
     default: return decodeNoFields(in);
   }
 }
@@ -1412,11 +1551,11 @@ TEST(TheNumbers, AreTheTablesOfTheSpecification) {
   EXPECT_EQ(244, kMaxPacket);
   EXPECT_EQ(246, kReceiveBuffer);
 
-  // The version this firmware speaks (section 5.1). 1.2 since 7 November 2026; the image
+  // The version this firmware speaks (section 5.1). 1.3 since 14 November 2026; the image
   // descriptor's link_minor and the release manifest's `link` are both this constant
   // (test/test_image, tools/release/build_release.py).
   EXPECT_EQ(1, kProtoMajor);
-  EXPECT_EQ(2, kProtoMinor);
+  EXPECT_EQ(3, kProtoMinor);
   EXPECT_EQ(kFixtures[kFixtureCount - 1].link,
             std::to_string(kProtoMajor) + "." + std::to_string(kProtoMinor))
       << "the newest fixture file is not the version this firmware speaks";

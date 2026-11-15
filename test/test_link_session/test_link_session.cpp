@@ -5,10 +5,11 @@
 // EV_ATTENTION.
 //
 // link-v1.json is 1.0's and its bytes never change; link-v1.1.json is every case of 1.0 and the
-// four 1.1 adds; link-v1.2.json is every case of 1.1 and the fourteen 1.2 adds
-// (spec/LINK-PROTOCOL.md section 11). All three are run, in that order and not one in place of
-// another: the Walter on the bench speaks 1.0 and must still be answered the bytes it has always
-// been answered, which is only checkable while 1.0's file is still run.
+// four 1.1 adds; link-v1.2.json is every case of 1.1 and the fourteen 1.2 adds; link-v1.3.json is
+// every case of 1.2 and the nineteen 1.3 adds (spec/LINK-PROTOCOL.md section 11). All four are
+// run, in that order and not one in place of another: the Walter on the bench speaks 1.0 and must
+// still be answered the bytes it has always been answered, which is only checkable while 1.0's
+// file is still run.
 //
 // The fixtures are read at run time from FIXTURES_DIR (platformio.ini's [env:native]). For each
 // request case the suite finds the response case of the same type and seq **in the same file**,
@@ -104,9 +105,15 @@ std::vector<uint8_t> frameOf(uint8_t type, uint8_t seq, const std::vector<uint8_
 
 // ----------------------------------------------------------------------------- the fixture file
 
-// The files, and how many of the requests this firmware answers each one has a request case for:
-// 1.0's thirteen; 1.1's the same thirteen plus its second HELLO; 1.2's those fourteen plus its
-// third HELLO and the four LOCAL_REQUESTs of section 5.9.
+// The files, and how many of the requests the generic sweep below answers in each: 1.0's
+// thirteen; 1.1's the same thirteen plus its second HELLO; 1.2's those fourteen plus its third
+// HELLO and the four LOCAL_REQUESTs of section 5.9; 1.3's those nineteen plus its fourth HELLO.
+//
+// 1.3's three FLOOD_SCOPE requests are **not** in that count: the sweep feeds one request to a
+// fresh session and that session is 1.0 until a HELLO, where FLOOD_SCOPE is ERR_STATE (6.5). The
+// cases of section 6.5 are driven in order through one session of 1.3 further down
+// (TheFloodScope), which is also what the fixture's own sequence of them is about - and one of
+// them, "flood scope: back to the scope", carries no answer case at all.
 struct FixtureFile {
   const char* file;
   const char* link;
@@ -116,6 +123,7 @@ const FixtureFile kFixtures[] = {
     {"link-v1.json", "1.0", 13},
     {"link-v1.1.json", "1.1", 14},
     {"link-v1.2.json", "1.2", 19},
+    {"link-v1.3.json", "1.3", 20},
 };
 constexpr size_t kFixtureCount = sizeof(kFixtures) / sizeof(kFixtures[0]);
 
@@ -445,6 +453,39 @@ class FakeMeshClient : public MeshClientAccess {
   void getReply(ReplyRecord& out, uint32_t) override { out = ReplyRecord(); }
   bool takeReplyEvent(ReplyRecord&, uint32_t) override { return false; }
   void getCounters(MeshCountersResponse&) override {}
+
+  // Link 1.3 (6.5): what the session last worked out about the next flood, recorded so that the
+  // session's half of that rule - the capability, the version and the mode, and nothing else - is
+  // visible without a real client; and the self-ended job the session asks about once a pass,
+  // which a test makes true by hand here.
+  int scope_calls = 0;
+  bool last_scoped = false;
+  bool silent_job_end = false;
+
+  void setFloodScoped(bool scoped) override {
+    scope_calls++;
+    last_scoped = scoped;
+  }
+  bool takeSilentJobEnd() override {
+    const bool ended = silent_job_end;
+    silent_job_end = false;
+    return ended;
+  }
+};
+
+// FLOOD_SCOPE's one seam (section 6.5, link 1.3). The real one is upstream's region map behind
+// `MyMesh::default_scope` and needs MeshCore (pile 3.13's task 02); what this suite holds is the
+// session's half of section 6.5 - the refusals, the mode and its one send, and the name carried
+// through untouched.
+class FakeFloodScope : public FloodScopeAccess {
+ public:
+  std::string name = "dk";
+  mutable int reads = 0;
+
+  Bytes scopeName() const override {
+    reads++;
+    return bytesOf(reinterpret_cast<const uint8_t*>(name.data()), name.size());
+  }
 };
 
 // The board's half of the five sends (src/roles/repeater/meshclient/MeshPort.h), as a fake that records what it
@@ -463,11 +504,16 @@ class FakeMeshPort : public twinoak::meshclient::MeshPort {
     uint32_t tag = 0;
     uint32_t auth = 0;
     uint8_t flags = 0;
+    bool scoped = false;  // 1.3: what the Route asked of this flood (6.5)
   };
 
   uint32_t time = 1791720050;  // the unique second the next send gets; counts up
   uint8_t random_fill = 0x5a;  // what randomBytes() writes
   bool fail = false;           // "the pool is empty": no packet can be built
+  // Whether this radio holds a default scope at all (6.5). With one, a flood the Route asked to
+  // be scoped goes out with a transport code; without one it does not, which is "a radio with no
+  // default scope answers 0 to a flood that was asked scoped".
+  bool holds_scope = true;
   std::vector<Sent> sent;
   twinoak::meshclient::RadioCounters counters;
 
@@ -475,28 +521,30 @@ class FakeMeshPort : public twinoak::meshclient::MeshPort {
   void randomBytes(uint8_t* dest, size_t len) override {
     for (size_t i = 0; i < len; i++) dest[i] = random_fill;
   }
-  bool sendAnonRequest(const uint8_t* plain, size_t len,
-                       const twinoak::meshclient::Route& route) override {
-    if (fail) return false;
+  twinoak::meshclient::PacketSent sendAnonRequest(
+      const uint8_t* plain, size_t len, const twinoak::meshclient::Route& route) override {
+    if (fail) return twinoak::meshclient::PacketSent();
     Sent s;
     s.kind = Sent::kAnon;
     s.plain.assign(plain, plain + len);
     record(s, route);
-    return true;
+    return outcome(route);
   }
-  bool sendDatagram(uint8_t payload_type, const uint8_t* plain, size_t len,
-                    const twinoak::meshclient::Route& route) override {
-    if (fail) return false;
+  twinoak::meshclient::PacketSent sendDatagram(
+      uint8_t payload_type, const uint8_t* plain, size_t len,
+      const twinoak::meshclient::Route& route) override {
+    if (fail) return twinoak::meshclient::PacketSent();
     Sent s;
     s.kind = Sent::kDatagram;
     s.payload_type = payload_type;
     s.plain.assign(plain, plain + len);
     record(s, route);
-    return true;
+    return outcome(route);
   }
-  bool sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags, const uint8_t* path,
-                 uint8_t path_bytes) override {
-    if (fail) return false;
+  twinoak::meshclient::PacketSent sendTrace(uint32_t tag, uint32_t auth_code, uint8_t flags,
+                                            const uint8_t* path,
+                                            uint8_t path_bytes) override {
+    if (fail) return twinoak::meshclient::PacketSent();
     Sent s;
     s.kind = Sent::kTrace;
     s.direct = true;
@@ -506,13 +554,27 @@ class FakeMeshPort : public twinoak::meshclient::MeshPort {
     s.path.assign(path, path + path_bytes);
     s.path_len = path_bytes;
     sent.push_back(s);
-    return true;
+    // A trace is not a flood: the board builds its own direct route for it and nothing is
+    // scoped. This answers as that board's dispatch would.
+    twinoak::meshclient::PacketSent out;
+    out.queued = true;
+    return out;
   }
   void radioCounters(twinoak::meshclient::RadioCounters& out) override { out = counters; }
 
  private:
+  // What this radio made of that route: queued, and a transport code on it when the route asked
+  // for one and there is a default scope to take (6.5).
+  twinoak::meshclient::PacketSent outcome(const twinoak::meshclient::Route& route) {
+    twinoak::meshclient::PacketSent out;
+    out.queued = true;
+    out.scoped = route.scoped && holds_scope;
+    return out;
+  }
+
   void record(Sent& s, const twinoak::meshclient::Route& route) {
     s.direct = route.direct;
+    s.scoped = route.scoped;
     s.path_len = route.path_len;
     const size_t bytes = size_t(twinoak::meshclient::pathHashSize(route.path_len)) *
                          twinoak::meshclient::pathHopCount(route.path_len);
@@ -585,6 +647,7 @@ class Harness {
     services.env = &env;
     services.lpp = &lpp;  // no capability bit of its own (LINK-PROTOCOL.md section 4)
     services.local_request = &local_request;  // => kCapLocalRequest (1.2)
+    services.flood_scope = &flood_scope;      // => kCapFloodScope (1.3)
     services.mesh = &mesh;
     services.observations = &observations;
   }
@@ -662,6 +725,7 @@ class Harness {
   FakeEnv env;
   FakeLpp lpp;
   FakeLocalRequest local_request;
+  FakeFloodScope flood_scope;
   FakeMeshClient mesh;
   FakeObservations observations;
   Services services;
@@ -695,6 +759,7 @@ void applyCaps(Harness& h, uint32_t caps) {
   if ((caps & kCapAttention) == 0) h.services.attention = nullptr;
   if ((caps & kCapTimePersist) == 0) h.services.clock = nullptr;
   if ((caps & kCapLocalRequest) == 0) h.services.local_request = nullptr;
+  if ((caps & kCapFloodScope) == 0) h.services.flood_scope = nullptr;
   EXPECT_EQ(caps, capsOf(h.services)) << "the fixture's caps and the interfaces present";
 }
 
@@ -869,7 +934,7 @@ TEST(TheFixtures, EveryRequestThisTaskAnswersGivesTheFixturesResponseFrame) {
     EXPECT_EQ(kFixtures[which].requests_answered, n)
         << kFixtures[which].file << ": HELLO, PING, STATUS, IDENTITY, REBOOT, TIME_SET, TIME_GET,"
            " CLI, SLEEP_NOTICE, POWER_GET, ENV_GET, LPP_GET, OBS_PULL - and 1.1's second HELLO,"
-           " and 1.2's third with its four LOCAL_REQUESTs";
+           " 1.2's third with its four LOCAL_REQUESTs, and 1.3's fourth";
   }
 }
 
@@ -897,23 +962,19 @@ TEST(TheFixtures, AOnePointZeroRequestIsAnsweredAOnePointZeroBodyWithNoBand) {
   EXPECT_EQ(toHex(want->frame), h.lastFrame());
 }
 
-TEST(TheFixtures, TheBootEventIsTheNewestHelloBodyAfterAResetReason) {
+TEST(TheFixtures, TheBootEventIsTheFixturesOwnFrameAtThisFirmwaresMinor) {
   // EV_BOOT carries the body "as the RAK speaks it" (section 5.1): this firmware's own minor,
-  // band included, whatever the Walter knows. So the body it must carry is the one the newest
-  // fixture file's HELLO response at this firmware's minor carries, and its payload is
-  // `reset_reason` and then that body **without its status byte** - which is the whole of what
-  // section 5.1 says EV_BOOT is.
-  //
-  // It is held that way and not against an EV_BOOT case, because **1.2 added none**: the newest
-  // EV_BOOT case in spec/fixtures/link/ is 1.1's, and a 1.2 radio's boot event is not those
-  // bytes (its minor is 2 and its caps carry 0x80). The report's *Deviations* says so. 1.0's and
-  // 1.1's EV_BOOT cases are still held byte for byte by the codec suite, which encodes every
-  // event case of every file.
-  const Case* want = findCaseNamed("hello response, 1.2: it answers local requests");
+  // band included, whatever the Walter knows - and 1.3 carries an EV_BOOT case of exactly that
+  // radio, so this is held against the fixture's frame byte for byte. (While this firmware spoke
+  // 1.2 there was no such case - 1.2 added none - and this test built the payload out of the
+  // newest HELLO response instead; tasks/phase-3.9/reports/02.md's *Deviations* said so, and
+  // 1.3's own case ends it.)
+  const Case* want = findCaseNamed("boot event, 1.3: the bit in its caps");
   ASSERT_NE(nullptr, want);
   JsonObject f = want->fields;
   ASSERT_EQ(unsigned(kProtoMinor), f["proto_minor"].as<unsigned>())
-      << "the fixture's newest HELLO response is not at the minor this firmware speaks";
+      << "the fixture's newest boot event is not at the minor this firmware speaks";
+  ASSERT_EQ(unsigned(kResetPowerOn), f["reset_reason"].as<unsigned>());
 
   Harness h;
   h.system.reset_reason = kResetPowerOn;
@@ -924,18 +985,15 @@ TEST(TheFixtures, TheBootEventIsTheNewestHelloBodyAfterAResetReason) {
                f["upstream"].as<std::string>(), f["band"].as<std::string>());
   applyCaps(h, f["caps"].as<uint32_t>());
 
-  // The payload: the reset reason, then the fixture's own response payload past its status byte.
-  std::vector<uint8_t> payload;
-  payload.push_back(kResetPowerOn);
-  ASSERT_FALSE(want->payload.empty());
-  payload.insert(payload.end(), want->payload.begin() + 1, want->payload.end());
-
   EXPECT_EQ(0, h.session.nextEventSeq());
   h.session.begin(h.now);
   ASSERT_TRUE(h.takeOutgoing());
-  EXPECT_EQ(toHex(frameOf(kMsgEvBoot, 0, payload)), h.lastFrame()) << want->where();
+  EXPECT_EQ(toHex(want->frame), h.lastFrame()) << want->where();
   EXPECT_TRUE(h.lastHadLeadingZero()) << "the first thing the link ever sends leads with 0x00";
   EXPECT_EQ(1, h.session.nextEventSeq()) << "events are counted from 0 and wrap (section 3)";
+  // "EV_BOOT is what it was": it says which minor the RAK speaks and does not make a session of
+  // it. The session is 1.0 until a HELLO is answered (section 5.1).
+  EXPECT_EQ(0, h.session.sessionMinor());
 
   // Once, and only once: a pass after it produces nothing.
   h.run();
@@ -1005,9 +1063,9 @@ TEST(Hello, AHigherMinorIsAnsweredWithTheHighestBothKnow) {
 TEST(Hello, ACapabilityWhoseInterfaceIsAbsentIsNotAdvertised) {
   Harness h;
   EXPECT_EQ(uint32_t(kCapCli | kCapPower | kCapEnv | kCapMeshClient | kCapObservations |
-                     kCapAttention | kCapTimePersist | kCapLocalRequest),
+                     kCapAttention | kCapTimePersist | kCapLocalRequest | kCapFloodScope),
             capsOf(h.services));
-  EXPECT_EQ(0xffu, capsOf(h.services)) << "every bit the protocol defines, which 1.2 made eight";
+  EXPECT_EQ(0x1ffu, capsOf(h.services)) << "every bit the protocol defines, which 1.3 made nine";
 
   h.services.cli = nullptr;
   EXPECT_EQ(0u, capsOf(h.services) & kCapCli);
@@ -1015,6 +1073,8 @@ TEST(Hello, ACapabilityWhoseInterfaceIsAbsentIsNotAdvertised) {
   EXPECT_EQ(0u, capsOf(h.services) & kCapTimePersist);
   h.services.local_request = nullptr;
   EXPECT_EQ(0u, capsOf(h.services) & kCapLocalRequest);
+  h.services.flood_scope = nullptr;
+  EXPECT_EQ(0u, capsOf(h.services) & kCapFloodScope);
   h.services.power = nullptr;
   h.services.env = nullptr;
   h.services.mesh = nullptr;
@@ -3520,6 +3580,551 @@ TEST(Observations, AMalformedPullIsRefusedAndNothingLeavesTheRing) {
   ASSERT_GE(body.size(), 4u);
   EXPECT_EQ(kOk, body[0]);
   EXPECT_EQ(0u, r.obs.pending());
+}
+
+// --------------------------------------------------------------- 1.3's flood scope (6.5)
+
+// Section 6.5 through a real Session: the session's own version, FLOOD_SCOPE's refusals and its
+// one send, and - with the **real** src/roles/repeater/meshclient/ behind a FakeMeshPort - which
+// route a flood is given and what a send's answer says about it. The board's own half (upstream's
+// sendFloodScoped with upstream's default scope) is pile 3.13's task 02 and is not here: nothing
+// in this suite can hold a MeshCore packet.
+namespace {
+
+// The fixture's own HELLO request for that minor, at the seq it carries: 1.0's asks for 0, 1.1's
+// for 1, 1.2's for 2, 1.3's for 3.
+const Case* helloRequestOfMinor(uint8_t minor) {
+  for (const Case& c : cases()) {
+    if (c.kind != "request" || c.type != kMsgHello) continue;
+    if (c.payload.size() >= 2 && c.payload[1] == minor) return &c;
+  }
+  return nullptr;
+}
+
+// Says HELLO at that minor through a harness and throws the answer away. The session's version is
+// what the answer named (section 5.1), which is the point of saying it.
+void sayHello(Harness& h, uint8_t minor, uint8_t seq) {
+  const Case* req = helloRequestOfMinor(minor);
+  ASSERT_NE(nullptr, req) << "no HELLO request case asking for minor " << unsigned(minor);
+  h.sent.clear();
+  h.feed(frameOf(kMsgHello, seq, req->payload));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  h.sent.clear();
+}
+
+// A FLOOD_SCOPE request frame: one mode byte (6.5).
+std::vector<uint8_t> floodScopeFrame(uint8_t seq, uint8_t mode) {
+  return frameOf(kMsgFloodScope, seq, {mode});
+}
+
+}  // namespace
+
+TEST(TheSessionsVersion, IsWhatTheLastHelloAnswerNamedAndOnePointZeroBeforeAnyHello) {
+  // "The session's version is the one the last HELLO's answer named, and 1.0 before any HELLO of
+  // this boot" (section 5.1). A HELLO of 1.2 after one of 1.3 is a session of 1.2 again.
+  Harness h;
+  EXPECT_EQ(0, h.session.sessionMinor()) << "1.0 before any HELLO";
+
+  sayHello(h, 3, 90);
+  EXPECT_EQ(3, h.session.sessionMinor());
+  sayHello(h, 2, 91);
+  EXPECT_EQ(2, h.session.sessionMinor()) << "a HELLO of 1.2 after one of 1.3";
+  sayHello(h, 0, 92);
+  EXPECT_EQ(0, h.session.sessionMinor());
+  sayHello(h, 3, 93);
+  EXPECT_EQ(3, h.session.sessionMinor());
+
+  // A HELLO this firmware refuses leaves the version where it was: a major we do not speak is
+  // ERR_UNSUPPORTED, and a payload one byte short of its layout is ERR_MALFORMED.
+  const Case* req = helloRequestOfMinor(3);
+  ASSERT_NE(nullptr, req);
+  std::vector<uint8_t> wrong_major = req->payload;
+  wrong_major[0] = 2;
+  h.sent.clear();
+  h.feed(frameOf(kMsgHello, 94, wrong_major));
+  h.run();
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(kErrUnsupported, answeredStatus(h, type, seq));
+  EXPECT_EQ(3, h.session.sessionMinor()) << "a refused HELLO is not a session";
+}
+
+TEST(TheFixtures, AOnePointTwoRequestToAOnePointThreeRadioIsASessionOfOnePointTwo) {
+  // The fixture case "hello response from a 1.3 radio to a 1.2 request: a session of 1.2, the bit
+  // still in its caps" seen from this side: the answer says minor 2 and `caps` still carries
+  // 0x100, because `caps` is what the radio can do and not what the session speaks (section 5.1).
+  const Case* want = findCaseNamed(
+      "hello response from a 1.3 radio to a 1.2 request: a session of 1.2, the bit still in its "
+      "caps");
+  ASSERT_NE(nullptr, want);
+  ASSERT_EQ(2, want->fields["proto_minor"].as<int>());
+  ASSERT_EQ(0x100u, want->fields["caps"].as<uint32_t>() & uint32_t(kCapFloodScope));
+
+  const Case* req = helloRequestOfMinor(2);
+  ASSERT_NE(nullptr, req);
+
+  Harness h;
+  arrange(h, *want);
+  h.feed(frameOf(kMsgHello, want->seq, req->payload));
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(want->frame), h.lastFrame());
+  EXPECT_EQ(2, h.session.sessionMinor());
+}
+
+TEST(TheFloodScope, TheFixturesCasesInOrderThroughOneSessionOfOnePointThree) {
+  // The fixture's own sequence of section 6.5: ask, then "the next send without it", then back to
+  // the scope - one session, three requests, and the two answers the fixture carries held byte
+  // for byte. ("flood scope: back to the scope" carries no answer case; its mode is read back.)
+  Harness h;
+  sayHello(h, 3, 54);
+  ASSERT_EQ(3, h.session.sessionMinor());
+  ASSERT_EQ("dk", h.flood_scope.name);
+
+  const Case* ask_req = findCaseNamed("flood scope: ask");
+  const Case* ask_ans = findCaseNamed("flood scope: scoped next, and the default scope is dk");
+  const Case* off_req = findCaseNamed("flood scope: the next send without it");
+  const Case* off_ans = findCaseNamed("flood scope: unscoped next");
+  const Case* on_req = findCaseNamed("flood scope: back to the scope");
+  ASSERT_NE(nullptr, ask_req);
+  ASSERT_NE(nullptr, ask_ans);
+  ASSERT_NE(nullptr, off_req);
+  ASSERT_NE(nullptr, off_ans);
+  ASSERT_NE(nullptr, on_req);
+
+  // mode 0: ask, nothing changes - and the answer is the mode that holds when nothing was asked.
+  h.feed(ask_req->frame);
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(ask_ans->frame), h.lastFrame());
+  EXPECT_EQ(kFloodScopeOn, h.session.floodScopeMode());
+  EXPECT_EQ(1, h.flood_scope.reads) << "the name is read, never cached";
+
+  // mode 2: the next send goes without it.
+  h.sent.clear();
+  h.feed(off_req->frame);
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  EXPECT_EQ(toHex(off_ans->frame), h.lastFrame());
+  EXPECT_EQ(kFloodScopeOnceOff, h.session.floodScopeMode());
+
+  // mode 1: back to the scope. The fixture carries the request and not an answer, so the mode is
+  // read out of the frame the session built.
+  h.sent.clear();
+  h.feed(on_req->frame);
+  h.run();
+  ASSERT_EQ(1u, h.sent.size());
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(h, type, seq);
+  EXPECT_EQ(responseType(kMsgFloodScope), type);
+  ASSERT_EQ(5u, body.size()) << "status, mode, and a str8 of two characters";
+  EXPECT_EQ(kOk, body[0]);
+  EXPECT_EQ(kFloodScopeOn, body[1]);
+  EXPECT_EQ(2u, body[2]);
+  EXPECT_EQ(kFloodScopeOn, h.session.floodScopeMode());
+}
+
+TEST(TheFloodScope, ARadioWithNoDefaultScopeAnswersAnEmptyNameAndTheLongestOneWhole) {
+  // "or empty when the RAK holds none" (6.5), and the longest name a region has - thirty bytes,
+  // whole.
+  const Case* empty = findCaseNamed("flood scope: a radio with no default scope");
+  const Case* longest = findCaseNamed("flood scope: the longest name a region has");
+  ASSERT_NE(nullptr, empty);
+  ASSERT_NE(nullptr, longest);
+
+  {
+    Harness h;
+    h.flood_scope.name = "";
+    sayHello(h, 3, 54);
+    h.feed(floodScopeFrame(empty->seq, kFloodScopeAsk));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(empty->frame), h.lastFrame());
+  }
+  {
+    Harness h;
+    h.flood_scope.name = longest->fields["scope"].as<std::string>();
+    ASSERT_EQ(size_t(kScopeNameMax), h.flood_scope.name.size());
+    sayHello(h, 3, 54);
+    h.feed(floodScopeFrame(longest->seq, kFloodScopeAsk));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(longest->frame), h.lastFrame());
+  }
+}
+
+TEST(TheFloodScope, ItsFourRefusalsAreTheFixturesFrames) {
+  const Case* range = findCaseNamed("flood scope refused: a mode that is none of the three");
+  const Case* state = findCaseNamed("flood scope refused: the session is older than 1.3");
+  const Case* unsupported =
+      findCaseNamed("flood scope refused: a radio that cannot scope a flood");
+  ASSERT_NE(nullptr, range);
+  ASSERT_NE(nullptr, state);
+  ASSERT_NE(nullptr, unsupported);
+
+  // A mode that is none of the three: ERR_RANGE, in a session that could have taken one.
+  {
+    Harness h;
+    sayHello(h, 3, 54);
+    h.feed(floodScopeFrame(range->seq, 3));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(range->frame), h.lastFrame());
+    EXPECT_EQ(kFloodScopeOn, h.session.floodScopeMode()) << "a refused request changes nothing";
+    EXPECT_EQ(0, h.flood_scope.reads) << "the node is not asked for a name it will not send";
+  }
+  // A session of 1.2: ERR_STATE - "nothing is scoped there, and there is no mode to set".
+  {
+    Harness h;
+    sayHello(h, 2, 53);
+    h.feed(floodScopeFrame(state->seq, kFloodScopeOnceOff));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(state->frame), h.lastFrame());
+    EXPECT_EQ(kFloodScopeOn, h.session.floodScopeMode());
+  }
+  // And before any HELLO at all, which is a session of 1.0: the same ERR_STATE.
+  {
+    Harness h;
+    h.feed(floodScopeFrame(state->seq, kFloodScopeAsk));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(state->frame), h.lastFrame());
+  }
+  // No interface: ERR_UNSUPPORTED, whatever the session's version is - and HELLO says so, with
+  // no 0x100 in its caps.
+  {
+    Harness h;
+    h.services.flood_scope = nullptr;
+    EXPECT_EQ(0u, capsOf(h.services) & uint32_t(kCapFloodScope));
+    sayHello(h, 3, 54);
+    h.feed(floodScopeFrame(unsupported->seq, kFloodScopeAsk));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(unsupported->frame), h.lastFrame());
+  }
+  // An empty payload: ERR_MALFORMED, "no mode at all".
+  {
+    Harness h;
+    sayHello(h, 3, 54);
+    h.feed(frameOf(kMsgFloodScope, 70, {}));
+    h.run();
+    ASSERT_EQ(1u, h.sent.size());
+    EXPECT_EQ(toHex(frameOf(responseType(kMsgFloodScope), 70, {kErrMalformed})), h.lastFrame());
+  }
+}
+
+TEST(TheFloodScope, ItTellsTheClientNothingAndNeedsNoJob) {
+  // "It needs no job, it is answered while a reply is awaited, nothing goes on the air and
+  // client_tx does not move" (6.5). The fake client records every call the session makes.
+  Harness h;
+  sayHello(h, 3, 54);
+  h.mesh.job = false;
+  h.mesh.awaiting = true;  // a reply is awaited: a SEND_* would be ERR_BUSY, this is not
+  h.mesh.scope_calls = 0;
+
+  h.feed(floodScopeFrame(71, kFloodScopeOnceOff));
+  h.run();
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(kOk, answeredStatus(h, type, seq));
+  EXPECT_EQ(kFloodScopeOnceOff, h.session.floodScopeMode());
+  EXPECT_EQ(0, h.mesh.scope_calls) << "only a send tells the client what its flood carries";
+}
+
+// --- the route a flood is given, and the byte its answer carries ------------------------------
+
+namespace {
+
+// A ClientRig whose session has been told HELLO at a minor: the real client, the real session,
+// and a FakeMeshPort where the board builds the packet.
+void rigHello(ClientRig& r, uint8_t minor, uint8_t seq) { sayHello(r.h, minor, seq); }
+
+// The last answer's `scoped` byte, or -1 when the answer carries none. A send's answer is
+// status, send, tag, sender_ts and then 1.3's byte (6.2).
+int lastScopedByte(Harness& h) {
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(h, type, seq);
+  EXPECT_GE(body.size(), 10u);
+  if (body.size() < 11) return -1;
+  return int(body[10]);
+}
+
+// One SEND_REQUEST with no reply awaited, through the rig.
+std::vector<uint8_t> aSend(uint8_t seq) {
+  return frameOf(kMsgSendRequest, seq, sendPayload(0, {0x01}));
+}
+
+}  // namespace
+
+TEST(TheFloodScope, BeforeAnyHelloAFloodIsUnscopedAndTheAnswerCarriesNoByte) {
+  // A session of 1.0: "the client's floods carry no transport code, as they always did", and the
+  // answer is byte for byte what it was. The fixture's own send answers are held against this
+  // session everywhere else in this suite; here it is said once, in full.
+  ClientRig r;
+  r.beginJob(kPathNone);
+  r.answer(aSend(60));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(1u, r.port.sent.size());
+  EXPECT_FALSE(r.port.sent[0].direct) << "no path: a flood";
+  EXPECT_FALSE(r.port.sent[0].scoped) << "a session of 1.0 asks for no scope";
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> body = lastBody(r.h, type, seq);
+  EXPECT_EQ(10u, body.size()) << "status, send, tag, sender_ts - and no scoped byte";
+}
+
+TEST(TheFloodScope, AFloodOfASessionOfOnePointThreeIsAskedScopedAndAnsweredOne) {
+  ClientRig r;
+  rigHello(r, 3, 54);
+  r.beginJob(kPathNone);
+
+  r.answer(aSend(60));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(1u, r.port.sent.size());
+  EXPECT_FALSE(r.port.sent[0].direct);
+  EXPECT_TRUE(r.port.sent[0].scoped) << "a flood of a session of 1.3 takes the default scope";
+  EXPECT_EQ(1, lastScopedByte(r.h)) << "and the answer says so";
+
+  // mode 2, and then the same send: asked unscoped, answered 0.
+  r.h.sent.clear();
+  r.answer(floodScopeFrame(61, kFloodScopeOnceOff));
+  ASSERT_EQ(kOk, r.lastStatus());
+  r.gap();
+  r.answer(aSend(62));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(2u, r.port.sent.size());
+  EXPECT_FALSE(r.port.sent[1].scoped) << "the one send without it";
+  EXPECT_EQ(0, lastScopedByte(r.h));
+
+  // And the send after that one is scoped again: mode 2 was for one send.
+  EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode());
+  r.gap();
+  r.answer(aSend(63));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(3u, r.port.sent.size());
+  EXPECT_TRUE(r.port.sent[2].scoped);
+  EXPECT_EQ(1, lastScopedByte(r.h));
+}
+
+TEST(TheFloodScope, ADirectSendIsNeverScopedAndADiscoveryAlwaysIsAndATraceNever) {
+  // "A direct send and a trace carry no scope and are untouched. That is a SEND_LOGIN,
+  // SEND_REQUEST or SEND_CLI of a job with no path, and every SEND_DISCOVERY" (6.5).
+  {
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathHops, {0xa1, 0xb2});
+    r.answer(aSend(60));
+    ASSERT_EQ(kOk, r.lastStatus());
+    ASSERT_EQ(1u, r.port.sent.size());
+    EXPECT_TRUE(r.port.sent[0].direct);
+    EXPECT_FALSE(r.port.sent[0].scoped) << "a path has no scope";
+    EXPECT_EQ(0, lastScopedByte(r.h));
+  }
+  {
+    // A discovery floods whatever path the job holds, so it is scoped even with a path.
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathHops, {0xa1, 0xb2});
+    r.answer(frameOf(kMsgSendDiscovery, 60, sendPayload(0, {})));
+    ASSERT_EQ(kOk, r.lastStatus());
+    ASSERT_EQ(1u, r.port.sent.size());
+    EXPECT_FALSE(r.port.sent[0].direct);
+    EXPECT_TRUE(r.port.sent[0].scoped);
+    EXPECT_EQ(1, lastScopedByte(r.h));
+  }
+  {
+    // A trace is not a flood: the port is given no scoped route and the answer says 0.
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.answer(frameOf(kMsgSendTrace, 60, sendPayload(0, {2, 0x7f, 0x3a})));
+    ASSERT_EQ(kOk, r.lastStatus());
+    ASSERT_EQ(1u, r.port.sent.size());
+    EXPECT_EQ(FakeMeshPort::Sent::kTrace, r.port.sent[0].kind);
+    EXPECT_FALSE(r.port.sent[0].scoped);
+    EXPECT_EQ(0, lastScopedByte(r.h));
+  }
+}
+
+TEST(TheFloodScope, ARadioWithNoScopeAnswersZeroToAFloodThatWasAskedScoped) {
+  // "The port's sends say back whether a transport code went on the packet, because `scoped` in
+  // the answer is what happened and not what was asked" (6.5).
+  ClientRig r;
+  r.port.holds_scope = false;
+  r.h.flood_scope.name = "";
+  rigHello(r, 3, 54);
+  r.beginJob(kPathNone);
+
+  r.answer(floodScopeFrame(60, kFloodScopeAsk));
+  uint8_t type = 0, seq = 0;
+  const std::vector<uint8_t> scope_body = lastBody(r.h, type, seq);
+  ASSERT_EQ(3u, scope_body.size());
+  EXPECT_EQ(kFloodScopeOn, scope_body[1]);
+  EXPECT_EQ(0u, scope_body[2]) << "an empty name";
+
+  r.h.sent.clear();
+  r.answer(aSend(61));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(1u, r.port.sent.size());
+  EXPECT_TRUE(r.port.sent[0].scoped) << "the route still asked for it";
+  EXPECT_EQ(0, lastScopedByte(r.h)) << "and nothing went on the packet";
+}
+
+TEST(TheFloodScope, HelloOnePointTwoAfterOnePointThreeIsUnscopedAgainAndTheByteIsGone) {
+  ClientRig r;
+  rigHello(r, 3, 54);
+  r.beginJob(kPathNone);
+  r.answer(aSend(60));
+  ASSERT_EQ(1u, r.port.sent.size());
+  ASSERT_TRUE(r.port.sent[0].scoped);
+  ASSERT_EQ(1, lastScopedByte(r.h));
+
+  // A Walter that restarts at 1.2 - or an older one that took over the link - and the session is
+  // 1.2 again: the flood is unscoped and the answer is ten bytes.
+  rigHello(r, 2, 55);
+  EXPECT_EQ(2, r.h.session.sessionMinor());
+  r.gap();
+  r.answer(aSend(61));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(2u, r.port.sent.size());
+  EXPECT_FALSE(r.port.sent[1].scoped);
+  uint8_t type = 0, seq = 0;
+  EXPECT_EQ(10u, lastBody(r.h, type, seq).size()) << "the byte is not there";
+  // And FLOOD_SCOPE is ERR_STATE there, so the Walter cannot set a mode it would not get.
+  r.h.sent.clear();
+  r.answer(floodScopeFrame(62, kFloodScopeOnceOff));
+  EXPECT_EQ(kErrState, r.lastStatus());
+}
+
+TEST(TheFloodScope, TheOneSendIsPutBackByEverySendJobBeginJobEndAndTheSilenceRule) {
+  // "mode 2 is for one send. The next SEND_* request the RAK executes puts the mode back to 1,
+  // whatever that send came to: a flood, a direct send, nothing sent, or a refusal. So do
+  // JOB_BEGIN and JOB_END" (6.5) - and the job the RAK ends by itself (this task's deliverable 4).
+
+  // A direct send.
+  {
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathDirect);
+    r.answer(floodScopeFrame(60, kFloodScopeOnceOff));
+    ASSERT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode());
+    r.answer(aSend(61));
+    ASSERT_EQ(kOk, r.lastStatus());
+    EXPECT_TRUE(r.port.sent[0].direct);
+    EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode()) << "a direct send puts it back";
+  }
+  // A send refused ERR_BUSY: a reply is still awaited.
+  {
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathNone);
+    r.answer(aSend(60));  // with no timeout nothing is awaited, so arm one by hand
+    r.job.arm(twinoak::meshclient::kAwaitResponse, 0, r.h.now + 10000);
+    ASSERT_TRUE(r.job.awaiting());
+    r.h.sent.clear();
+    r.answer(floodScopeFrame(61, kFloodScopeOnceOff));
+    ASSERT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode());
+    r.gap();
+    r.answer(aSend(62));
+    EXPECT_EQ(kErrBusy, r.lastStatus());
+    EXPECT_EQ(1u, r.port.sent.size()) << "nothing went on the air";
+    EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode()) << "a refusal puts it back too";
+  }
+  // A send the codec refuses: ERR_MALFORMED, and the client is never asked.
+  {
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathNone);
+    r.answer(floodScopeFrame(60, kFloodScopeOnceOff));
+    r.answer(frameOf(kMsgSendCli, 61, sendPayload(0, {0x00})));  // a line of no bytes at all
+    EXPECT_EQ(kErrMalformed, r.lastStatus());
+    EXPECT_TRUE(r.port.sent.empty());
+    EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode());
+  }
+  // JOB_BEGIN and JOB_END.
+  for (bool begin : {true, false}) {
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathNone);
+    r.answer(floodScopeFrame(60, kFloodScopeOnceOff));
+    ASSERT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode());
+    if (begin) {
+      std::vector<uint8_t> body(kPubKeyLen, 0x55);
+      body.push_back(kPathNone);
+      body.push_back(0);
+      body.push_back(0);
+      r.answer(frameOf(kMsgJobBegin, 61, body));
+    } else {
+      r.answer(frameOf(kMsgJobEnd, 61, {}));
+    }
+    ASSERT_EQ(kOk, r.lastStatus());
+    EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode()) << (begin ? "JOB_BEGIN" : "JOB_END");
+  }
+  // And 120 seconds of link silence, which is the job the RAK ends by itself (6.1).
+  {
+    ClientRig r;
+    rigHello(r, 3, 54);
+    r.beginJob(kPathNone);
+    r.answer(floodScopeFrame(60, kFloodScopeOnceOff));
+    ASSERT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode());
+
+    r.h.now += twinoak::meshclient::kIdleEndMs - 1;
+    r.client.loop(r.h.now);
+    r.h.pass();
+    EXPECT_TRUE(r.job.begun()) << "one millisecond short of the limit";
+    EXPECT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode()) << "and the mode is still 2";
+
+    r.h.now += 1;
+    r.client.loop(r.h.now);
+    ASSERT_FALSE(r.job.begun()) << "120 s of silence ends the job";
+    r.h.pass();
+    EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode()) << "and the mode goes back with it";
+    // Reported once: a second pass finds nothing to report, and a mode set after it stands.
+    r.answer(floodScopeFrame(61, kFloodScopeOnceOff));
+    r.h.pass();
+    EXPECT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode());
+  }
+}
+
+TEST(TheFloodScope, ALinkLevelRetryOfASendSendsOnePacketAndPutsTheModeBackOnce) {
+  // "A link-level retry of a send is not executed again (section 3) and changes nothing."
+  ClientRig r;
+  rigHello(r, 3, 54);
+  r.beginJob(kPathNone);
+  r.answer(floodScopeFrame(60, kFloodScopeOnceOff));
+  ASSERT_EQ(kFloodScopeOnceOff, r.h.session.floodScopeMode());
+
+  const std::vector<uint8_t> send = aSend(61);
+  r.answer(send);
+  ASSERT_EQ(kOk, r.lastStatus());
+  const std::string first = r.h.lastFrame();
+  ASSERT_EQ(1u, r.port.sent.size());
+  EXPECT_FALSE(r.port.sent[0].scoped) << "the one send without the scope";
+  EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode());
+
+  // The same frame again: the remembered answer, no second packet, and the mode is still 1 -
+  // put back once and not twice, which is the same thing a second time.
+  const uint32_t executed = r.h.session.executed();
+  r.answer(send);
+  EXPECT_EQ(first, r.h.lastFrame()) << "the remembered answer, byte for byte";
+  EXPECT_EQ(executed, r.h.session.executed()) << "no handler ran";
+  EXPECT_EQ(1u, r.port.sent.size()) << "one packet";
+  EXPECT_EQ(1u, r.client.clientTx());
+  EXPECT_EQ(kFloodScopeOn, r.h.session.floodScopeMode());
+}
+
+TEST(TheFloodScope, WithNoInterfaceTheClientIsNeverToldToScopeAFlood) {
+  // The capability is the interface and nothing else: a build without FloodScopeAccess floods
+  // unscoped however new the session is, which is what the board this task builds does.
+  ClientRig r;
+  r.h.services.flood_scope = nullptr;
+  rigHello(r, 3, 54);
+  ASSERT_EQ(3, r.h.session.sessionMinor());
+  r.beginJob(kPathNone);
+  r.answer(aSend(60));
+  ASSERT_EQ(kOk, r.lastStatus());
+  ASSERT_EQ(1u, r.port.sent.size());
+  EXPECT_FALSE(r.port.sent[0].scoped) << "no interface: no scope asked for";
+  // The byte is still there - the session is 1.3 - and it says 0, which is what happened.
+  EXPECT_EQ(0, lastScopedByte(r.h));
 }
 
 int main(int argc, char** argv) {

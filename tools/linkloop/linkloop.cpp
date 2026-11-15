@@ -189,6 +189,7 @@ bool g_begin_job = false;  // --job: begin a job at startup, so `path` reads a r
 long g_adverts = 0;        // --adverts <n>: adverts heard at startup, so `obs` has records
 bool g_obs_wake = false;   // --obs-wake: the obs.wake setting on
 bool g_first_boot = false;  // --first-boot: run the shipped profile at startup
+bool g_no_scope = false;    // --no-scope: a node whose `region default` names nothing
 
 LoopSystem g_system;
 LoopIdentity g_identity;
@@ -706,6 +707,21 @@ class LoopTelemetry : public twinoak::power::TelemetrySource {
 LoopTelemetry g_telemetry;
 twinoak::power::LinkPower g_link_power(g_telemetry);
 
+// FLOOD_SCOPE's one seam (spec/LINK-PROTOCOL.md 6.5, link 1.3): the default scope's name. On a
+// board this comes out of upstream's region map (`MyMesh::default_scope`, pile 3.13's task 02);
+// here it is the name of the Danish mesh, or nothing at all with --no-scope, which is how "a
+// radio with no default scope answers an empty name" is watched from a laptop.
+class LoopFloodScope : public FloodScopeAccess {
+ public:
+  bool hasScope() const { return !g_no_scope; }
+
+  Bytes scopeName() const override {
+    return g_no_scope ? Bytes() : bytesOfText("dk");
+  }
+};
+
+LoopFloodScope g_flood_scope;
+
 // The mesh client's job, its sends and its reply, and the box link's view of them
 // (src/roles/repeater/meshclient/), so that `job begin`, `job end`, `path`, the five sends, `reply` and
 // `counters` through the pipe go through the firmware's own client - the same code a board runs.
@@ -725,17 +741,19 @@ class LoopMeshPort : public twinoak::meshclient::MeshPort {
   void randomBytes(uint8_t* dest, size_t len) override {
     for (size_t i = 0; i < len; i++) dest[i] = uint8_t(rand() & 0xFF);
   }
-  bool sendAnonRequest(const uint8_t*, size_t, const twinoak::meshclient::Route&) override {
-    sends++;
-    return true;
+  twinoak::meshclient::PacketSent sendAnonRequest(
+      const uint8_t*, size_t, const twinoak::meshclient::Route& route) override {
+    return put(route);
   }
-  bool sendDatagram(uint8_t, const uint8_t*, size_t, const twinoak::meshclient::Route&) override {
-    sends++;
-    return true;
+  twinoak::meshclient::PacketSent sendDatagram(
+      uint8_t, const uint8_t*, size_t, const twinoak::meshclient::Route& route) override {
+    return put(route);
   }
-  bool sendTrace(uint32_t, uint32_t, uint8_t, const uint8_t*, uint8_t) override {
-    sends++;
-    return true;
+  twinoak::meshclient::PacketSent sendTrace(uint32_t, uint32_t, uint8_t, const uint8_t*,
+                                            uint8_t) override {
+    twinoak::meshclient::Route direct;
+    direct.direct = true;  // a trace is never a flood and never scoped (6.5)
+    return put(direct);
   }
   void radioCounters(twinoak::meshclient::RadioCounters& out) override {
     // The numbers docs/link.md quotes for a node that has been up a while.
@@ -747,6 +765,19 @@ class LoopMeshPort : public twinoak::meshclient::MeshPort {
   }
 
  private:
+  // Every send "succeeds" and nothing goes anywhere; what a board would put on the air is
+  // upstream's. The one thing this port answers for real is 1.3's `scoped` byte: a flood the
+  // Route asked to be scoped carries the code while this program holds a default scope, and does
+  // not when --no-scope took it away - "a radio with no default scope answers 0 to a flood that
+  // was asked scoped" (6.2's `scoped` row, 6.5).
+  twinoak::meshclient::PacketSent put(const twinoak::meshclient::Route& route) {
+    sends++;
+    twinoak::meshclient::PacketSent out;
+    out.queued = true;
+    out.scoped = route.scoped && g_flood_scope.hasScope();
+    return out;
+  }
+
   uint32_t last_unique_ = 0;
 };
 
@@ -826,8 +857,9 @@ void wire() {
   g_services.env = &g_link_power;
   g_services.lpp = &g_link_power;
   g_services.local_request = &g_local_request;  // => kCapLocalRequest (link 1.2)
+  g_services.flood_scope = &g_flood_scope;     // => kCapFloodScope (link 1.3)
   g_services.mesh = &g_mesh_client;  // => kCapMeshClient
-  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0xff
+  g_services.observations = &g_observations;  // => kCapObservations; caps is now 0x1ff
 }
 
 // stdin to stdout, one byte at a time: the simplest transport that keeps the session's own rule
@@ -1031,6 +1063,8 @@ int main(int argc, char** argv) {
       g_obs_wake = true;
     } else if (strcmp(argv[i], "--first-boot") == 0) {
       g_first_boot = true;
+    } else if (strcmp(argv[i], "--no-scope") == 0) {
+      g_no_scope = true;  // `region default` names nothing: FLOOD_SCOPE answers an empty name
     } else if (strcmp(argv[i], "--adverts") == 0 && i + 1 < argc) {
       g_adverts = strtol(argv[++i], nullptr, 10);
       if (g_adverts < 0) g_adverts = 0;
@@ -1042,7 +1076,8 @@ int main(int argc, char** argv) {
     } else {
       fprintf(stderr,
               "usage: linkloop [--bench <passes>] [--emitted] [--wake] [--drop-ina] [--job]"
-              " [--adverts <n>] [--obs-wake] [--first-boot] [--flowed <seconds>]\n");
+              " [--adverts <n>] [--obs-wake] [--first-boot] [--no-scope]"
+              " [--flowed <seconds>]\n");
       return 2;
     }
   }

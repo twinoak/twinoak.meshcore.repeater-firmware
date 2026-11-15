@@ -1,9 +1,11 @@
 ## The Walter it goes with
 
 **`v0.1.4`** — the Walter firmware's current release, published 10 November 2026. It speaks
-**link 1.2**, which is this firmware's link, so a unit takes this image with the Walter it already
-has. A release of this repository that needs a newer Walter than that one says so in its own line
-above, and this paragraph is edited in the same pull request.
+**link 1.2**; this firmware speaks **link 1.3**, and 1.3 was written so that a session with a
+1.2 Walter is byte for byte and packet for packet what it was. So a unit takes this image with
+the Walter it already has, and nothing about it changes until a Walter that speaks 1.3 is on the
+other side. **This release needs no newer Walter.** A release of this repository that does need
+one says so in its own line above, and this paragraph is edited in the same pull request.
 
 This repository's release workflow cannot read the Walter's repository — one token, one
 repository — so the Walter it goes with is written down here rather than looked up, and a release

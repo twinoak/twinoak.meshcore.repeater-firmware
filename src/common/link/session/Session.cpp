@@ -42,6 +42,10 @@ void Session::poll(uint32_t now_ms) {
     restart_armed_ = false;  // cleared first: if the board cannot restart, the link carries on
     s_.system->restartNow(restart_mode_);
   }
+  // Section 6.5: a job the client ended by itself after 120 seconds of link silence puts
+  // FLOOD_SCOPE's mode back, as JOB_END does. Asked every pass and above every early return
+  // below, because the client reports it once and a pass that is busy must not lose it.
+  if (s_.mesh != nullptr && s_.mesh->takeSilentJobEnd()) flood_mode_ = kFloodScopeOn;
   if (has_outgoing_) return;  // the writer still holds something unsent
   // A reply from the mesh that arrived, or a wait that ran out, is reported before anything else
   // (section 6.3, EV_MESH_REPLY, exactly once): a request that is waiting is answered on the next
@@ -164,9 +168,12 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
         n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
         break;
       }
-      // Within a major, the highest minor both ends know (Numbers.h).
-      n = encodeHelloResponse(helloBody(highestMinorBothKnow(m.proto_minor, kProtoMinor)), resp_,
-                              sizeof(resp_));
+      // Within a major, the highest minor both ends know (Numbers.h). That minor is also the
+      // session's from here on - "the session's version is the one the last HELLO's answer
+      // named" (section 5.1) - and a HELLO of 1.2 after one of 1.3 makes it 1.2 again, which is
+      // this one assignment and nothing more. Section 6.5 is the first rule that reads it.
+      session_minor_ = highestMinorBothKnow(m.proto_minor, kProtoMinor);
+      n = encodeHelloResponse(helloBody(session_minor_), resp_, sizeof(resp_));
       break;
     }
 
@@ -444,6 +451,9 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
         n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));
         break;
       }
+      // "So do JOB_BEGIN and JOB_END" (6.5): the mode goes back with the job. A path the codec
+      // refused never gets here, and a JOB_BEGIN that changed nothing changes the mode neither.
+      flood_mode_ = kFloodScopeOn;
       n = encodeStatus(s_.mesh->beginJob(m, now_ms), resp_, sizeof(resp_));
       break;
     }
@@ -456,6 +466,7 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
         break;
       }
       s_.mesh->endJob();
+      flood_mode_ = kFloodScopeOn;  // 6.5, with JOB_BEGIN's: the mode goes back with the job
       n = encodeStatus(kOk, resp_, sizeof(resp_));
       break;
     }
@@ -505,6 +516,12 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
         n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
         break;
       }
+      // Section 6.5, in this order and not the other: the client is told what *this* flood
+      // carries, and then the mode goes back to 1 - "the next SEND_* request the RAK executes
+      // puts the mode back, whatever that send came to: a flood, a direct send, nothing sent, or
+      // a refusal". A link-level retry never reaches here (section 3), so it changes nothing.
+      s_.mesh->setFloodScoped(floodScopedNow());
+      flood_mode_ = kFloodScopeOn;
       n = sendHandler(pkt.type, pkt.body, now_ms);
       // "A password is in RAM for the length of the send" (section 6): the request's bytes are in
       // the receiver's buffer, and they are gone before the answer is framed - after every send,
@@ -549,6 +566,43 @@ void Session::execute(const ParsedPacket& pkt, uint32_t now_ms) {
       ObsPullResponse out;
       s_.observations->pull(m.max, out, now_ms);
       n = encodeObsPullResponse(out, resp_, sizeof(resp_));
+      break;
+    }
+
+    case kMsgFloodScope: {
+      // Section 6.5 (link 1.3), its refusals in the order that section and the task list them.
+      // Nothing goes on the air here and `client_tx` does not move: the mode is the link's own
+      // state and the name is the node's.
+      if (s_.flood_scope == nullptr) {
+        // "A RAK without the capability answers ERR_UNSUPPORTED, and its floods carry no
+        // transport code" - which is what floodScopedNow() says too, from the same pointer.
+        n = encodeStatus(kErrUnsupported, resp_, sizeof(resp_));
+        break;
+      }
+      if (session_minor_ < 3) {
+        // "In a session older than 1.3 the answer is ERR_STATE: nothing is scoped there, and
+        // there is no mode to set." Judged before the payload is, because a Walter that has not
+        // said HELLO 1.3 is told that and not that its byte was wrong.
+        n = encodeStatus(kErrState, resp_, sizeof(resp_));
+        break;
+      }
+      FloodScope m;
+      if (!decodeFloodScope(pkt.body, m)) {
+        n = encodeStatus(kErrMalformed, resp_, sizeof(resp_));  // not even a mode byte
+        break;
+      }
+      if (!isFloodScopeMode(m.mode)) {
+        n = encodeStatus(kErrRange, resp_, sizeof(resp_));  // "any other mode is ERR_RANGE"
+        break;
+      }
+      // "mode 0: ask - nothing changes." 1 and 2 are what the next flood will carry.
+      if (m.mode != kFloodScopeAsk) flood_mode_ = m.mode;
+      FloodScopeResponse out;
+      out.mode = flood_mode_;
+      // Read afresh, never cached: a `region default` the node took over the mesh, or a CLI line
+      // on this link, is in force for the next send (6.5).
+      out.scope = s_.flood_scope->scopeName();
+      n = encodeFloodScopeResponse(out, resp_, sizeof(resp_));
       break;
     }
 
@@ -661,6 +715,9 @@ size_t Session::sendHandler(uint8_t type, Bytes body, uint32_t now_ms) {
       break;
   }
   if (status != kOk) return encodeStatus(status, resp_, sizeof(resp_));
+  // `scoped` is the client's - what the packet actually carried - and whether the byte is on the
+  // wire at all is the session's version (6.2's `scoped` row). The client knows nothing of HELLO.
+  out.session_minor = session_minor_;
   return encodeSendResponse(out, resp_, sizeof(resp_));
 }
 

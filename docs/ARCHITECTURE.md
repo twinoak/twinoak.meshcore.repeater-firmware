@@ -214,16 +214,21 @@ I2C runs at 100 kHz or below: one set of 1 k pull-ups, through a 1000 pF bulkhea
    every response and every event**, because only the Walter sends requests and only the RAK
    sends events, and the other half of each pair is the Walter's firmware's. Tested against every
    case of **every** file of `spec/fixtures/link/` — `link-v1.json`, which is 1.0's and whose
-   bytes never change, `link-v1.1.json`, which is 1.0's cases and the four 1.1 adds, and
-   `link-v1.2.json`, which is 1.1's and the fourteen 1.2 adds (`test/test_link_codec`) — with a
+   bytes never change, `link-v1.1.json`, which is 1.0's cases and the four 1.1 adds,
+   `link-v1.2.json`, which is 1.1's and the fourteen 1.2 adds, and `link-v1.3.json`, which is
+   1.2's and the nineteen 1.3 adds (`test/test_link_codec`) — with a
    test that fails when a fixture gains a case nothing exercises. `kProtoMinor` is the one place the firmware says which minor it speaks: the image
-   descriptor's `link_minor` and the release manifest's `link` are both read from it.
+   descriptor's `link_minor` and the release manifest's `link` are both read from it. It is not
+   the version of a *session*, which is what the last `HELLO`'s answer named and is 1.0 before
+   any `HELLO` of a boot (`LINK-PROTOCOL.md` §5.1): 1.3's flood scope is the first rule for
+   another message that depends on it, and the session is where it is remembered.
 2. **Session** (portable, `src/common/link/session/`, proved by p1-03): a receiver that turns bytes into
    packets and counts what it drops; a dispatcher from request type to handler; the one-entry
    memory of the last request and its response, which is what makes a retried request harmless;
    the event counter. It talks to the rest of the firmware through the interfaces of
    `Interfaces.h` — the system, the identity, and one each for the clock, the console,
-   attention, power, the environment, the mesh client and the observation ring — so that the
+   attention, power, the environment, the node's own request handler, the flood scope, the mesh
+   client and the observation ring — so that the
    native tests run it whole against fakes (`test/test_link_session`). **A capability is an
    interface that is there**: `HELLO`'s `caps` is built from which of those pointers are non-null
    and from nothing else, so a firmware that has not implemented a thing does not advertise it and

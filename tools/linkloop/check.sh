@@ -2,9 +2,9 @@
 # Builds tools/linkloop (the firmware's own box-link session, clock keeper, attention machine,
 # settings table, power/environment readers, mesh-client job and observation ring behind a pipe)
 # and drives tools/linkcli.py against it: hello, ping, status, identity, time, time set, cli,
-# power, env, lpp, the job and its path, the five sends, the observations, sleep, an attention,
-# the first-boot profile and `provision`, and reboot, with no board and no serial port, plus the
-# timed worst-case pass.
+# power, env, lpp, the job and its path, the five sends, the flood scope, the observations, sleep,
+# an attention, the first-boot profile and `provision`, and reboot, with no board and no serial
+# port, plus the timed worst-case pass.
 #
 # **tools/verify.ps1 runs this**, in its native step, with the compiler that step uses - this
 # machine's g++ where there is one and the container of tasks/RUNBOOK.md section 2 where there is
@@ -281,6 +281,56 @@ if $cli trace 7f3aa1b27f3a --hash-size 3 --no-wait; then
   exit 1
 fi
 echo "refused, as they should be"
+
+echo
+echo "== the flood scope (6.5, link 1.3). linkcli says HELLO before its first other request, so"
+echo "   the session is 1.3: FLOOD_SCOPE reads the default scope this program holds and a flooded"
+echo "   send is answered scoped 1. The transport code itself is upstream's and a board's"
+echo "   business (pile 3.13 task 02); what is watched here is the link - the name, the mode, the"
+echo "   one send without it, and the byte at the end of a send."
+$cli flood-scope
+$cli flood-scope --once-without > "$out/flood-scope-off.log" 2>&1
+cat "$out/flood-scope-off.log"
+grep -qF "no transport code" "$out/flood-scope-off.log" || {
+  echo "mode 2 was not answered as the next flood without the scope" >&2
+  exit 1
+}
+
+echo
+echo "   a discovery always floods, so it is the scoped send here (--job holds a path); a direct"
+echo "   send of the same job is answered 0, because a path has no scope"
+python3 tools/linkcli.py --pipe "$out/linkloop --job" discover --timeout-ms 200 \
+  > "$out/flood-scope-discover.log" 2>&1 || true
+cat "$out/flood-scope-discover.log"
+grep -qF "scoped        1" "$out/flood-scope-discover.log" || {
+  echo "a flood of a session of 1.3 was not answered scoped" >&2
+  exit 1
+}
+python3 tools/linkcli.py --pipe "$out/linkloop --job" status-of-peer --timeout-ms 200 \
+  > "$out/flood-scope-direct.log" 2>&1 || true
+cat "$out/flood-scope-direct.log"
+grep -qF "scoped        0" "$out/flood-scope-direct.log" || {
+  echo "a direct send was not answered scoped 0" >&2
+  exit 1
+}
+
+echo
+echo "   and on a node whose default region names nothing (--no-scope): an empty name, and a"
+echo "   flood that was asked scoped is answered 0 - because that is what happened"
+python3 tools/linkcli.py --pipe "$out/linkloop --no-scope" flood-scope \
+  > "$out/flood-scope-none.log" 2>&1
+cat "$out/flood-scope-none.log"
+grep -qF "holds no default scope" "$out/flood-scope-none.log" || {
+  echo "a radio with no default scope did not answer an empty name" >&2
+  exit 1
+}
+python3 tools/linkcli.py --pipe "$out/linkloop --job --no-scope" discover --timeout-ms 200 \
+  > "$out/flood-scope-none-send.log" 2>&1 || true
+cat "$out/flood-scope-none-send.log"
+grep -qF "scoped        0" "$out/flood-scope-none-send.log" || {
+  echo "a flood with no scope to take was not answered scoped 0" >&2
+  exit 1
+}
 
 echo
 echo "== reply (nothing held on a fresh boot) and counters"

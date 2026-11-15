@@ -686,6 +686,35 @@ within earshot makes the neighbour lines worth reading.
   the Walter's v0.1.2 and is that repository's bench, not this one's; the line is
   here because the radio's half is what this task shipped.
 
+### The flood scope, the link's half (link 1.3)
+
+`docs/link.md` §2j. Pile 3.13's task 01 is the link's side only: the session
+remembers its version, `FLOOD_SCOPE` is a message, a send's answer ends with
+`scoped`, and the route a flood is given carries the request — but **no board
+implements the interface yet**, so this image answers `caps 0xff` without
+`FLOOD_SCOPE`, refuses that request, and floods exactly as `v0.1.5` did.
+Everything of 6.5 that can be seen without a board is a native test
+(`test/test_link_session`, `TheFloodScope.*` and `TheSessionsVersion.*`) and a
+run of `tools/linkloop/` behind a pipe, where the program's own fake holds a
+default scope. The two lines below are what a board adds: that the image really
+does say so, and that nothing on the air changed. Task 02's lines are the ones
+that watch a transport code. Needs the radio's image of this pile's task 01 and
+the link dongle.
+
+- [ ] **p3.13-01** **`linkcli.py --port <port> hello` says `protocol 1.3` and
+  `caps 0xff`** — 1.3 spoken, and `FLOOD_SCOPE` **not** in the list → ______.
+  Then `linkcli.py --port <port> flood-scope` → `ERR_UNSUPPORTED`, the one
+  status byte and nothing else (→ ______). That pair is the whole of what this
+  task shipped to a board: a newer link, and no new behaviour on the air.
+- [ ] **p3.13-01** **A flooded send is answered `scoped 0`, and the packet is
+  the one it always was.** With a job begun and no path (§6's lines):
+  `linkcli.py --port <port> discover --no-wait` → `send 1 (sent as a flood)`
+  and `scoped 0` → ______ — the byte is there, because the session is 1.3, and
+  it says 0, because nothing was scoped. A second radio within earshot sees the
+  same flood it saw from `v0.1.5`: two-byte path hashes and **no transport
+  code** (→ ______). That is the line that would catch a board accidentally
+  scoping a flood a task early.
+
 ## 5. Power
 
 The hardware repository's `hardware/pcb/CURRENT-SENSE.md` §6 is the fuller

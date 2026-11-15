@@ -1,4 +1,4 @@
-// The numbers of the box link, protocol 1.2: message types, status codes, roles, capability
+// The numbers of the box link, protocol 1.3: message types, status codes, roles, capability
 // bits, modes and the few limits the protocol fixes. One header that reads like the tables of
 // spec/LINK-PROTOCOL.md sections 2 to 10, so that no other file of the codec carries a magic
 // number and a reviewer can hold this file against that document line by line. Section 10's
@@ -21,12 +21,18 @@ namespace link {
 // LINK-PROTOCOL.md section 2, "Frames".
 constexpr uint8_t kProtoMajor = 1;
 // 1.1 (2026-11-06): HELLO's answer and EV_BOOT end with `band` (LINK-PROTOCOL.md 5.1).
-// 1.2 (2026-11-07): LOCAL_REQUEST and its capability bit (LINK-PROTOCOL.md 5.9). This
-// constant is the one place the firmware says which minor it speaks: the image descriptor's
-// `link_minor` is built from it (src/common/fwdesc/ImageDescriptor.cpp), the release manifest's
-// `link` is read out of this header (tools/release/build_release.py's link_version), and the
-// session answers HELLO at the highest minor both ends know.
-constexpr uint8_t kProtoMinor = 2;
+// 1.2 (2026-11-07): LOCAL_REQUEST and its capability bit (LINK-PROTOCOL.md 5.9).
+// 1.3 (2026-11-14): FLOOD_SCOPE, its capability bit, and one byte at the end of a send's
+// answer (LINK-PROTOCOL.md 6.5).
+//
+// This constant is the one place the firmware says which minor it *speaks*: the image
+// descriptor's `link_minor` is built from it (src/common/fwdesc/ImageDescriptor.cpp), the
+// release manifest's `link` is read out of this header (tools/release/build_release.py's
+// link_version), and the session answers HELLO at the highest minor both ends know. It is
+// **not** the version of a session: that is what the last HELLO's answer named, and 1.3 is the
+// first minor whose rules for other messages depend on it (5.1, "The session's version";
+// Session.h's session_minor_).
+constexpr uint8_t kProtoMinor = 3;
 constexpr uint16_t kMaxPayload = 240;              // bytes of payload in one packet
 constexpr uint16_t kMinPacket = 4;                 // type + seq + crc16, with no payload
 constexpr uint16_t kMaxPacket = kMaxPayload + 4;   // type + seq + payload + crc16: 244
@@ -73,6 +79,7 @@ enum MsgType : uint8_t {
   kMsgReplyGet = 0x29,
   kMsgObsPull = 0x2A,
   kMsgMeshCounters = 0x2B,
+  kMsgFloodScope = 0x2C,
   kMsgEvBoot = 0x60,
   kMsgEvMeshReply = 0x61,
   kMsgEvAttention = 0x62,
@@ -137,6 +144,7 @@ enum Capability : uint32_t {
   kCapAttention = 0x20,
   kCapTimePersist = 0x40,
   kCapLocalRequest = 0x80,  // 1.2
+  kCapFloodScope = 0x100,   // 1.3
 };
 
 // ----------------------------------------------------------------------------- section 5.3
@@ -290,6 +298,31 @@ constexpr uint8_t kSendCliTextMax = 148;   // SEND_CLI's text: 1 to 148 bytes
 enum SendCliFlag : uint8_t {
   kSendCliSensitive = 0x01,  // the line holds a password: wipe it once the packet is built
 };
+
+// ----------------------------------------------------------------------------- section 6.5
+
+// FLOOD_SCOPE's `mode` (link 1.3): what the next flood the mesh client originates carries. The
+// answer's own `mode` is only ever kFloodScopeOn or kFloodScopeOnceOff - "the mode the next send
+// will have" - and kFloodScopeAsk is a request that changes nothing.
+enum FloodScopeMode : uint8_t {
+  kFloodScopeAsk = 0,      // ask: nothing changes
+  kFloodScopeOn = 1,       // the next flood takes the default scope. What holds when nothing was asked
+  kFloodScopeOnceOff = 2,  // the next flood carries no transport code. **One send**
+};
+
+// "Any other mode is ERR_RANGE" (section 6.5), which is the session's answer to give - as
+// REBOOT's mode and LOCAL_REQUEST's req_type are.
+inline bool isFloodScopeMode(uint8_t mode) {
+  return mode == kFloodScopeAsk || mode == kFloodScopeOn || mode == kFloodScopeOnceOff;
+}
+
+// The default scope's name as `region default` prints it, without a leading `#`: 1 to 30 bytes,
+// or empty when the RAK holds none (section 6.5). Thirty is MeshCore's own bound on a region's
+// name - `RegionEntry::name` is `char name[31]` (src/helpers/RegionMap.h:18 at the pin
+// 81dbae59), thirty characters and the NUL - so the link's field can carry whatever upstream's
+// region map holds. The fixture's longest case is `dk-midtjylland-oestjylland-nor`, thirty
+// bytes exactly.
+constexpr uint8_t kScopeNameMax = 30;
 
 // ----------------------------------------------------------------------------- section 6.3
 
