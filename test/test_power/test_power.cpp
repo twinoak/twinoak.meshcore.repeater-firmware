@@ -16,6 +16,9 @@
 //   - the thresholds: a dip shorter than the minimum time raises nothing; low, then critical;
 //     recovery needs the hysteresis; and nothing re-raised inside the hour, through the real
 //     attention machine of src/common/link/attention/;
+//   - and since p3.14-01 whether the level is **known** and normal, which is the one question
+//     reason 4's limit asks of the battery: before the first reading, on a sensor that does not
+//     answer, low, critical, and back to normal - the limit that comes out of each;
 //   - the LPP of LPP_GET equals the LPP the telemetry path builds, for the same fake readings -
 //     and both equal bytes computed by hand from CayenneLPP's own arithmetic;
 //   - and since p3.10-02 the nine totals of LPP channels 6 to 14: their steps, the floor, all
@@ -1249,6 +1252,72 @@ TEST(TheThresholds, NothingIsReRaisedInsideTheHour) {
   ASSERT_EQ(kBatteryCritical, w.poll(true, 3250, now + kMinTimeBelowMs));
   now += kMinTimeBelowMs;
   EXPECT_TRUE(machine.raise(twinoak::link::kAttentionBatteryCritical, w.lastMilliVolts(), now));
+}
+
+TEST(TheThresholds, WhetherTheLevelIsKnownAndNormalIsWhatReasonFoursLimitAsks) {
+  // spec/LINK-PROTOCOL.md section 8's last paragraph, the half of it that is the battery's: 300 s
+  // while the battery is at its normal level, the hour while it is low, critical or **not known**.
+  // The counting is the machine's (test/test_attention); what is held here is the answer this
+  // class's level gives and the limit that comes out of it - which is the board's one line
+  // (src/common/power/BoardPower.cpp's batteryKnownNormal).
+  BatteryWatch w;
+  uint32_t now = 1000;
+
+  // Before its first reading the watch answers kBatteryNormal, because that is the level it
+  // starts in and holds until a reading says otherwise. It is not *known*, and the limit is the
+  // hour: nothing has told this node what the pack is doing.
+  EXPECT_EQ(kBatteryNormal, w.level());
+  EXPECT_FALSE(levelKnownNormal(w.level(), /*reading_valid=*/false));
+  EXPECT_EQ(twinoak::link::kAttentionLimitMs,
+            twinoak::link::personAskedLimitMs(levelKnownNormal(w.level(), false)));
+
+  // A board whose channel 2 does not answer - an INA3221 that is not there, or one in its
+  // back-off - reads the same for as long as it does not answer.
+  for (uint32_t t = 0; t < 3 * kMinTimeBelowMs; t += 1000) {
+    ASSERT_EQ(kBatteryNoChange, w.poll(false, 0, now + t));
+  }
+  EXPECT_EQ(kBatteryNormal, w.level()) << "the level stands; it is the validity bit that is no";
+  EXPECT_FALSE(levelKnownNormal(w.level(), false));
+
+  // A valid reading above both thresholds: known, normal, and 300 s.
+  now += 3 * kMinTimeBelowMs;
+  ASSERT_EQ(kBatteryNoChange, w.poll(true, 3900, now));
+  EXPECT_TRUE(levelKnownNormal(w.level(), true));
+  EXPECT_EQ(twinoak::link::kAttentionPersonLimitMs,
+            twinoak::link::personAskedLimitMs(levelKnownNormal(w.level(), true)));
+
+  // Low, after the minute below: known, and not normal.
+  now += kMinTimeBelowMs;
+  w.poll(true, 3400, now);
+  ASSERT_EQ(kBatteryLow, w.poll(true, 3400, now + kMinTimeBelowMs));
+  now += kMinTimeBelowMs;
+  EXPECT_FALSE(levelKnownNormal(w.level(), true));
+  EXPECT_EQ(twinoak::link::kAttentionLimitMs,
+            twinoak::link::personAskedLimitMs(levelKnownNormal(w.level(), true)));
+
+  // Critical, the same way: still no.
+  w.poll(true, 3250, now);
+  ASSERT_EQ(kBatteryCritical, w.poll(true, 3250, now + kMinTimeBelowMs));
+  now += kMinTimeBelowMs;
+  EXPECT_FALSE(levelKnownNormal(w.level(), true));
+
+  // And a pack that came back - above the low threshold **and** its hysteresis, for the minute -
+  // is normal again, so the next request a person makes is held to 300 s and not to the hour.
+  w.poll(true, kDefaultLowMv + kHysteresisMv, now);
+  ASSERT_EQ(kBatteryNormal, w.poll(true, kDefaultLowMv + kHysteresisMv, now + kMinTimeBelowMs));
+  EXPECT_TRUE(levelKnownNormal(w.level(), true));
+  EXPECT_EQ(twinoak::link::kAttentionPersonLimitMs,
+            twinoak::link::personAskedLimitMs(levelKnownNormal(w.level(), true)));
+
+  // One millivolt under that is *low* on the way up, and the hour comes back with it.
+  BatteryWatch v;
+  v.poll(true, 3400, now);
+  ASSERT_EQ(kBatteryLow, v.poll(true, 3400, now + kMinTimeBelowMs));
+  now += kMinTimeBelowMs;
+  v.poll(true, kDefaultLowMv + kHysteresisMv - 1, now);
+  ASSERT_EQ(kBatteryNoChange, v.poll(true, kDefaultLowMv + kHysteresisMv - 1,
+                                     now + kMinTimeBelowMs));
+  EXPECT_FALSE(levelKnownNormal(v.level(), true));
 }
 
 // ============================================================================= the telemetry

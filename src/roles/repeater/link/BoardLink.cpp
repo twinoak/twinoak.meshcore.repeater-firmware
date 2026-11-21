@@ -310,7 +310,16 @@ bool raiseAttention(uint8_t reason, uint16_t detail) {
   return g_attention.raise(reason, detail, millis());
 }
 
-bool raiseWalterWake() { return raiseAttention(kAttentionPersonAsked, 0); }
+bool raiseWalterWake() {
+  // Reason 4 is a person, and a person who asks is waiting for the answer: 300 s since the last
+  // one rather than the hour, while the battery is at its normal level (spec/LINK-PROTOCOL.md
+  // section 8's last paragraph). Which of the two limits holds is decided here, because the
+  // machine has no board and this is the line where the battery can be asked; everything about
+  // counting it is the machine's. The other five reasons go through raiseAttention() above and
+  // keep the hour.
+  return g_attention.raise(kAttentionPersonAsked, 0, millis(),
+                           personAskedLimitMs(power::batteryKnownNormal()));
+}
 
 void noteAdvert(const meshclient::HeardAdvert& heard) {
   // The threshold, the `obs.wake` setting and "once per filling of the ring" are the ring face's

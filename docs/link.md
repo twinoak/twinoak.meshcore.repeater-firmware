@@ -408,9 +408,17 @@ The codes of reason 6, this firmware's own:
   queued twice: the second battery-low of one discharge is the same news as the
   first.
 - **One new attention per reason per hour**, counted from when it was raised and
-  kept in RAM, because each one costs the box an LTE attach. A second
-  `sensor set walter.wake 1` inside the hour raises nothing — `sensor get
-  walter.wake` still reads `1` while the first is pending.
+  kept in RAM, because each one costs the box an LTE attach.
+- **Reason 4 is the exception: five minutes.** A person who asks is waiting for
+  the answer, so a second `sensor set walter.wake 1` raises a new attention once
+  **300 s** have passed since the last one — while the battery is at its normal
+  level. While it is low, critical or **not known** (before the first reading of
+  channel 2, and on a unit whose INA3221 is not answering) reason 4 keeps the
+  hour: the pack a repeater lives on comes first. Either limit is counted from
+  when the last one was raised, by the limit that holds when the new one is
+  asked for. A request the limit refused is still answered `ok`, and `sensor get
+  walter.wake` reads `1` while one is pending, which is where "did it raise one"
+  is read.
 - **The reason stays in `status`'s `attention` field** until a request has been
   answered, used up or not; the answer to the request that ends it still carries
   it, so a Walter that woke for its own reasons still learns why it was wanted.
@@ -1071,7 +1079,7 @@ Three layers, and `docs/ARCHITECTURE.md` §4 is the design:
 |---|---|---|
 | codec | `src/common/link/codec/` | CRC-16/CCITT-FALSE, COBS, packets, frames, one function per message. Portable. |
 | session | `src/common/link/session/` | the dispatcher, the one-entry retry memory, the event counter, and the interfaces it reaches the firmware through. Portable. |
-| attention | `src/common/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the hourly limit, and the belief that the Walter is asleep. Portable. |
+| attention | `src/common/link/attention/` | section 8's machine: the queue, the 300 ms gap, the ten repeats, the rate limit (the hour, and reason 4's 300 s on a battery the board says is at its normal level), and the belief that the Walter is asleep. Portable. |
 | power | `src/common/power/` | the INA3221's registers and per-channel shunts, the BME280, the two readers' schedules, the battery thresholds and the Cayenne-LPP. Portable but for `BoardPower.cpp`. |
 | mesh client | `src/roles/repeater/meshclient/` | the job: one peer, its path in MeshCore's own encoding, what is awaited, the shared secret, the 120-second silence rule; the five sends behind `MeshPort`; the reply record and its matching rules; `PeerSlot`, the index arithmetic of the extra peer; the observation ring, its pull and the RSSI note table. Portable; the peer overrides, the packet building and the advert capture are in `src/roles/repeater/app/TwinOakMesh.cpp`. |
 | transport | `src/common/link/SerialTransport.*` | `Serial1`, and one bounded slice of each `loop()`. |

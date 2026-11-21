@@ -5,7 +5,8 @@ namespace link {
 
 // ----------------------------------------------------------------------------- raising one
 
-bool AttentionMachine::raise(uint8_t reason, uint16_t detail, uint32_t now_ms) {
+bool AttentionMachine::raise(uint8_t reason, uint16_t detail, uint32_t now_ms,
+                             uint32_t limit_ms) {
   if (reason < kAttentionRestarted || reason > kAttentionReasonMax) return false;
 
   // "A reason already pending or queued is not added twice" - the second battery-low of the same
@@ -14,9 +15,12 @@ bool AttentionMachine::raise(uint8_t reason, uint16_t detail, uint32_t now_ms) {
   if (isQueued(reason)) return false;
 
   // "At most one new attention per reason per hour, counted from when it was raised, kept in
-  // RAM" (section 8), because each one costs the battery an LTE attach. The difference is signed
-  // so that the millisecond clock's wrap is one subtraction and not a special case.
-  if (ever_raised_[reason] && int32_t(now_ms - raised_at_ms_[reason]) < int32_t(kAttentionLimitMs)) {
+  // RAM" (section 8), because each one costs the battery an LTE attach - or, for reason 4 on a
+  // battery the caller says is at its normal level, 300 s: `limit_ms` is "either limit, counted
+  // from when the last one was raised, by the limit that holds when the new one is asked for",
+  // which is the last sentence of section 8. The difference is signed so that the millisecond
+  // clock's wrap is one subtraction and not a special case.
+  if (ever_raised_[reason] && int32_t(now_ms - raised_at_ms_[reason]) < int32_t(limit_ms)) {
     rate_limited_++;
     return false;
   }

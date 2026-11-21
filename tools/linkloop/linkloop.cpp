@@ -26,7 +26,9 @@
 //     program is one boot, so a second run is a reset. `--emitted` starts it as a node that has
 //     already put a timestamp on the air;
 //   - the **AttentionMachine** (src/common/link/attention/), so the 300 ms gap, the ten sends a second
-//     apart and the hourly limit are watched from a laptop with no box at all. `--wake` raises
+//     apart and the rate limit are watched from a laptop with no box at all - including reason
+//     4's 300 s on a battery whose level is known to be normal, which is what this host build's
+//     fake INA3221 answers. `--wake` raises
 //     one at startup (reason 4), and `sensor set walter.wake 1` through `cli` raises it the way
 //     a mesh admin does;
 //   - the **settings table** (src/roles/repeater/app/Settings.*), behind a `sensor list/get/set` that is a
@@ -238,9 +240,10 @@ class LoopSettingsHost : public twinoak::SettingsHost {
   bool attentionPending() const override {
     return g_attention.pendingReason() != kAttentionNone;
   }
-  bool raiseWalterWake() override {
-    return g_attention.raise(kAttentionPersonAsked, 0, nowMs());
-  }
+  // Out of line with the three below it, because reason 4's limit is the battery's to decide and
+  // the watch is declared below this class (src/roles/repeater/link/BoardLink.cpp's own
+  // raiseWalterWake is the line this mirrors).
+  bool raiseWalterWake() override;
   // Out of line, because the watch they read is declared below this class. Nothing here writes a
   // preferences file - a host build has no file system of the board's - so a `set` lasts as long
   // as this process, which is one boot.
@@ -826,6 +829,17 @@ void hearAdvert(long n, uint32_t now_ms) {
   g_observations.noteAdvert(a, g_attention.walterAsleep());
 }
 
+bool LoopSettingsHost::raiseWalterWake() {
+  // 300 s since the last reason 4 while the battery's level is known to be the normal one, and
+  // the hour otherwise (spec/LINK-PROTOCOL.md section 8's last paragraph) - the board's rule, so
+  // that a laptop with no box can watch it: with the fake INA3221 answering, two `sensor set
+  // walter.wake 1` six minutes apart raise two attentions, and with --drop-ina the level is not
+  // known and the second one waits the hour.
+  const bool normal = twinoak::power::levelKnownNormal(
+      g_battery.level(), g_power_reader.readings().batteryValid());
+  return g_attention.raise(kAttentionPersonAsked, 0, nowMs(), personAskedLimitMs(normal));
+}
+
 uint16_t LoopSettingsHost::batteryLowMv() const { return g_battery.lowMilliVolts(); }
 uint16_t LoopSettingsHost::batteryCritMv() const { return g_battery.critMilliVolts(); }
 bool LoopSettingsHost::setBatteryLowMv(uint16_t mv) {
@@ -885,7 +899,10 @@ int pump() {
   }
   // The restart attention, as src/roles/repeater/link/BoardLink.cpp raises it: only for a Walter that was
   // believed asleep, which no board can know - so here it is the --wake flag's business instead.
-  if (g_wake) g_attention.raise(kAttentionPersonAsked, 0, nowMs());
+  // Through the settings host, so that this road and `sensor set walter.wake 1` are one line and
+  // reason 4's limit is decided the same way for both (here, before any reading of channel 2, the
+  // level is not known and the limit is the hour).
+  if (g_wake) g_settings_host.raiseWalterWake();
 
   // A job is per-boot RAM, and each linkcli invocation is a fresh boot of this program, so `path`
   // would read ERR_STATE on a node that no earlier command's job survived to. --job begins one

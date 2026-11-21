@@ -40,8 +40,10 @@ struct SettingsHost {
   // Whether an attention is pending, which is what `walter.wake` reads back.
   virtual bool attentionPending() const = 0;
   // `sensor set walter.wake 1`: ask for the Walter's attention, reason 4. False when the machine
-  // refused it - the hourly limit, or one of that reason already pending - which is not an error
-  // and is not an answer the CLI has a word for (see set() below).
+  // refused it - the rate limit, or one of that reason already pending - which is not an error
+  // and is not an answer the CLI has a word for (see set() below). That limit is 300 s on a
+  // battery at its normal level and an hour otherwise, and it is the board's to decide
+  // (spec/LINK-PROTOCOL.md section 8); nothing of it is this table's.
   virtual bool raiseWalterWake() = 0;
 
   // The battery thresholds of section 8's reasons 2 and 3, in millivolts: `power.low_mv` and
@@ -97,7 +99,7 @@ class Settings {
   //
   // Six of the ten keys are read-only and refuse every value. `walter.wake` accepts "1" and
   // nothing else, and accepting it means "the machine was asked": whether an attention was
-  // actually raised is the hourly limit's business, and `sensor get walter.wake` is where the
+  // actually raised is the rate limit's business, and `sensor get walter.wake` is where the
   // answer to that is read. `power.low_mv` and `power.crit_mv` take a decimal number of
   // millivolts and refuse anything the thresholds would not accept. `obs.wake` takes "0" and
   // "1" and nothing else. `client.refused` is a counter and takes nothing: the ceiling it counts

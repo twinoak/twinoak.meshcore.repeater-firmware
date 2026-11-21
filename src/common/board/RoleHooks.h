@@ -35,7 +35,9 @@ void beforeRestart();
 
 // Ask for the Walter's attention. `reason` is one of src/common/link/codec/Numbers.h's
 // AttentionReason values and `detail` is that reason's own number. False when the role's
-// attention machine refused it (already pending, or raised less than an hour ago).
+// attention machine refused it (already pending, or raised less than an hour ago). The battery's
+// two reasons are what this call carries, and both keep the hour; reason 4's shorter limit is
+// raiseWalterWake()'s, below.
 bool raiseAttention(uint8_t reason, uint16_t detail);
 
 // The role's own settings, in the order `sensor list` prints them after upstream's.

@@ -6,7 +6,8 @@
 //   - the 300 ms gap between the two wake bytes and the first event;
 //   - ten sends a second apart, with `repeat` 0 to 9, and an eleventh that never comes;
 //   - ended early by any valid request;
-//   - the hourly limit, per reason, counted from when it was raised;
+//   - the rate limit, per reason, counted from when it was raised: the hour for five of the six
+//     reasons, and for reason 4 either 300 s or the hour, by what the caller says the battery is;
 //   - two reasons queued behind the pending one, and neither added twice;
 //   - STATUS's `attention` before and after - including that the answer to the request which
 //     ends an attention still carries its reason;
@@ -153,7 +154,7 @@ TEST(TheSequence, ARequestThatArrivesBeforeTheFirstEventStopsItAltogether) {
 TEST(TheRateLimit, OneNewAttentionPerReasonPerHourCountedFromWhenItWasRaised) {
   AttentionMachine m;
   Clock c;
-  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms));
+  ASSERT_TRUE(m.raise(kAttentionRingNearlyFull, 200, c.ms));
   EXPECT_EQ(1u, m.raised());
 
   // It is told, and the attention is over.
@@ -163,7 +164,7 @@ TEST(TheRateLimit, OneNewAttentionPerReasonPerHourCountedFromWhenItWasRaised) {
 
   // A second one inside the hour raises nothing at all.
   c.advance(kAttentionLimitMs - 1);
-  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms));
+  EXPECT_FALSE(m.raise(kAttentionRingNearlyFull, 210, c.ms));
   EXPECT_EQ(kAttentionNone, m.pendingReason());
   EXPECT_EQ("", step(m, c));
   EXPECT_EQ(1u, m.rateLimited());
@@ -174,12 +175,164 @@ TEST(TheRateLimit, OneNewAttentionPerReasonPerHourCountedFromWhenItWasRaised) {
   m.noteRequest(kMsgStatus, c.ms);
   m.requestAnswered(c.ms);
 
-  // And an hour after the first one was raised, reason 4 may be raised again.
+  // And an hour after the first one was raised, reason 5 may be raised again.
   c.advance(1);
-  EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms));
-  EXPECT_EQ(kAttentionPersonAsked, m.pendingReason());
+  EXPECT_TRUE(m.raise(kAttentionRingNearlyFull, 220, c.ms));
+  EXPECT_EQ(kAttentionRingNearlyFull, m.pendingReason());
   EXPECT_EQ(3u, m.raised());
   EXPECT_EQ(1u, m.rateLimited());
+}
+
+TEST(TheRateLimit, EachOfTheFiveOtherReasonsIsRefusedOneMillisecondBeforeTheHour) {
+  // The five the node raises by itself, each with the limit raise() takes when nobody says
+  // otherwise - which is the hour, and is what keeps a bad afternoon from costing the battery an
+  // LTE attach a minute.
+  const uint8_t reasons[] = {kAttentionRestarted, kAttentionBatteryLow, kAttentionBatteryCritical,
+                             kAttentionRingNearlyFull, kAttentionFault};
+  for (const uint8_t reason : reasons) {
+    SCOPED_TRACE(int(reason));
+    AttentionMachine m;
+    Clock c;
+    ASSERT_TRUE(m.raise(reason, 1, c.ms));
+    m.noteRequest(kMsgStatus, c.ms);
+    m.requestAnswered(c.ms);
+
+    // Well past reason 4's 300 s, and nothing of that limit reaches these five.
+    c.advance(kAttentionPersonLimitMs * 2);
+    EXPECT_FALSE(m.raise(reason, 1, c.ms)) << "ten minutes is not an hour";
+    c.advance(kAttentionLimitMs - kAttentionPersonLimitMs * 2 - 1);
+    EXPECT_FALSE(m.raise(reason, 1, c.ms)) << "and an hour less one millisecond is not";
+    EXPECT_EQ(2u, m.rateLimited());
+    c.advance(1);
+    EXPECT_TRUE(m.raise(reason, 1, c.ms)) << "at the hour it is raised";
+  }
+}
+
+// --- reason 4: a person may ask again (section 8's last paragraph) -------------------------
+
+// What the board hands raise() for reason 4, by what it knows of the battery
+// (src/roles/repeater/link/BoardLink.cpp's raiseWalterWake). The two limits are named here and
+// nowhere else below.
+constexpr uint32_t kOnANormalBattery = kAttentionPersonLimitMs;
+constexpr uint32_t kOnAnyOtherBattery = kAttentionLimitMs;
+
+TEST(TheRateLimit, ReasonFourIsRefusedJustBeforeFiveMinutesAndRaisedAtItOnANormalBattery) {
+  EXPECT_EQ(kOnANormalBattery, personAskedLimitMs(/*battery_normal=*/true));
+  EXPECT_EQ(300000u, kAttentionPersonLimitMs) << "300 s, as section 8 says";
+
+  AttentionMachine m;
+  Clock c;
+  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  m.noteRequest(kMsgStatus, c.ms);
+  m.requestAnswered(c.ms);
+  ASSERT_EQ(kAttentionNone, m.pendingReason());
+
+  // 299 999 ms: a person who asks twice in a breath still waits.
+  c.advance(kOnANormalBattery - 1);
+  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  EXPECT_EQ(kAttentionNone, m.pendingReason());
+  EXPECT_EQ("", step(m, c));
+  EXPECT_EQ(1u, m.rateLimited()) << "refused for age, by the shorter limit";
+
+  // 300 000 ms: the whole sequence begins again, two 0x00 bytes first.
+  c.advance(1);
+  EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  EXPECT_EQ(kAttentionPersonAsked, m.pendingReason());
+  EXPECT_EQ("wake", step(m, c));
+  EXPECT_EQ(2u, m.raised());
+  EXPECT_EQ(1u, m.rateLimited());
+}
+
+TEST(TheRateLimit, ReasonFourKeepsTheHourOnABatteryThatIsLowCriticalOrNotKnown) {
+  // Three answers, one limit: the board asks "is the level known, and is it the normal one", and
+  // low, critical and "no reading yet, or no sensor at all" are all no (BatteryWatch.h's
+  // levelKnownNormal, whose three cases are test/test_power's).
+  EXPECT_EQ(kOnAnyOtherBattery, personAskedLimitMs(/*battery_normal=*/false));
+  const char* const whats[] = {"low", "critical", "not known"};
+  for (const char* what : whats) {
+    SCOPED_TRACE(what);
+    AttentionMachine m;
+    Clock c;
+    ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery));
+    m.noteRequest(kMsgStatus, c.ms);
+    m.requestAnswered(c.ms);
+
+    // Six minutes is nothing here: a pack that is going cannot pay for an attach every five.
+    c.advance(kOnANormalBattery + 60000);
+    EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery));
+    c.advance(kOnAnyOtherBattery - (kOnANormalBattery + 60000) - 1);
+    EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery)) << "an hour less 1";
+    EXPECT_EQ(2u, m.rateLimited());
+    c.advance(1);
+    EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery)) << "at the hour";
+  }
+}
+
+TEST(TheRateLimit, ABatteryThatWentLowBetweenTwoRequestsHoldsTheSecondToTheHour) {
+  // "Either limit is counted from when the last one was raised, by the limit that holds when the
+  // new one is asked for" (section 8). The first was raised on a normal battery; what decides the
+  // second is the battery under the second.
+  AttentionMachine m;
+  Clock c;
+  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  m.noteRequest(kMsgStatus, c.ms);
+  m.requestAnswered(c.ms);
+
+  c.advance(6 * 60000);  // six minutes later, and by now the pack is low
+  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery))
+      << "six minutes is past 300 s, and 300 s is not this request's limit";
+  EXPECT_EQ(1u, m.rateLimited());
+
+  // And at the hour after that first one, with the pack still low, it is raised.
+  c.advance(kOnAnyOtherBattery - 6 * 60000);
+  EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery));
+}
+
+TEST(TheRateLimit, ABatteryThatCameBackToNormalBetweenTwoRequestsGetsTheShorterLimit) {
+  AttentionMachine m;
+  Clock c;
+  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnAnyOtherBattery));
+  m.noteRequest(kMsgStatus, c.ms);
+  m.requestAnswered(c.ms);
+
+  // Four minutes later the sun is on the panel and the level is normal again - but 300 s have
+  // still not passed since the last one was raised, and either limit is counted from then.
+  c.advance(4 * 60000);
+  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  EXPECT_EQ(1u, m.rateLimited());
+
+  // Six minutes after it: raised, although the one before it was raised on a low pack.
+  c.advance(2 * 60000);
+  EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  EXPECT_EQ(kAttentionPersonAsked, m.pendingReason());
+}
+
+TEST(TheRateLimit, ReasonFourIsNotAddedTwiceWhilePendingOrQueuedHoweverOldItIs) {
+  AttentionMachine m;
+  Clock c;
+  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+
+  // Pending, and the ten sends used up: an hour on it is still that attention and not a new one,
+  // because a pending attention stays until the Walter has made a request.
+  for (int i = 0; i < kAttentionRepeats + 2; i++) {
+    step(m, c);
+    c.advance(kAttentionRepeatMs);
+  }
+  c.advance(kOnAnyOtherBattery);
+  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery)) << "already pending";
+  EXPECT_EQ(0u, m.rateLimited()) << "and it is not the rate limit that refused it";
+  EXPECT_EQ(kAttentionPersonAsked, m.pendingReason()) << "it stays until the Walter has asked";
+
+  // Queued behind another reason, which is the other half of "not added twice".
+  AttentionMachine q;
+  Clock d;
+  ASSERT_TRUE(q.raise(kAttentionBatteryLow, 3450, d.ms));
+  ASSERT_TRUE(q.raise(kAttentionPersonAsked, 0, d.ms, kOnANormalBattery));
+  EXPECT_EQ(1, q.queued());
+  d.advance(kOnANormalBattery * 2);
+  EXPECT_FALSE(q.raise(kAttentionPersonAsked, 0, d.ms, kOnANormalBattery)) << "already queued";
+  EXPECT_EQ(1, q.queued());
+  EXPECT_EQ(0u, q.rateLimited());
 }
 
 TEST(TheRateLimit, AReasonAlreadyPendingOrQueuedIsNotAddedTwice) {
@@ -203,14 +356,35 @@ TEST(TheRateLimit, AMillisecondClockThatWrapsDoesNotOpenTheGate) {
   AttentionMachine m;
   Clock c;
   c.ms = 0xFFFFFF00;  // 256 ms before the wrap
-  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms));
+  ASSERT_TRUE(m.raise(kAttentionRingNearlyFull, 200, c.ms));
   m.noteRequest(kMsgStatus, c.ms);
   m.requestAnswered(c.ms);
 
   c.advance(1000);  // past the wrap, and only 744 ms of real time later
-  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms)) << "a wrap is not an hour";
+  EXPECT_FALSE(m.raise(kAttentionRingNearlyFull, 200, c.ms)) << "a wrap is not an hour";
   c.advance(kAttentionLimitMs - 1000);
-  EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms)) << "and an hour after it still is";
+  EXPECT_TRUE(m.raise(kAttentionRingNearlyFull, 200, c.ms)) << "and an hour after it still is";
+}
+
+TEST(TheRateLimit, AMillisecondClockThatWrapsBetweenTwoRequestsOfReasonFour) {
+  AttentionMachine m;
+  Clock c;
+  c.ms = 0xFFFFFF00;  // 256 ms before the wrap
+  ASSERT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  m.noteRequest(kMsgStatus, c.ms);
+  m.requestAnswered(c.ms);
+
+  c.advance(1000);  // past the wrap, and 744 ms of real time later
+  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery))
+      << "a wrap is not five minutes either";
+  EXPECT_EQ(1u, m.rateLimited());
+
+  c.advance(kOnANormalBattery - 1000 - 1);
+  EXPECT_FALSE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery));
+  c.advance(1);
+  EXPECT_TRUE(m.raise(kAttentionPersonAsked, 0, c.ms, kOnANormalBattery))
+      << "300 s across the wrap is 300 s";
+  EXPECT_EQ(uint32_t(0xFFFFFF00u + kOnANormalBattery), c.ms) << "and the clock really did wrap";
 }
 
 // ----------------------------------------------------------------------------- the queue
