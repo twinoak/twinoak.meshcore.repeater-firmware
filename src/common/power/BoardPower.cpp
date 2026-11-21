@@ -168,6 +168,14 @@ void loop() {
 
 uint16_t batteryMilliVolts() { return g_power.readings().batteryMilliVolts(); }
 
+bool batteryKnownNormal() {
+  // The rule is BatteryWatch.h's levelKnownNormal; the two facts it takes are this file's, which
+  // is why the question is asked here. Channel 2 is not valid for the first averaging window of a
+  // boot, nor while a device that stopped answering sits in its five-second back-off, and the
+  // level is not believed in either.
+  return levelKnownNormal(g_battery.level(), g_power.readings().batteryValid());
+}
+
 LinkPower& linkPower() { return g_link_power; }
 
 // The three numbers src/common/power/Telemetry.cpp's mirror copies out of CayenneLPP, held here

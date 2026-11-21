@@ -110,7 +110,7 @@ struct CliAccess {
 // (phase 1's task 05). Present => kCapAttention.
 //
 // The session drives it once a pass and puts on the wire whatever dueNow() asks for; everything
-// about *when* - the 300 ms gap, the 1000 ms repeat, the ten sends, the hourly limit per reason,
+// about *when* - the 300 ms gap, the 1000 ms repeat, the ten sends, the rate limit per reason,
 // the queue - is the machine's, so that test/test_attention can hold it against a fake clock
 // without a session and test/test_link_session can drive a session against a fake machine.
 enum AttentionDue : uint8_t {

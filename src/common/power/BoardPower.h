@@ -43,6 +43,13 @@ void loop();
 // upstream's own boot-voltage protection.
 uint16_t batteryMilliVolts();
 
+// Whether the pack's level is **known** and is the normal one: channel 2 is answering and the
+// watch says kBatteryNormal (BatteryWatch.h's levelKnownNormal, over the reader's validity bit
+// and the watch's level). It is the one question section 8's reason 4 asks of the battery - *not
+// known* is not *normal* - and src/roles/repeater/link/BoardLink.cpp's raiseWalterWake is the one
+// caller.
+bool batteryKnownNormal();
+
 // The session's PowerAccess, EnvAccess and LppAccess, all three of them this one object.
 LinkPower& linkPower();
 

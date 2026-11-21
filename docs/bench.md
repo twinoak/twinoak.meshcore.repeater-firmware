@@ -589,10 +589,33 @@ these lines are really checking, and hear a mesh admin.
   shows `attention 4` and flag bit 2 (asleep) — and the answer to that very
   `status` is the last place the 4 appears: the next one reads 0 and the flag is
   clear. This is the whole point of the task and needs two radios and a phone.
-- [ ] **p1-05** **A second `walter.wake` inside the hour raises nothing.**
+- [ ] **p1-05** **A second `walter.wake` straight away raises nothing.**
   `sensor set walter.wake 1` again (from the phone or the console) answers `ok`,
   `sensor get walter.wake` reads `1` while one is pending and `0` after it was
-  told, and no second sequence appears on the link until an hour has passed.
+  told, and no second sequence appears on the link — the limit is **300 s** on a
+  pack at its normal level and an hour on one that is low, critical or not yet
+  read (the three p3.14-01 lines below).
+- [ ] **p3.14-01** **Two requests six minutes apart wake it twice.** With a
+  Walter (or `linkcli.py`) on the link and the pack above `power.low_mv`:
+  `linkcli.py sleep 600`, `cli "sensor set walter.wake 1"`, and `listen 4` shows
+  the two `0x00` bytes and `EV_ATTENTION` reason 4 — then a `status`, which is
+  the request that ends it (`attention 4` in that answer, `0` in the next).
+  Six minutes later, `sleep 600` and the same `sensor set walter.wake 1`: a
+  **second** sequence, `repeat` counting from 0 again. This is what the task is
+  for, and nothing before it did it.
+- [ ] **p3.14-01** **Two requests two minutes apart wake it once.** The same
+  two lines with two minutes between them instead of six: the second
+  `sensor set walter.wake 1` answers `ok`, `listen 10` is silent and `status`
+  says `attention 0`. Two minutes is where meshmaster.dk's second wake line
+  falls when its reply was lost, and a line that did arrive must not wake the
+  box twice.
+- [ ] **p3.14-01** **A pack the firmware reads as low keeps the hour.**
+  `cli "sensor set power.low_mv <just above what the pack reads>"`, then the
+  minute the threshold needs — `EV_ATTENTION` reason 2 on the link is the sign
+  it took, and `sensor get power.low_mv` reads the new value. Two requests six
+  minutes apart now wake it **once**: the second raises nothing, because a pack
+  that is going pays for the attach. **Put `power.low_mv` back** to what it was
+  and confirm it reads that, which also leaves §5's two lines as they were.
 - [ ] **p1-05** **While it believes this end is asleep, nothing else is sent.**
   After `sleep 600`, `listen` is silent but for an attention — and the moment any
   request is sent, flag bit 2 clears. (The only events this firmware has today

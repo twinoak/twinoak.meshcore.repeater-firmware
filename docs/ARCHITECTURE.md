@@ -263,7 +263,12 @@ and a rails test holds that: a `CLI` line can be `password <new>`, whose reply e
 **Attention** (`src/common/link/attention/`, §8) is one small portable machine: one reason pending with
 a queue behind it, the two `0x00` wake bytes, 300 ms, then `EV_ATTENTION` every 1000 ms with
 `repeat` counting from 0 and at most ten sends, ended by any valid request, and at most one new
-attention per reason per hour. It also holds the belief that the Walter is asleep
+attention per reason per hour — reason 4, a person asking for the Walter, excepted: that one is
+raised again **300 s** after the last while the battery is at its normal level, and keeps the hour
+while it is low, critical or not known (§8's last paragraph). The limit travels with the raise,
+because which of the two it is is the battery's to say and this machine has no battery: §6's one
+question `levelKnownNormal` is asked in `BoardLink.cpp`, where both objects live, and the answer
+is handed in. It also holds the belief that the Walter is asleep
 (`SLEEP_NOTICE`): while that is set the session sends no events but `EV_BOOT` and `EV_ATTENTION`.
 The session asks it once a pass what to put on the wire and tells it when the bytes have gone, so
 every rule about *when* is in one file with a fake clock in front of it.
@@ -501,9 +506,13 @@ makes the realistic failure fast. `tasks/phase-1/reports/06.md` records that res
 The battery thresholds are *low* and *critical* on channel 2's bus voltage, with 100 mV of
 hysteresis and a minimum time below of one minute, so that a transmit burst's sag raises nothing;
 they are `power.low_mv` and `power.crit_mv` (§4), kept across a restart in a small versioned file
-of our own (`/power`, not upstream's `/prefs.json`). The hourly limit is not here: every attention
+of our own (`/power`, not upstream's `/prefs.json`). The rate limit is not here: every attention
 goes through §4's machine, which already allows at most one new attention per reason per hour,
-because each one costs the battery an LTE attach.
+because each one costs the battery an LTE attach. What that machine asks of this layer is one
+question, `levelKnownNormal` — *is the level known, and is it the normal one* — which is reason
+4's shorter limit. *Known* is the reading's validity bit and cannot be the level: the watch
+answers *normal* before its first reading and holds the level it had when channel 2 stops
+answering, so a unit that has never read its pack keeps the hour.
 
 The Cayenne-LPP is **one field list and two appliers**: `TwinOakSensors::querySensors` walks it and
 calls upstream's `CayenneLPP` for each field, because a mesh telemetry reply is upstream's buffer

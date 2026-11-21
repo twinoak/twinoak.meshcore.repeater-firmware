@@ -8,10 +8,12 @@
 // comes back; an attention costs the battery an LTE attach, so the node waits to see the voltage
 // stay down before it tells anybody.
 //
-// What is *not* here: the hourly limit. Every attention goes through the machine of
+// What is *not* here: the rate limit. Every attention goes through the machine of
 // src/common/link/attention/, which already allows at most one new attention per reason per hour
 // (section 8) - so this class says "the battery entered this level" and the machine decides
-// whether the Walter hears about it again.
+// whether the Walter hears about it again. The hour is the whole of it for these two reasons;
+// reason 4's shorter limit reads this class's level and changes nothing in it (section 8's last
+// paragraph, levelKnownNormal below).
 //
 // Host-portable: no Arduino, no MeshCore, no heap, no floating point. Every method takes `now_ms`
 // and every comparison is a signed difference, so a millis() wrap is one subtraction and
@@ -62,6 +64,23 @@ constexpr uint32_t kMinTimeBelowMs = 60000;
 // Whether a pair of thresholds is one this firmware accepts: both inside the window, and low far
 // enough above critical that their hysteresis bands do not overlap.
 bool thresholdsAcceptable(uint16_t low_mv, uint16_t crit_mv);
+
+// Whether a level is **known** and is the normal one, which is the one question section 8's
+// reason 4 asks of the battery (spec/LINK-PROTOCOL.md section 8's last paragraph: 300 s while the
+// battery is at its normal level, the hour while it is low, critical or not known).
+//
+// *Known* is the reading's validity bit and cannot come from the level, because a level is what
+// the watch holds when it has nothing to go on: it answers kBatteryNormal before its first
+// reading, and an invalid reading holds the level where it was rather than changing it. So a unit
+// whose INA3221 has never answered, and one whose INA3221 has stopped, both read *normal* here
+// and are not it - *not known* is not *normal*.
+//
+// A pure function of the two facts rather than a method, so that the board reads them off the
+// objects it owns (src/common/power/BoardPower.cpp's batteryKnownNormal) and nothing of the watch
+// itself changes.
+inline bool levelKnownNormal(uint8_t level, bool reading_valid) {
+  return reading_valid && level == kBatteryNormal;
+}
 
 // ----------------------------------------------------------------------------- the watch
 

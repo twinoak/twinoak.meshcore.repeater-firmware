@@ -9,7 +9,9 @@
 //     is filling. Raising one costs the battery an LTE attach, so the protocol spells out exactly
 //     what the RAK may do - two 0x00 bytes to wake the UART, 300 ms, then EV_ATTENTION every
 //     1000 ms with `repeat` counting from 0, at most ten times, ended early by any valid request
-//     - and limits it to one new attention per reason per hour.
+//     - and limits it to one new attention per reason per hour. Reason 4 is a person waiting for
+//     the answer, so it is held to 300 s instead while the battery can bear it (section 8's last
+//     paragraph, and personAskedLimitMs() below).
 //   - **Silence.** After SLEEP_NOTICE the RAK believes the Walter is asleep and sends no events
 //     but EV_BOOT and EV_ATTENTION, until any valid request arrives.
 //
@@ -35,6 +37,21 @@ namespace link {
 // One new attention per reason per hour (section 8), counted from when it was raised and kept in
 // RAM - so a node that resets forgets it, which errs towards telling the box rather than not.
 constexpr uint32_t kAttentionLimitMs = 3600000;
+// Reason 4 is the exception, because a person asked and is waiting for the answer: while the
+// battery is at its normal level a new one is raised when 300 s have passed since the last
+// (section 8's last paragraph). This is the whole of the difference; everything else about reason
+// 4 is what it was.
+constexpr uint32_t kAttentionPersonLimitMs = 300000;
+
+// The limit a new reason 4 is held to. `battery_normal` is "the level is known **and** it is the
+// normal one": *not known* is not *normal*, so a unit whose sensor has never answered - and one
+// whose sensor has stopped - keeps the hour. Which of the two it is cannot be decided here,
+// because the battery is not this machine's to know: the board asks this and hands the answer to
+// raise() below (src/roles/repeater/link/BoardLink.cpp).
+inline uint32_t personAskedLimitMs(bool battery_normal) {
+  return battery_normal ? kAttentionPersonLimitMs : kAttentionLimitMs;
+}
+
 // The gap between the two wake bytes and the first event (section 8). The Walter's UART is not
 // listening yet when the bytes arrive; losing the first events is expected, which is why there
 // are ten of them.
@@ -46,12 +63,17 @@ constexpr uint8_t kAttentionQueueDepth = kAttentionReasonMax - 1;
 class AttentionMachine : public AttentionAccess {
  public:
   // Something wants the box awake. `detail` is the reason's own number (section 8's table).
+  // `limit_ms` is how long the last raise of this reason holds this one off, counted from when
+  // that one was raised: the hour for five of the six reasons, which is the default, and
+  // personAskedLimitMs() for reason 4. The limit travels with the raise rather than living in a
+  // table here, because the one reason that has two of them is told which by its caller.
   // Returns true when this call made it pending or put it in the queue; false when it was
   // refused, which is one of three things and none of them is an error:
   //   - the reason is already pending or already queued ("not added twice");
-  //   - this reason was raised less than an hour ago (the rate limit);
+  //   - this reason was raised less than `limit_ms` ago (the rate limit);
   //   - the reason is not one of 1 to 6.
-  bool raise(uint8_t reason, uint16_t detail, uint32_t now_ms);
+  bool raise(uint8_t reason, uint16_t detail, uint32_t now_ms,
+             uint32_t limit_ms = kAttentionLimitMs);
 
   // The restart attention of section 8, reason 1, raised after EV_BOOT **only if** the Walter was
   // believed asleep when the node went down - otherwise EV_BOOT alone tells it everything this
@@ -82,7 +104,8 @@ class AttentionMachine : public AttentionAccess {
   uint8_t queued() const { return queue_len_; }
   // What the Walter said it would be back in, when it last said so (0 = unknown).
   uint32_t expectBackSeconds() const { return expect_back_s_; }
-  // Attentions raised and attentions the hourly limit refused, since boot.
+  // Attentions raised and attentions the rate limit refused, since boot - by either limit, the
+  // hour or reason 4's 300 s, because to a reader the two are the same refusal.
   uint32_t raised() const { return raised_; }
   uint32_t rateLimited() const { return rate_limited_; }
 
@@ -110,7 +133,8 @@ class AttentionMachine : public AttentionAccess {
   Waiting queue_[kAttentionQueueDepth] = {{0, 0}};
   uint8_t queue_len_ = 0;
 
-  // The hourly limit, one entry per reason (index 0 is kAttentionNone and is never used).
+  // The rate limit, one entry per reason (index 0 is kAttentionNone and is never used): when
+  // this reason was last raised, against which the limit of the *next* raise is counted.
   bool ever_raised_[kAttentionReasonMax + 1] = {false};
   uint32_t raised_at_ms_[kAttentionReasonMax + 1] = {0};
 

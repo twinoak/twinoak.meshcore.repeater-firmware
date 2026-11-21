@@ -39,10 +39,14 @@ void linkLoop();
 // Ask for the Walter's attention. `reason` is one of Numbers.h's AttentionReason values and
 // `detail` is that reason's own number. False when the machine refused it: this reason is already
 // pending or queued, or it was raised less than an hour ago. Task 06 (the battery) and phase 2
-// (the observation ring, a fault) raise theirs through this one call.
+// (the observation ring, a fault) raise theirs through this one call, and all five of them keep
+// the hour.
 bool raiseAttention(uint8_t reason, uint16_t detail);
 // `sensor set walter.wake 1`, from the USB console or from a mesh admin: attention reason 4,
-// "a person asked for the Walter".
+// "a person asked for the Walter". Not this call but **300 s** since the last one of that reason
+// while the battery is at its normal level, and the hour while it is low, critical or not known
+// (spec/LINK-PROTOCOL.md section 8's last paragraph): a person who asks is waiting for the
+// answer, and may ask again in five minutes.
 bool raiseWalterWake();
 // Whether an attention is pending, which is what `sensor get walter.wake` and STATUS's
 // `attention` field answer.
