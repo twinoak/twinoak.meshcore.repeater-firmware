@@ -619,6 +619,12 @@ Walter has made a request, so a Walter that woke for its own reasons sees it too
 Attention is rate-limited by the RAK — at most one new attention per reason per hour — because each
 one costs the battery an LTE attach.
 
+Reason 4 is the exception: a person who asks is waiting for the answer. While the battery is at its
+normal level (above the *low* threshold of reason 2, with its hysteresis) the RAK raises a new
+reason 4 when **300 s** have passed since it last raised one. While the battery is low or critical,
+or its level is not known, reason 4 keeps the hour. Either limit is counted from when the last one
+was raised, by the limit that holds when the new one is asked for.
+
 ## 9. What each end does when the other is not there
 
 **The RAK**, with nobody answering: it repeats, exactly as before. It keeps observations in the
@@ -643,6 +649,7 @@ Text is never mixed with frames in one session.
 | Idle before a sender prefixes `0x00` | 100 ms |
 | Job ended by the RAK after link silence | 120 s |
 | Attention repeat | every 1000 ms, 10 times |
+| A new attention of the same reason | 1 h after the last; reason 4 on a normal battery: 300 s (§8) |
 | Spacing of two resets of the RAK by the Walter | ≥ 1 s (two inside 0.5 s enter the UF2 bootloader) |
 
 ## 11. The fixtures

@@ -1,10 +1,10 @@
 # The system specification, copied - never edited here.
-# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 204210b3b1a09c90c6fbd617eefff9b082d0a7aa plus uncommitted changes
+# source: twinoak.meshcore.standard-repeater-design-v2/software/spec at commit 539467a72db59ae9ff3777589e78427c118e6994 plus uncommitted changes
 # written by spec/tools/specsync.py; README.md in this directory says how
 #
 # sha256                                                           bytes  name
 f288836468f8f8108310b36fa31c9aeac432426e15b95fd6fb63927c04406782    13131  FIRMWARE-MANIFEST.md
-4bd4a7eb36fafd764981e3131ffb7aebf792890c740f54f5c2f6414221167399    38148  LINK-PROTOCOL.md
+cbd11cd63be5565342886abe9e928ab6b2cd5e29a74cdf3971c36e5cb55dde41    38713  LINK-PROTOCOL.md
 ca5eb9533ba3f5c89d7c673cc3a62ab38a815fc8bf771ff383550423e3accb32    22785  SYSTEM.md
 2b1ffc693b046ad6ec520b8645dd9ab31103a80a84da0d30544c63b1a6781fd6    38736  fixtures/link/link-v1.1.json
 6d500f13a3204da72b1b0de86fd5cfc98c60c906a8add963d1f8a4f57f6be18f    45743  fixtures/link/link-v1.2.json
