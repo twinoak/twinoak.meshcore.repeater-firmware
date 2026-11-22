@@ -123,7 +123,7 @@ rest of this page is a person's, and so are the lines in the right-hand column:
 | §3 | the clock on the USB console: `sensor get clock.state` on a node that has never had one, upstream's own `clock`, a `time <epoch>` set, `clock sync`, a `reboot` and a `clkreboot` — and `rtc` never said on a board with no RV-3028 | the `linkcli.py` lines, the reset switch, a minute without power, a companion's view of the adverts, and a hand-fitted RV-3028 |
 | §5 | the two thresholds on the USB console: `power.low_mv` set to 3600 and still 3600 after a `reboot`, and `3350`, `2400` and `4400` refused with nothing changed — **and both values put back as they were found**, which is the walk's last line | the DMM, the phone's telemetry (and meshmaster.dk's three charts on channel 5), the thermometer, the simulator's steps, the unplugged I2C bus, and the boot-voltage question (its three `get`s are read and filled in here) |
 | §8 | the descriptor in the file, the flash, `hello` over the link if the dongle is there, and the console's `fw.version` — the four agreeing (`role`, `board`, `band`, `fw_version`) | the Walter's half, which is another repository's |
-| §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist`, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
+| §9 | the whole round trip: the `boot` line and `radio_ok`, `info`, `stat`, a 281-point `sweep`, `hist` and the two passes whose bins it adds up, `dwell`, `cad`, `stop` mid-sweep, a minute of output with no `nan`, the `rom`, `scope 863 870`, the dummy-load baseline, **the watchdog through `hang`** — and the repeater back with its identity | `pwr` against the boards, the image check with a generator, the site through the filter, and `scope` from the Walter UART |
 | §10 | **only with `"identity": "disposable"`**: the `erase`, both `First boot:` lines, `done` then `never`, `get dutycycle`, `path.hash.mode`, the Danish standard's four (the advert interval computed from the key it read), the provisioning at the USB port or over the link, and the identity afterwards | the power cut in the middle, and the phone's login |
 | §0, §2, §4, §6, §7 | nothing: a radio, a phone, a scope probe, a multimeter or the roof | all of it |
 
@@ -1099,6 +1099,24 @@ of the first.
   (the RAM patch uploads: lines, or an `err` → ______), `dwell 869.618 30`,
   `cad`, and `stop` in the middle of a sweep — which must be answered between
   steps and not after the pass. (bench, 2026-10-22, 9fb721b)
+- [ ] **p3.15-01** **A `hist` line's bins add up to its `n`.** The step of
+  21 November, again: `hist 869.418 869.818 25` on the USB console. **Sixteen**
+  `hist` lines, each saying `"n":2048`, and **each one's 33 bins adding up to
+  2048** → ______. Their own `ms` should be at least **17 ms** apart — 2048
+  samples at 8.2 µs is 16.8 ms of scan, and the line itself is about 15 ms of a
+  115200 baud port — and the whole pass about half a second. On 21 November the
+  same step gave 2048, 15, 15, 8, **4140**, 32 and 1807
+  (`tasks/phase-3.14/FOLLOWUPS.md`), which is what `p3.15-01` was written for.
+  The other honest answer is an `err` naming a sum
+  (`hist bins at … add up to … and not 2048 after 3 scans`) → ______: that says
+  this part would not scan, not that a histogram can be read off anyway.
+- [ ] **p3.15-01** **The longest look at one frequency.**
+  `hist 869.618 869.668 25 65535`: two frequencies one step apart at the most
+  samples the engine takes. **Each line adds up to 65535** → ______ and the
+  first arrives about **0.55 s** after its `ack` (65535 × 8.2 µs is 0.537 s of
+  scan), the second about 0.55 s after that. One frequency alone is not a
+  `hist`: `hist 869.618 869.618 25` is refused, because a sweep is two points
+  or more (`docs/noisescope.md` §5).
 - [ ] **p3-02** **[boards] `pwr` matches the repeater's `power` numbers for the
   same board.** `stat`'s `pwr` object against what the repeater answers for
   POWER_GET on the same connector board, within a reading: vpanel → ______,

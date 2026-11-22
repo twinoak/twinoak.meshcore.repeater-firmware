@@ -27,7 +27,8 @@ What is held:
     and `4400` refused with nothing changed, and both thresholds put back as they were found;
   * section 8: the descriptor, the flash, `hello` over the link (and skipped without a dongle),
     and the restore that closes the run;
-  * section 9: the round trip - the `boot` line, `sweep` at 281 points, `hist`, `dwell`, `cad`,
+  * section 9: the round trip - the `boot` line, `sweep` at 281 points, `hist` and the two
+    passes whose 33 bins are added up to their `n` (p3.15-01), `dwell`, `cad`,
     `stop` mid-sweep, a minute of output with its heartbeats, the `rom` gate, `scope`, the
     dummy-load baseline on disk - and the repeater back with its identity;
   * section 10: refused unless the identity is disposable and refused while a run is open; then
@@ -804,7 +805,10 @@ class SectionNine(WalkCase):
         self.assertIn("**section 9 reset** -> soft", text)
         # the scans
         self.assertIn("**section 9 sweep n** -> 281", text)
-        self.assertIn("**section 9 hist** -> 2 lines", text)
+        self.assertIn("**section 9 hist** -> 16 lines", text)
+        # p3.15-01: the two passes whose lines are added up, and the sums they came to
+        self.assertIn("**section 9 hist adds up** -> 16 lines, all adding up to 2048", text)
+        self.assertIn("**section 9 hist at 65535** -> 2 lines, all adding up to 65535", text)
         self.assertRegex(text, r"\*\*section 9 cad\*\* -> det 17 of 100")
         self.assertRegex(text, r"\*\*section 9 stop\*\* -> 0\.\d+ s")
         # a minute of output: every line JSON, no nan, and the heartbeats
@@ -938,6 +942,29 @@ class SectionNine(WalkCase):
         self.assertEqual(code, cfg.EXIT_FAILED, out)
         _name, text = self.result_file()
         self.assertIn("with `nan`", text)
+
+    def test_a_hist_line_whose_bins_do_not_add_up_is_a_differs(self):
+        """p3.15-01's two lines, against the chip of 21 November: a scanner answering `hist`
+        lines whose 33 bins come to 15 and not to the 2 048 they say. The walk adds them up, so
+        the pass is a *differs* naming what each line came to - which is the thing nobody could
+        do by eye over the seven lines of the session on the mast."""
+        def wrong_sums(path):
+            firmware = firmware_for(path)
+            if isinstance(firmware, FakeScannerFirmware):
+                firmware.hist_adds_up = False
+            return firmware
+        board = self.board()
+        ports = FakePorts(boards=[board], clock=self.clock)
+        runner = FakeRunner(boards=[board], new_firmware=wrong_sums)
+        code, out = self.walk(["walk", "9", "--collect", "20", "--baseline", "5"],
+                              ports=ports, runner=runner)
+        self.assertEqual(code, cfg.EXIT_FAILED, out)
+        _name, text = self.result_file()
+        self.assertIn("## What differs", text)
+        self.assertIn("did not add up", text)
+        self.assertIn("**section 9 hist adds up** -> 16 of 16 did not add up", text)
+        self.assertIn("**section 9 hist at 65535** -> 2 of 2 did not add up", text)
+        self.assertEqual(board.flashes[-1], self.repeater_zip)   # still put back
 
     def test_a_repeater_image_is_refused_for_section_nine(self):
         _board, ports, runner = self.fakes()

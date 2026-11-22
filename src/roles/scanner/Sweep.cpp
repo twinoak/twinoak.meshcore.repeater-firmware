@@ -1,6 +1,7 @@
 #include "roles/scanner/Sweep.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 namespace twinoak {
@@ -76,6 +77,150 @@ uint16_t clampCadCount(uint32_t count) {
 bool homeSettingsOk(double f_mhz, uint8_t sf, uint8_t cr) {
   // The SX1262's LoRa spreading factors are 5 to 12 and its coding rates 5 to 8 (4/5 to 4/8).
   return frequencyOk(f_mhz) && sf >= 5 && sf <= 12 && cr >= 5 && cr <= 8;
+}
+
+// ------------------------------------------------------------------ the histogram
+
+uint32_t histScanUs(uint16_t samples) {
+  return uint32_t(ceil(double(samples) * kHistSampleUs));
+}
+
+uint32_t histScanMs(uint16_t samples) { return (histScanUs(samples) + 999u) / 1000u; }
+
+uint32_t histWaitUs(uint16_t samples) {
+  return 2u * histScanUs(samples) + kHistWaitSlackMs * 1000u;
+}
+
+namespace {
+
+// The bins of one result, added up: the proof that it is a histogram of the scan that was
+// started for it. kHistBins counters of sixteen bits cannot overflow a 32-bit sum.
+uint32_t histSum(const uint16_t* bins) {
+  uint32_t sum = 0;
+  for (int i = 0; i < kHistBins; i++) sum += uint32_t(bins[i]);
+  return sum;
+}
+
+// One scan of `samples` samples at the frequency the radio is already on: the status register
+// cleared, the scan started, its completion waited for, and the counters read once. False with
+// `out` naming what went wrong; `out.sum` is the caller's to compute.
+bool oneHistScan(HistRadio& radio, uint16_t samples, uint16_t* bins, HistResult& out) {
+  // Whatever the register reads now is the frequency before's, and nothing in RadioLib's start
+  // writes it (the header says which four things that start does). Cleared, and then not
+  // relied on.
+  radio.clearStatus();
+  const uint32_t started_us = radio.nowUs();
+  int st = radio.scanStart(samples);
+  if (st != 0) {
+    out.outcome = kHistStartFailed;
+    out.code = st;
+    return false;
+  }
+  // The floor, which is the half of this that holds whatever the register does: a scan of
+  // `samples` samples cannot have finished before histScanUs() has passed since it was started,
+  // so a *completed* read sooner is not this scan's and is not acted on - the loop goes on
+  // polling. The counters are read once, after a completion at or past the floor, and never
+  // while the scan runs.
+  const uint32_t scan_us = histScanUs(samples);
+  const uint32_t wait_us = histWaitUs(samples);
+  bool completed = false;
+  for (;;) {
+    const uint32_t elapsed_us = radio.nowUs() - started_us;
+    if (radio.scanStatus() == kHistStatusCompleted) {
+      if (elapsed_us >= scan_us) {
+        completed = true;
+        break;
+      }
+      out.completed_early = true;  // the chip of 21 November, and what this floor exists for
+    }
+    if (elapsed_us >= wait_us) break;
+    // One turn of the loop's own work: both ports drained, so a `stop` sent during a scan is
+    // read here and executed between steps, as it always was.
+    radio.poll();
+  }
+  if (!completed) {
+    radio.scanAbort();
+    out.outcome = kHistNeverCompleted;
+    return false;
+  }
+  st = radio.scanResult(bins);
+  if (st != 0) {
+    out.outcome = kHistResultFailed;
+    out.code = st;
+    return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+bool measureHistPoint(HistRadio& radio, double f_mhz, uint16_t samples, uint16_t* bins,
+                      HistResult& out) {
+  out = HistResult();
+  if (bins == nullptr || samples == 0) {
+    // Neither can happen through `hist` - clampHistSamples() floors the count at
+    // kHistSamplesMin and the caller's array is its own - and a sum of nothing is not a
+    // histogram either way.
+    out.outcome = kHistDoesNotAddUp;
+    return false;
+  }
+  int st = radio.standby();
+  if (st != 0) {
+    out.outcome = kHistStandbyFailed;
+    out.code = st;
+    return false;
+  }
+  // The frequency is checked where the scope's is not: a retune the driver refused would leave
+  // the chip on the frequency before, and a histogram of *that* adds up perfectly well.
+  st = radio.setFrequency(f_mhz);
+  if (st != 0) {
+    out.outcome = kHistFrequencyFailed;
+    out.code = st;
+    return false;
+  }
+  for (uint8_t scan = 1; scan <= kHistScansMax; scan++) {
+    out.scans = scan;
+    if (!oneHistScan(radio, samples, bins, out)) return false;
+    out.sum = histSum(bins);
+    if (out.sum == uint32_t(samples)) {
+      out.outcome = kHistMeasured;
+      return true;
+    }
+  }
+  // kHistScansMax scans and not one of them a histogram: the caller says so in one `err` line
+  // naming the frequency, the sum and `n`, and ends the pass. No `hist` line is written.
+  out.outcome = kHistDoesNotAddUp;
+  return false;
+}
+
+void histErrorMessage(const HistResult& result, double f_mhz, uint16_t samples, char* out,
+                      size_t size) {
+  if (out == nullptr || size == 0) return;
+  switch (result.outcome) {
+    case kHistStandbyFailed:
+      snprintf(out, size, "scan standby failed (%d) at %.3f", result.code, f_mhz);
+      return;
+    case kHistFrequencyFailed:
+      snprintf(out, size, "scan retune failed (%d) at %.3f", result.code, f_mhz);
+      return;
+    case kHistStartFailed:
+      snprintf(out, size, "scan start failed (%d) at %.3f", result.code, f_mhz);
+      return;
+    case kHistNeverCompleted:
+      snprintf(out, size, "scan timeout at %.3f", f_mhz);
+      return;
+    case kHistResultFailed:
+      snprintf(out, size, "scan result failed (%d) at %.3f", result.code, f_mhz);
+      return;
+    case kHistDoesNotAddUp:
+      snprintf(out, size, "hist bins at %.3f add up to %lu and not %u after %u scans; no line "
+                          "was sent",
+               f_mhz, (unsigned long)result.sum, unsigned(samples), unsigned(result.scans));
+      return;
+    default:
+      out[0] = '\0';
+      return;
+  }
 }
 
 // ------------------------------------------------------------------ the window

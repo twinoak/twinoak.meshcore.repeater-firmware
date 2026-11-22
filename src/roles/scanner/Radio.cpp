@@ -298,37 +298,78 @@ void serviceSweep() {
   }
 }
 
-void serviceHist() {
-  const double f = pointFrequencyMhz(g_sweep.plan, g_sweep.index);
-  g_radio.standby();
-  g_radio.setFrequency(float(f));
-  int st = g_radio.spectralScanStart(g_sweep.samples);
-  if (st != RADIOLIB_ERR_NONE) {
-    error("scan start failed (%d) at %.3f", st, f);
-    stop();
-    return;
+// --- the histogram ------------------------------------------------------------------------------
+
+// The chip half of measuring one frequency. Each member is one call of RadioLib's - or one
+// register of the Module's, for the two that the driver has no call for - and nothing else; the
+// order they are made in is measureHistPoint()'s (src/roles/scanner/Sweep.cpp, host-tested),
+// because the order and what it does not take the chip's word for are the whole of the fix.
+class ChipHistRadio : public HistRadio {
+ public:
+  int standby() override { return g_radio.standby(); }
+  int setFrequency(double mhz) override { return g_radio.setFrequency(float(mhz)); }
+  // The two the driver has no call for. RadioLib's spectralScanGetStatus() answers *completed or
+  // not* (7.8.0, SX126x.cpp:1212) and nothing of its start or its abort writes this register, so
+  // the register itself is both read and - before a start - put back to *none*.
+  void clearStatus() override {
+    g_radio.module()->SPIwriteRegister(RADIOLIB_SX126X_REG_SPECTRAL_SCAN_STATUS,
+                                       RADIOLIB_SX126X_SPECTRAL_SCAN_NONE);
   }
-  // 8.2 us per sample, and a generous margin.
-  const uint32_t deadline = millis() + (g_sweep.samples / 100) + 100;
-  bool done = false;
-  while (int32_t(deadline - millis()) > 0) {
-    if (g_radio.spectralScanGetStatus() == RADIOLIB_ERR_NONE) {
-      done = true;
-      break;
-    }
+  uint8_t scanStatus() override {
+    return g_radio.module()->SPIreadRegister(RADIOLIB_SX126X_REG_SPECTRAL_SCAN_STATUS);
+  }
+  // The sample interval is passed by name rather than taken as the default, because 8.2 us is
+  // kHistSampleUs and every duration of a `hist` is computed from it; the RSSI window is the
+  // default the firmware has always used.
+  int scanStart(uint16_t samples) override {
+    return g_radio.spectralScanStart(samples, RADIOLIB_SX126X_SPECTRAL_SCAN_WINDOW_DEFAULT,
+                                     RADIOLIB_SX126X_SCAN_INTERVAL_8_20_US);
+  }
+  void scanAbort() override { g_radio.spectralScanAbort(); }
+  int scanResult(uint16_t* bins) override { return g_radio.spectralScanGetResult(bins); }
+  uint32_t nowUs() override { return micros(); }
+  void poll() override {
     inputPoll();
     yield();
   }
-  if (!done) {
-    g_radio.spectralScanAbort();
-    error("scan timeout at %.3f", f);
-    stop();
-    return;
-  }
-  uint16_t bins[RADIOLIB_SX126X_SPECTRAL_SCAN_RES_SIZE];
-  st = g_radio.spectralScanGetResult(bins);
-  if (st != RADIOLIB_ERR_NONE) {
-    error("scan result failed (%d) at %.3f", st, f);
+};
+ChipHistRadio g_hist;
+
+// The status register's four values are RadioLib's, and the sequence in Sweep.h names them so
+// that it can tell a *completed* left over from the frequency before from one of this scan's.
+static_assert(kHistStatusNone == RADIOLIB_SX126X_SPECTRAL_SCAN_NONE,
+              "src/roles/scanner/Sweep.h's kHistStatusNone is RadioLib's "
+              "RADIOLIB_SX126X_SPECTRAL_SCAN_NONE");
+static_assert(kHistStatusOngoing == RADIOLIB_SX126X_SPECTRAL_SCAN_ONGOING,
+              "src/roles/scanner/Sweep.h's kHistStatusOngoing is RadioLib's "
+              "RADIOLIB_SX126X_SPECTRAL_SCAN_ONGOING");
+static_assert(kHistStatusAborted == RADIOLIB_SX126X_SPECTRAL_SCAN_ABORTED,
+              "src/roles/scanner/Sweep.h's kHistStatusAborted is RadioLib's "
+              "RADIOLIB_SX126X_SPECTRAL_SCAN_ABORTED");
+static_assert(kHistStatusCompleted == RADIOLIB_SX126X_SPECTRAL_SCAN_COMPLETED,
+              "src/roles/scanner/Sweep.h's kHistStatusCompleted is RadioLib's "
+              "RADIOLIB_SX126X_SPECTRAL_SCAN_COMPLETED");
+
+// And the interval kHistSampleUs is the microseconds of: the engine's own table, whose 8.20 us
+// entry is this value (RadioLib 7.8.0, SX126x_commands.h:302). A bump that renumbers the table
+// is a red build, because kHistSampleUs would then be the wrong number for the value passed.
+static_assert(RADIOLIB_SX126X_SCAN_INTERVAL_8_20_US == 11,
+              "the SX126x's RSSI reading interval table has been renumbered; "
+              "src/roles/scanner/Sweep.h's kHistSampleUs is 8.2 us because scanStart() asks for "
+              "RADIOLIB_SX126X_SCAN_INTERVAL_8_20_US");
+
+void serviceHist() {
+  const double f = pointFrequencyMhz(g_sweep.plan, g_sweep.index);
+  uint16_t bins[kHistBins];
+  HistResult r;
+  if (!measureHistPoint(g_hist, f, g_sweep.samples, bins, r)) {
+    // The words are the portable half's (src/roles/scanner/Sweep.cpp, histErrorMessage):
+    // three of them are what this function has always said, and the one for a result that does
+    // not add up names the frequency, the sum and `n`. Either way the pass ends, as every other
+    // failure of this function ends it.
+    char msg[kHistErrorBytes];
+    histErrorMessage(r, f, g_sweep.samples, msg, sizeof(msg));
+    error("%s", msg);
     stop();
     return;
   }

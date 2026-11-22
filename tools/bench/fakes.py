@@ -392,6 +392,9 @@ class FakeScannerFirmware(object):
         self.scope_frames = scope_frames
         self.scope_sps = scope_sps
         self.answers_data = answers_data            # False: acks and no scan lines at all
+        # False: a `hist` line whose bins do not add up to its `n` - the chip of 21 November,
+        # which docs/bench.md section 9's two `p3.15-01` lines exist to catch.
+        self.hist_adds_up = True
         # False: the `boot` line went out before any host held the port, which is what a real
         # board does (p3.4-02) - `info` is then the only place its fields are.
         self.prints_banner = prints_banner
@@ -448,10 +451,32 @@ class FakeScannerFirmware(object):
             line.update(self._next())
             return [line]
         if word == "hist":
+            # The command's own frequencies and sample count, because docs/bench.md section 9
+            # asks for two different passes and holds each to how many lines it has and to what
+            # its bins add up to (p3.15-01). The point count is planSweep()'s arithmetic:
+            # truncated towards zero, both ends included (src/roles/scanner/Sweep.cpp).
+            f0, f1, step, samples = 869.4, 869.8, 25.0, 2048
+            try:
+                if len(words) > 2:
+                    f0, f1 = float(words[1]), float(words[2])
+                if len(words) > 3:
+                    step = float(words[3]) or 25.0
+                if len(words) > 4:
+                    samples = int(words[4]) or 2048
+            except ValueError:
+                pass
+            span = (f1 - f0) * 1000.0 / step if f1 > f0 and step > 0 else 0.0
+            points = int(span) + 1 if span >= 1.0 else 0
             out = []
-            for freq in (869.4, 869.8):
-                line = {"t": "hist", "f": freq, "rbw": 29.3, "n": 2048, "b0": -11, "bw_db": 4,
-                        "bins": [0] * 33}
+            for index in range(points):
+                bins = [0] * 33
+                # The engine counts every one of `n` samples into exactly one bin, so these add
+                # up to `n` - unless the test asked for the chip of 21 November.
+                bins[30] = samples - 23 if self.hist_adds_up else 15
+                bins[29] = 20 if self.hist_adds_up else 0
+                bins[31] = 3 if self.hist_adds_up else 0
+                line = {"t": "hist", "f": round(f0 + index * step / 1000.0, 6), "rbw": 29.3,
+                        "n": samples, "b0": -11, "bw_db": 4, "bins": bins}
                 line.update(self._next())
                 out.append(line)
             return out
