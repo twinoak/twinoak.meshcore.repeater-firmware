@@ -19,7 +19,11 @@
 //      three of those and is therefore kept together at the end: the command, the plan (the
 //      span cut into segments, each with its own image calibration), the frame and its base64,
 //      the three aggregates, and the pinned binary of the plugin that runs inside the radio.
-//   5. **the loop watchdog's deadline** - src/roles/scanner/LoopWatch.h, phase 3.5's task 03.
+//   5. **the histogram** - how one frequency of a `hist` is measured, which phase 3.15's task
+//      01 moved out of the radio file so that the chip of 21 November could be driven from here:
+//      a result belongs to the scan that was started for it, and the bins add up to the `n` of
+//      the line or no line is written.
+//   6. **the loop watchdog's deadline** - src/roles/scanner/LoopWatch.h, phase 3.5's task 03.
 //      The 8 s check NoiseScope was designed around, which used to be the hardware watchdog's
 //      timeout and is now arithmetic: a heartbeat from the loop, a cadence from an interrupt, and
 //      the one question of whether the loop has come round. The board half of it is registers and
@@ -40,6 +44,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "roles/scanner/Commands.h"
@@ -1805,7 +1810,460 @@ TEST(Scope, ThePluginBinaryIsTheOneTheForkAssembled) {
   EXPECT_EQ('P', SX126X_SPECTRUM_PLUGIN_TAG);
 }
 
-// ================================================================= 5. the loop watchdog
+// ================================================================= 5. the histogram
+
+// src/roles/scanner/Sweep.h: measuring one frequency of a `hist`, which phase 3.15's task 01
+// moved out of src/roles/scanner/Radio.cpp so that **the chip of 21 November can be driven
+// here**. On that unit (Bellevue, scanner 0.1.6+fcf52d5, `hist 869.418 869.818 25` at 2 048
+// samples) the first line's bins added up to 2 048 and the six after it to 15, 15, 8, 4 140, 32
+// and 1 807 - a result read within 0.4 ms of its scan's start, twice with a counter caught
+// half-written (tasks/phase-3.14/FOLLOWUPS.md). The fake below is that chip: a status register
+// that still reads *completed* from the frequency before and does not keep a host's write, and a
+// result read that answers with what the counters hold *at the time it is made*.
+
+namespace {
+
+// The bins of one result, added up - what a reader of a `hist` line does, and what the firmware
+// now does before it writes one.
+uint32_t sumOfBins(const uint16_t* bins) {
+  uint32_t sum = 0;
+  for (int i = 0; i < kHistBins; i++) sum += bins[i];
+  return sum;
+}
+
+// A result, as the engine's 33 counters: pairs of (bin, count).
+std::vector<uint16_t> binsOf(const std::vector<std::pair<int, uint16_t>>& counts) {
+  std::vector<uint16_t> bins(size_t(kHistBins), 0);
+  for (const std::pair<int, uint16_t>& c : counts) bins[size_t(c.first)] = c.second;
+  return bins;
+}
+
+// A spectral-scan engine, as the seam sees it, with the clock the test owns: nothing but poll()
+// moves time, so *when* a status is read and *when* a result is read are the test's to state.
+struct FakeHistRadio : HistRadio {
+  std::string log;
+  uint32_t now_us = 0;
+  uint32_t poll_step_us = 200;  // what one turn of the loop's own work costs
+  int polls = 0;
+
+  int standby_code = 0;
+  int frequency_code = 0;
+  int start_code = 0;
+  int result_code = 0;
+
+  // The register as the chip leaves it between scans. kHistStatusCompleted is the chip of
+  // 21 November: still *completed* from the frequency before.
+  uint8_t resting = kHistStatusCompleted;
+  bool clear_sticks = false;        // whether the chip keeps a host's write of *none*
+  bool start_sets_ongoing = false;  // whether a start is seen to put it to *ongoing*
+  bool completes = true;            // whether it ever says *completed* for this scan at all
+
+  // What a result read gets: `early` while the scan is still running, and results[k - 1] for
+  // the k-th scan once it is over (the last entry for every scan after that).
+  std::vector<uint16_t> early = binsOf({{14, 15}});
+  std::vector<std::vector<uint16_t>> results;
+
+  // What the chip was asked, and when.
+  uint32_t started_us = 0;
+  uint32_t result_us = 0;
+  uint16_t samples = 0;
+  int scans = 0;
+  int reads = 0;
+  int aborts = 0;
+  int clears = 0;
+  bool running = false;
+
+  void note(const std::string& what) { log += what + ";"; }
+
+  bool over() const { return running && (now_us - started_us) >= histScanUs(samples); }
+
+  int standby() override {
+    note("standby");
+    return standby_code;
+  }
+  int setFrequency(double mhz) override {
+    char piece[32];
+    snprintf(piece, sizeof(piece), "setFrequency(%.3f)", mhz);
+    note(piece);
+    return frequency_code;
+  }
+  void clearStatus() override {
+    note("clearStatus");
+    clears++;
+    if (clear_sticks) resting = kHistStatusNone;
+  }
+  int scanStart(uint16_t n) override {
+    char piece[32];
+    snprintf(piece, sizeof(piece), "scanStart(%u)", unsigned(n));
+    note(piece);
+    if (start_code != 0) return start_code;
+    scans++;
+    samples = n;
+    started_us = now_us;
+    running = true;
+    if (start_sets_ongoing) resting = kHistStatusOngoing;
+    return 0;
+  }
+  void scanAbort() override {
+    note("scanAbort");
+    aborts++;
+    running = false;
+    resting = kHistStatusAborted;
+  }
+  uint8_t scanStatus() override {
+    if (!running) return resting;
+    if (!completes) return kHistStatusOngoing;  // a scan that is never over says so
+    if (over()) return kHistStatusCompleted;
+    return resting;  // and while it runs, whatever the register was left reading
+  }
+  int scanResult(uint16_t* bins) override {
+    note("scanResult");
+    reads++;
+    result_us = now_us;
+    if (result_code != 0) return result_code;
+    const std::vector<uint16_t>& got =
+        over() || results.empty()
+            ? (results.empty() ? early
+                               : results[size_t(scans - 1) < results.size() ? size_t(scans - 1)
+                                                                            : results.size() - 1])
+            : early;
+    for (int i = 0; i < kHistBins; i++) bins[i] = got[size_t(i)];
+    return 0;
+  }
+  uint32_t nowUs() override { return now_us; }
+  void poll() override {
+    polls++;
+    now_us += poll_step_us;
+  }
+};
+
+// The right answer at 869.418 MHz on 21 November: 373 + 1 525 + 150 = 2 048 around -131 dBm.
+std::vector<uint16_t> theRealHistogram() { return binsOf({{29, 373}, {30, 1525}, {31, 150}}); }
+
+// And the chip of that evening, whose status register is no help at all.
+FakeHistRadio chipOf21November() {
+  FakeHistRadio radio;
+  radio.resting = kHistStatusCompleted;  // from the frequency before
+  radio.clear_sticks = false;            // and a host's write of *none* is not kept
+  radio.early = binsOf({{14, 15}});      // what a read 0.1 ms in got: fifteen samples
+  radio.results.push_back(theRealHistogram());
+  return radio;
+}
+
+// `hist 869.418 869.818 25`, the step that was typed.
+SweepPlan theStepOf21November() {
+  SweepPlan plan;
+  EXPECT_TRUE(planSweep(869.418, 869.818, 25.0, plan));
+  return plan;
+}
+
+}  // namespace
+
+TEST(Hist, TodaysSequenceReadsFifteenSamplesFromTheChipOf21November) {
+  // The sequence as src/roles/scanner/Radio.cpp had it before this task, against the same fake:
+  // start the scan, ask the status at once, and read the result as soon as it says *completed*.
+  // This is the finding of tasks/phase-3.14/FOLLOWUPS.md reproduced, and it is why the test
+  // below is the one that matters.
+  FakeHistRadio radio = chipOf21November();
+  ASSERT_EQ(0, radio.scanStart(2048));
+  ASSERT_EQ(kHistStatusCompleted, radio.scanStatus());  // 0.0 ms in, and it says completed
+  uint16_t bins[kHistBins];
+  ASSERT_EQ(0, radio.scanResult(bins));
+  EXPECT_EQ(15u, sumOfBins(bins)) << "the chip of 21 November is not being modelled";
+  EXPECT_NE(2048u, sumOfBins(bins));
+}
+
+TEST(Hist, TheChipOf21NovemberGivesSixteenLinesThatEachAddUpToTheirN) {
+  FakeHistRadio radio = chipOf21November();
+  const SweepPlan plan = theStepOf21November();
+  ASSERT_EQ(16u, plan.points) << "the step of 21 November is sixteen frequencies";
+
+  StringSink sink;
+  Lines lines(sink);
+  for (uint16_t i = 0; i < plan.points; i++) {
+    const double f = pointFrequencyMhz(plan, i);
+    uint16_t bins[kHistBins];
+    HistResult r;
+    ASSERT_TRUE(measureHistPoint(radio, f, 2048, bins, r)) << "point " << i;
+    EXPECT_EQ(kHistMeasured, r.outcome);
+    EXPECT_EQ(1u, unsigned(r.scans)) << "one scan was enough at point " << i;
+    EXPECT_EQ(2048u, r.sum);
+    // The register said *completed* before the scan could have finished, every time, and that
+    // reading was not acted on: this is the whole of the fix, seen from the outside.
+    EXPECT_TRUE(r.completed_early) << "point " << i;
+    HistFields f_line;
+    f_line.meta = someMeta();
+    f_line.f_mhz = f;
+    f_line.rbw_khz = plan.rbw_khz;
+    f_line.samples = 2048;
+    f_line.bins = bins;
+    lines.hist(f_line);
+  }
+
+  // Sixteen `hist` lines, and every one of them a histogram of 2 048 samples.
+  const std::vector<std::string> out = sink.lines();
+  ASSERT_EQ(16u, out.size());
+  for (size_t i = 0; i < out.size(); i++) {
+    JsonDocument doc;
+    ASSERT_FALSE(deserializeJson(doc, out[i])) << out[i];
+    ASSERT_STREQ("hist", doc["t"].as<const char*>());
+    ASSERT_EQ(size_t(kHistBins), doc["bins"].as<JsonArrayConst>().size());
+    uint32_t sum = 0;
+    for (JsonVariantConst bin : doc["bins"].as<JsonArrayConst>()) sum += bin.as<uint32_t>();
+    EXPECT_EQ(doc["n"].as<uint32_t>(), sum) << "line " << i << ": " << out[i];
+    EXPECT_EQ(2048u, sum) << "line " << i;
+  }
+  EXPECT_EQ(16, radio.scans);
+  EXPECT_EQ(16, radio.reads) << "the result is read once per scan, and never while it runs";
+}
+
+TEST(Hist, ACompletedReadBeforeTheScanCouldHaveFinishedIsNotActedOn) {
+  FakeHistRadio radio = chipOf21November();
+  uint16_t bins[kHistBins];
+  HistResult r;
+  ASSERT_TRUE(measureHistPoint(radio, 869.618, 2048, bins, r));
+  // The one read there was happened at or after the earliest the scan can have been over, and
+  // 8.2 us a sample is where that number comes from.
+  EXPECT_EQ(1, radio.reads);
+  EXPECT_GE(radio.result_us - radio.started_us, histScanUs(2048));
+  EXPECT_EQ(16794u, histScanUs(2048));  // 2048 x 8.2 us, rounded up
+  EXPECT_TRUE(r.completed_early);
+}
+
+TEST(Hist, AStatusSeenToPassThroughOngoingIsUsedAsWell) {
+  // The other chip: one whose patch does put the register to *ongoing* at a start, or that keeps
+  // the host's write of *none*. Then nothing reads *completed* early at all - and the answer is
+  // the same, which is what "do not rest on either alone" means.
+  FakeHistRadio radio = chipOf21November();
+  radio.start_sets_ongoing = true;
+  uint16_t bins[kHistBins];
+  HistResult r;
+  ASSERT_TRUE(measureHistPoint(radio, 869.618, 2048, bins, r));
+  EXPECT_FALSE(r.completed_early);
+  EXPECT_EQ(2048u, r.sum);
+
+  FakeHistRadio kept = chipOf21November();
+  kept.clear_sticks = true;
+  HistResult r2;
+  ASSERT_TRUE(measureHistPoint(kept, 869.618, 2048, bins, r2));
+  EXPECT_EQ(1, kept.clears);
+  EXPECT_FALSE(r2.completed_early);
+  EXPECT_EQ(2048u, r2.sum);
+}
+
+TEST(Hist, AResultWithAHighByteAndNothingUnderItIsMeasuredAgain) {
+  // `seq` 249, 869.518 MHz: 4 140 samples of which 4 096 are one bin reading 0x1000 - a high
+  // byte with nothing under it. The second scan is the right one, and the line that is written
+  // is that one.
+  FakeHistRadio radio = chipOf21November();
+  radio.results.clear();
+  radio.results.push_back(binsOf({{18, 4096}, {29, 20}, {30, 16}, {31, 8}}));  // 4 140
+  radio.results.push_back(theRealHistogram());                                 // 2 048
+
+  uint16_t bins[kHistBins];
+  HistResult r;
+  ASSERT_TRUE(measureHistPoint(radio, 869.518, 2048, bins, r));
+  EXPECT_EQ(2u, unsigned(r.scans));
+  EXPECT_EQ(2048u, r.sum);
+  EXPECT_EQ(2048u, sumOfBins(bins));
+  EXPECT_EQ(0u, bins[18]) << "the result that was kept is the second one";
+  EXPECT_EQ(1525u, bins[30]);
+
+  StringSink sink;
+  Lines lines(sink);
+  HistFields f;
+  f.meta = someMeta();
+  f.f_mhz = 869.518;
+  f.rbw_khz = 29.3;
+  f.samples = 2048;
+  f.bins = bins;
+  lines.hist(f);
+  const JsonDocument doc = parseOne(sink);  // one line, and it is the right one
+  EXPECT_EQ(2048, doc["n"].as<int>());
+  EXPECT_EQ(1525, doc["bins"][30].as<int>());
+}
+
+TEST(Hist, AChipWhoseResultNeverAddsUpGetsThreeScansAndOneErrLineAndNoHist) {
+  FakeHistRadio radio = chipOf21November();
+  radio.results.clear();
+  radio.results.push_back(binsOf({{18, 4096}, {29, 20}, {30, 16}, {31, 8}}));  // 4 140, always
+
+  uint16_t bins[kHistBins];
+  HistResult r;
+  EXPECT_FALSE(measureHistPoint(radio, 869.518, 2048, bins, r));
+  EXPECT_EQ(kHistDoesNotAddUp, r.outcome);
+  EXPECT_EQ(unsigned(kHistScansMax), unsigned(r.scans));
+  EXPECT_EQ(3, radio.scans) << "three scans of the chip and no more";
+  EXPECT_EQ(4140u, r.sum);
+
+  // One `err` line, naming the frequency, the sum and `n` - and no `hist` line, because the
+  // caller writes one only when measureHistPoint() answered true.
+  char msg[kHistErrorBytes];
+  histErrorMessage(r, 869.518, 2048, msg, sizeof(msg));
+  EXPECT_STREQ("hist bins at 869.518 add up to 4140 and not 2048 after 3 scans; no line was sent",
+               msg);
+  StringSink sink;
+  Lines lines(sink);
+  lines.err(msg);
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_STREQ("err", doc["t"].as<const char*>());
+  EXPECT_STREQ(msg, doc["msg"].as<const char*>());
+  EXPECT_EQ(std::string::npos, sink.text().find("\"hist\""));
+}
+
+TEST(Hist, AStatusThatNeverCompletesIsTheScanTimeoutItAlwaysWas) {
+  FakeHistRadio radio = chipOf21November();
+  radio.completes = false;  // the register never says this scan is over
+  uint16_t bins[kHistBins];
+  HistResult r;
+  EXPECT_FALSE(measureHistPoint(radio, 869.618, 2048, bins, r));
+  EXPECT_EQ(kHistNeverCompleted, r.outcome);
+  EXPECT_EQ(1, radio.scans) << "a scan that never completes is not measured again";
+  EXPECT_EQ(1, radio.aborts) << "and it is aborted before the pass ends";
+  EXPECT_EQ(0, radio.reads) << "nothing is read from a scan that did not finish";
+  EXPECT_EQ(kHistStatusAborted, radio.resting);
+  // Waited for exactly as long as the page says, and no longer.
+  EXPECT_GE(radio.now_us - radio.started_us, histWaitUs(2048));
+  EXPECT_LT(radio.now_us - radio.started_us, histWaitUs(2048) + radio.poll_step_us);
+
+  char msg[kHistErrorBytes];
+  histErrorMessage(r, 869.618, 2048, msg, sizeof(msg));
+  EXPECT_STREQ("scan timeout at 869.618", msg);
+}
+
+TEST(Hist, EveryOtherFailureIsNamedAsItAlwaysWas) {
+  uint16_t bins[kHistBins];
+  char msg[kHistErrorBytes];
+  {
+    FakeHistRadio radio = chipOf21November();
+    radio.start_code = -707;
+    HistResult r;
+    EXPECT_FALSE(measureHistPoint(radio, 869.418, 2048, bins, r));
+    EXPECT_EQ(kHistStartFailed, r.outcome);
+    EXPECT_EQ(-707, r.code);
+    histErrorMessage(r, 869.418, 2048, msg, sizeof(msg));
+    EXPECT_STREQ("scan start failed (-707) at 869.418", msg);
+  }
+  {
+    FakeHistRadio radio = chipOf21November();
+    radio.result_code = -2;
+    HistResult r;
+    EXPECT_FALSE(measureHistPoint(radio, 869.418, 2048, bins, r));
+    EXPECT_EQ(kHistResultFailed, r.outcome);
+    histErrorMessage(r, 869.418, 2048, msg, sizeof(msg));
+    EXPECT_STREQ("scan result failed (-2) at 869.418", msg);
+  }
+  {
+    // A standby or a retune the driver refused: not acted on before this task, and a histogram
+    // of the frequency before adds up perfectly well.
+    FakeHistRadio radio = chipOf21November();
+    radio.standby_code = -5;
+    HistResult r;
+    EXPECT_FALSE(measureHistPoint(radio, 869.418, 2048, bins, r));
+    EXPECT_EQ(kHistStandbyFailed, r.outcome);
+    EXPECT_EQ(0, radio.scans);
+    histErrorMessage(r, 869.418, 2048, msg, sizeof(msg));
+    EXPECT_STREQ("scan standby failed (-5) at 869.418", msg);
+  }
+  {
+    FakeHistRadio radio = chipOf21November();
+    radio.frequency_code = -705;
+    HistResult r;
+    EXPECT_FALSE(measureHistPoint(radio, 869.418, 2048, bins, r));
+    EXPECT_EQ(kHistFrequencyFailed, r.outcome);
+    EXPECT_EQ(0, radio.scans) << "no scan is started at a frequency that was not set";
+    histErrorMessage(r, 869.418, 2048, msg, sizeof(msg));
+    EXPECT_STREQ("scan retune failed (-705) at 869.418", msg);
+  }
+  {
+    // Nothing went wrong: no words at all.
+    HistResult r;
+    histErrorMessage(r, 869.418, 2048, msg, sizeof(msg));
+    EXPECT_STREQ("", msg);
+  }
+}
+
+TEST(Hist, TheCallsForOneFrequencyAreMadeInOneOrderAndNoOther) {
+  FakeHistRadio radio = chipOf21November();
+  uint16_t bins[kHistBins];
+  HistResult r;
+  ASSERT_TRUE(measureHistPoint(radio, 869.418, 2048, bins, r));
+  EXPECT_EQ("standby;setFrequency(869.418);clearStatus;scanStart(2048);scanResult;", radio.log);
+}
+
+TEST(Hist, BothPortsAreDrainedInsideTheWaitSoAStopIsReadThere) {
+  // The wait is the loop's own work and nothing else: poll() is where src/roles/scanner/main.cpp
+  // reads both serial ports, and it is called for the whole of the scan rather than once at the
+  // end. A `stop` typed during a scan is therefore in the buffer when the step returns, and is
+  // executed between steps from loop(), exactly as it was before this task.
+  FakeHistRadio radio = chipOf21November();
+  uint16_t bins[kHistBins];
+  HistResult r;
+  ASSERT_TRUE(measureHistPoint(radio, 869.618, 2048, bins, r));
+  // 16 794 us of scan at 200 us a turn: the ports are drained about eighty times inside it.
+  EXPECT_GE(radio.polls, int(histScanUs(2048) / radio.poll_step_us) - 1);
+  EXPECT_EQ(radio.now_us, uint32_t(radio.polls) * radio.poll_step_us);
+}
+
+TEST(Hist, AFrequencyIsOneStepSoAPassCanBeEndedBetweenTwo) {
+  // One call per frequency and no state kept between two: the caller advances the index and may
+  // instead stop, which is what makes `stop` work between two frequencies of a pass - and what
+  // makes a second pass over the same frequencies as safe as the first, although the register is
+  // left reading *completed* by the scan before it.
+  FakeHistRadio radio = chipOf21November();
+  const SweepPlan plan = theStepOf21November();
+  uint16_t bins[kHistBins];
+  for (int pass = 0; pass < 2; pass++) {
+    for (uint16_t i = 0; i < plan.points; i++) {
+      HistResult r;
+      ASSERT_TRUE(measureHistPoint(radio, pointFrequencyMhz(plan, i), 2048, bins, r))
+          << "pass " << pass << " point " << i;
+      EXPECT_EQ(2048u, r.sum);
+      EXPECT_EQ(1u, unsigned(r.scans));
+    }
+  }
+  EXPECT_EQ(32, radio.scans);
+  EXPECT_EQ(kHistStatusCompleted, radio.resting) << "and the register is left exactly as found";
+}
+
+TEST(Hist, TheSampleCountAtItsLeastAndAtItsMost) {
+  // `hist … 0` and `hist … 99999` are clamped to these two (clampHistSamples), and both are
+  // measured the same way.
+  EXPECT_EQ(kHistSamplesMin, clampHistSamples(0));
+  EXPECT_EQ(0xFFFFu, clampHistSamples(99999));
+
+  for (uint16_t samples : {kHistSamplesMin, uint16_t(0xFFFFu)}) {
+    FakeHistRadio radio = chipOf21November();
+    radio.results.clear();
+    radio.results.push_back(binsOf({{30, samples}}));
+    uint16_t bins[kHistBins];
+    HistResult r;
+    ASSERT_TRUE(measureHistPoint(radio, 869.618, samples, bins, r)) << samples;
+    EXPECT_EQ(uint32_t(samples), r.sum);
+    EXPECT_GE(radio.result_us - radio.started_us, histScanUs(samples));
+  }
+}
+
+TEST(Hist, EveryDurationComesFromTheOneSamplePeriod) {
+  // 8.2 us a sample is written once (kHistSampleUs) and these are what docs/noisescope.md
+  // section 5 and section 7 quote.
+  EXPECT_EQ(8.2, kHistSampleUs);
+  EXPECT_EQ(3u, histScanMs(kHistSamplesMin));  // 256 samples: 2.1 ms
+  EXPECT_EQ(17u, histScanMs(2048));            // the default: 17 ms a line
+  EXPECT_EQ(538u, histScanMs(0xFFFFu));        // the most: 0.54 s a line
+  EXPECT_EQ(0u, histScanMs(0));
+
+  // And the longest a scan is waited for, which is what bounds one step of a `hist`: three
+  // scans of the most samples there are, each waited for to the end of its deadline, against
+  // the 8 s loop check (LOOP_WDT_TIMEOUT_MS, src/roles/scanner/config.h) and the 60 s hardware
+  // watchdog behind it.
+  EXPECT_EQ(2u * histScanUs(2048) + 50000u, histWaitUs(2048));
+  const uint32_t worst_ms = 3u * (histWaitUs(0xFFFFu) / 1000u);
+  EXPECT_LT(worst_ms, 8000u) << "a hist step must stay inside the loop watchdog's deadline";
+  EXPECT_EQ(3u * 1124u, worst_ms);
+}
+
+// ================================================================= 6. the loop watchdog
 
 // src/roles/scanner/LoopWatch.h: the 8 s check, as arithmetic. On the board `beat()` is the top
 // of loop() and `tick()` is an RTC interrupt every 125 ms whose `true` is a reset

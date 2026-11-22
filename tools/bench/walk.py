@@ -48,6 +48,7 @@ the walk is not run, and the task's report says *Not verified here*.
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -74,6 +75,12 @@ SKIPPED = "skipped"
 # The radio ROM the fast-sweep plugin is made for (docs/bench.md section 9, *The fast sweep*,
 # first line; src/roles/scanner/Radio.cpp refuses `scope` on anything else).
 PLUGIN_ROM = "SX1261 V2D 2D02"
+
+# How long a `hist` pass of docs/bench.md section 9's two lines is waited for after its ack
+# (p3.15-01). Sixteen frequencies of 2 048 samples are about half a second of scanning and a
+# quarter of a second of port, and two of 65 535 samples are about 1.1 s of scanning: five
+# seconds is both with room, and a pass that is over says so by going quiet.
+HIST_PASS_S = 5.0
 
 # What the page quotes for upstream's own `ver` line and for `board`. A MeshCore bump moves the
 # first, and a walk says so as a note rather than as a finding: what it holds the board to is the
@@ -271,6 +278,12 @@ _section("9", "NoiseScope", [
     PageLine("9.2", ("p3-02",), "`info`, `stat` and `sweep` behave as the page says",
              "`info` one line, `stat` at once, a 281-point `sweep` and its time, `hist`, "
              "`dwell`, `cad`, and `stop` in the middle of a sweep"),
+    PageLine("9.2a", ("p3.15-01",), "A `hist` line's bins add up to its `n`.",
+             "`hist 869.418 869.818 25`: sixteen lines, each one's bins adding up to its `n`, "
+             "and their `ms` at least a scan apart"),
+    PageLine("9.2b", ("p3.15-01",), "The longest look at one frequency.",
+             "`hist 869.618 869.668 25 65535`: two lines at the most samples the engine takes, "
+             "each adding up to 65535"),
     PageLine("9.3", ("p3-02",), "`pwr` matches the repeater's `power` numbers",
              "the scanner's `pwr` against the repeater's `power` for the same board",
              person="the production connector boards, a bench supply, and a run of each firmware "
@@ -1455,6 +1468,14 @@ class Walker(object):
                                             ((err[0].get("msg") if err else "nothing"))})
         scanner.send("stop", timeout_s=3.0)
 
+        # p3.15-01: the bins of a `hist` line add up to its `n` or the firmware does not send the
+        # line, so the walk adds them up - which is the one thing the lines of 21 November could
+        # not have passed.
+        self._walk_9_hist_adds_up(scanner, "9.2a", "hist 869.418 869.818 25", 16, 2048,
+                                  "section 9 hist adds up")
+        self._walk_9_hist_adds_up(scanner, "9.2b", "hist 869.618 869.668 25 65535", 2, 65535,
+                                  "section 9 hist at 65535")
+
         _ack, batch = scanner.send("dwell 869.618 30", timeout_s=3.0)
         dwell = _already(batch, "dwell") or scanner.first("dwell", 20.0)
         self.step("9.2", "`dwell 869.618 30` answers a window", ok=bool(dwell),
@@ -1514,6 +1535,53 @@ class Walker(object):
             return rom
         self._walk_9_scope(scanner)
         return rom
+
+    def _walk_9_hist_adds_up(self, scanner, key, line, lines_due, samples, blank):
+        """One of p3.15-01's two lines: a `hist` pass, every line of it added up. `n` samples each
+        land in exactly one of the 33 bins, so a line whose bins do not come to its `n` is not a
+        histogram of anything - and this firmware refuses to send one, which is what makes this
+        walkable at all. An `err` naming a sum is the part saying it would not scan: a *differs*
+        with the message, because it is a finding about the chip and not a pass."""
+        _ack, batch = scanner.send(line, timeout_s=5.0)
+        got = batch.of_type("hist")
+        err = batch.of_type("err")
+        # The rest of the pass, and no longer: a step that swallowed the seconds after it would
+        # take the `stat` heartbeat the line after this one counts.
+        deadline = self.ports.now() + HIST_PASS_S
+        while len(got) < lines_due and not err and self.ports.now() < deadline:
+            rest = scanner.collect(0.25)
+            got += rest.of_type("hist")
+            err += rest.of_type("err")
+        wrong = [one for one in got if sum(one.get("bins") or []) != one.get("n")]
+        gaps = [int(b.get("ms", 0)) - int(a.get("ms", 0)) for a, b in zip(got, got[1:])]
+        # src/roles/scanner/Sweep.h, kHistSampleUs and histScanMs(): 8.2 us a sample, rounded up.
+        scan_ms = int(math.ceil(samples * 8.2 / 1000.0))
+        close = [gap for gap in gaps if gap < scan_ms]
+        sums = ", ".join("%s MHz: %d of %s" % (one.get("f"), sum(one.get("bins") or []),
+                                               one.get("n")) for one in got[:4])
+        saw = "%d `hist` line(s)%s%s" % (
+            len(got), (" [%s%s]" % (sums, ", ..." if len(got) > 4 else "")) if got else "",
+            ("; %d that did not add up" % len(wrong)) if wrong else "")
+        if err and not got:
+            saw = "%s; `err`: %s" % (saw, self.safe(str(err[0].get("msg"))))
+        self.step(key, "`%s`: %d lines, every one of them adding up to its `n`"
+                       % (line, lines_due),
+                  ok=(len(got) == lines_due and not wrong and not close),
+                  sent=[line], saw=saw,
+                  expected="%d lines, each summing to %d, their `ms` at least %d ms apart"
+                           % (lines_due, samples, scan_ms),
+                  blanks={blank: ("%d lines, all adding up to %d%s"
+                                  % (len(got), samples,
+                                     (", the closest %d ms apart" % min(gaps)) if gaps else "")
+                                  if got and not wrong else
+                                  ("%d of %d did not add up" % (len(wrong), len(got)) if got
+                                   else (self.safe(str(err[0].get("msg"))) if err
+                                         else "no `hist` line")))},
+                  note=("what did not add up: %s"
+                        % ", ".join("%s MHz came to %d and not %s"
+                                    % (one.get("f"), sum(one.get("bins") or []), one.get("n"))
+                                    for one in wrong[:3])) if wrong else None)
+        scanner.send("stop", timeout_s=3.0)
 
     def _walk_9_watchdog(self):
         """`hang`, and what comes back: the loop stops, the loop watchdog resets the part about

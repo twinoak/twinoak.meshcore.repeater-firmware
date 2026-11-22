@@ -1,6 +1,6 @@
 // The scanner's arithmetic: what a sweep's points are, which receiver bandwidth a step needs,
-// what a command's numbers are clamped to, and the window of RSSI samples that `stat.rssi` and
-// `dwell` report.
+// what a command's numbers are clamped to, how one frequency of a `hist` is measured, and the
+// window of RSSI samples that `stat.rssi` and `dwell` report.
 //
 // This is NoiseScope's scanner.cpp with the radio taken out of it
 // (software/firmware/noisescope-rak4630/src/scanner.cpp at b798aab0 of the hardware repository:
@@ -107,6 +107,148 @@ constexpr uint16_t kCadCountMax = 1000;
 // Whether the home channel's modem settings are ones the SX1262 has: `home` takes them from the
 // operator and a bad spreading factor must not reach the radio.
 bool homeSettingsOk(double f_mhz, uint8_t sf, uint8_t cr);
+
+// ------------------------------------------------------------------ the histogram
+//
+// `hist` measures one frequency after another with the SX126x's own spectral-scan engine: the
+// chip takes `n` RSSI samples kHistSampleUs apart and counts each one into the kHistBins bins of
+// 4 dB, and the host reads the counters out when the scan is over. **A line's bins therefore add
+// up to its `n`** - and on 21 November, on a unit at Bellevue, they did not: one pass of
+// `hist 869.418 869.818 25` at 2 048 samples gave seven lines adding up to 2 048, 15, 15, 8,
+// 4 140, 32 and 1 807, which is a result read 70 to 360 us after its scan was started
+// (tasks/phase-3.14/FOLLOWUPS.md, *The scanner's histogram*; phase 3.15's task 01).
+//
+// The sequence for one frequency is here rather than in src/roles/scanner/Radio.cpp - host-
+// portable, driven by a test through HistRadio, as armScopeSegment() is for the scope - because
+// the order of the calls and the two things it does not take the chip's word for are the whole
+// of the fix:
+//
+//   1. **a result belongs to the scan started for it.** A scan of `n` samples cannot have
+//      finished before histScanUs() has passed since it was started, so a *completed* status
+//      read sooner is not this scan's and is not acted on; the counters are read once, after
+//      the completion, and never while the scan runs;
+//   2. **the sum is the proof.** The bins are added up before anything is said. They come to
+//      `n` or the result is not a histogram: the frequency is measured again, kHistScansMax
+//      scans at most, and then the caller says so in one `err` line and ends the pass.
+
+// The engine's sample period, in microseconds: the interval the scan is started with
+// (RADIOLIB_SX126X_SCAN_INTERVAL_8_20_US, which src/roles/scanner/Radio.cpp passes by name).
+// **This is the one place the number is written.** The earliest a scan can be over, the longest
+// it is waited for, and every duration docs/noisescope.md quotes for a `hist` come from it.
+constexpr double kHistSampleUs = 8.2;
+
+// How many scans one frequency is given: a result whose bins do not add up to its `n` is not a
+// histogram of anything, so it is measured again instead of being sent.
+constexpr uint8_t kHistScansMax = 3;
+
+// On top of the scan's own duration, before it is given up on. The wait is histScanUs() doubled
+// plus this: the chip is asked for its status over SPI and both serial ports are drained between
+// two asks, and the scan's own duration is the only thing that scales with `samples`. (It was
+// `samples / 100 + 100` ms, beside a comment that said 8.2 us.)
+constexpr uint32_t kHistWaitSlackMs = 50;
+
+// How long the scan itself takes, in microseconds: `samples` x kHistSampleUs, rounded up.
+uint32_t histScanUs(uint16_t samples);
+
+// The same in whole milliseconds, rounded up - what docs/noisescope.md section 5 quotes a line
+// of a `hist` as costing (17 ms at the default 2 048 samples, 0.54 s at 65 535).
+uint32_t histScanMs(uint16_t samples);
+
+// The longest one scan is waited for, in microseconds: histScanUs() doubled plus
+// kHistWaitSlackMs. A scan that has not said *completed* by then is aborted and the pass ends
+// with the `scan timeout` it has always ended with.
+uint32_t histWaitUs(uint16_t samples);
+
+// The four values of the engine's status register, as the chip writes them (RadioLib 7.8.0,
+// SX126x_registers.h:128-132: RADIOLIB_SX126X_SPECTRAL_SCAN_NONE, _ONGOING, _ABORTED and
+// _COMPLETED, held equal to these four by a static_assert in src/roles/scanner/Radio.cpp).
+// RadioLib's own spectralScanGetStatus() collapses them into *completed or not*; this sequence
+// reads the register itself, because which of the other three it is matters.
+constexpr uint8_t kHistStatusNone = 0x00;
+constexpr uint8_t kHistStatusOngoing = 0x0F;
+constexpr uint8_t kHistStatusAborted = 0xF0;
+constexpr uint8_t kHistStatusCompleted = 0xFF;
+
+// The radio, as measuring one frequency sees it: one member per call of RadioLib's - or of the
+// Module's, for the two that are one register - plus the clock and the loop's own poll, handed
+// in so that a host test is what moves time. src/roles/scanner/Radio.cpp is the chip half of
+// each member and nothing else.
+struct HistRadio {
+  virtual ~HistRadio() {}
+
+  // SX126x::standby(), then SX1262::setFrequency(float): the frequency this scan is for.
+  virtual int standby() = 0;
+  virtual int setFrequency(double mhz) = 0;
+
+  // The status register put back to kHistStatusNone before a scan is started. Nothing in
+  // RadioLib's spectralScanStart() touches it - an abort, the RSSI window register, SetRx and
+  // the scan parameters, and that is all (7.8.0, SX126x.cpp:1191) - and its abort writes the
+  // window register alone (SX126x.cpp:1208), so a *completed* left over from the frequency
+  // before would otherwise be read as this scan's. Written here, and then **not relied on**:
+  // whether the chip's own patch keeps a host's write of that register is not known, and no
+  // session has a chip to ask.
+  virtual void clearStatus() = 0;
+
+  // SX126x::spectralScanStart(samples) and SX126x::spectralScanAbort().
+  virtual int scanStart(uint16_t samples) = 0;
+  virtual void scanAbort() = 0;
+
+  // The status register, raw: one of the four values above.
+  virtual uint8_t scanStatus() = 0;
+
+  // SX126x::spectralScanGetResult(): kHistBins counters, read once and after the completion.
+  virtual int scanResult(uint16_t* bins) = 0;
+
+  // Not RadioLib's. The clock in microseconds (micros() on the board), and one turn of what the
+  // loop does during a blocking step: both serial ports drained so that a `stop` is never lost,
+  // and yield(). A command that arrives during a scan is still executed between steps, from
+  // loop(), exactly as before.
+  virtual uint32_t nowUs() = 0;
+  virtual void poll() = 0;
+};
+
+// What measuring one frequency came to.
+enum HistOutcome : uint8_t {
+  kHistMeasured = 0,     // the bins are a histogram of this scan and they add up to `n`
+  kHistStandbyFailed,    // standby() refused
+  kHistFrequencyFailed,  // setFrequency() refused: the scan would have been another frequency's
+  kHistStartFailed,      // spectralScanStart() refused
+  kHistNeverCompleted,   // no *completed* status inside histWaitUs(); the scan was aborted
+  kHistResultFailed,     // spectralScanGetResult() refused
+  kHistDoesNotAddUp,     // kHistScansMax scans, none of whose bins added up to `n`
+};
+
+struct HistResult {
+  HistOutcome outcome = kHistMeasured;
+  int code = 0;       // RadioLib's, for the three outcomes that have one
+  uint8_t scans = 0;  // scans taken, 1..kHistScansMax
+  uint32_t sum = 0;   // what the last result's bins added up to, which an `err` line names
+  // A *completed* status read before the scan could have finished - the chip of 21 November,
+  // and the reading this sequence was written for. Not acted on, and recorded because it is the
+  // one thing a session with no part can still be told by one.
+  bool completed_early = false;
+};
+
+// Measures `f_mhz`: standby, the frequency, and then up to kHistScansMax scans of `samples`
+// samples each - the status register cleared, the scan started, its completion waited for and
+// not believed before histScanUs() has passed, the kHistBins counters read once, and the bins
+// added up. True with `bins` holding a histogram that adds up to `samples`; false with `out`
+// saying what went wrong, and then **no `hist` line is written for this frequency**.
+bool measureHistPoint(HistRadio& radio, double f_mhz, uint16_t samples, uint16_t* bins,
+                      HistResult& out);
+
+// The `err` line that frequency gets, written into `out` (docs/noisescope.md section 5). The
+// words are here and not in src/roles/scanner/Radio.cpp so that they are held by a test:
+// `scan start failed`, `scan timeout` and `scan result failed` are what the firmware has always
+// said, two name a standby or a retune the driver refused, and the one for a result that does
+// not add up names the frequency, the sum and `n` - the three numbers a reader needs to tell a
+// chip that will not scan from a pass that was asked for the wrong thing. An outcome of
+// kHistMeasured writes the empty string: nothing went wrong.
+void histErrorMessage(const HistResult& result, double f_mhz, uint16_t samples, char* out,
+                      size_t size);
+
+// The longest of those messages, newline and NUL aside.
+constexpr size_t kHistErrorBytes = 160;
 
 // ------------------------------------------------------------------ the scope (the fast sweep)
 //

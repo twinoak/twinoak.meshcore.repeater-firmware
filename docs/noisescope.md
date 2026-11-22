@@ -208,7 +208,7 @@ host is attached.
 | `stat` | one `stat` line immediately (the heartbeat also fires every 10 s) |
 | `sweep [f0 f1 [step_khz [dwell_ms [passes]]]]` | RSSI sweep. Defaults: the band's range, 25 kHz, 20 ms, 1 pass. `passes 0` = repeat until `stop` |
 | `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`. `scope off` ends it |
-| `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples |
+| `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples; `samples` is clamped to 256…65535 and is what one frequency costs, 8.2 µs each (2 ms at 256, **17 ms at the default**, 0.54 s at 65535). A line's bins add up to its `n` or the line is not sent (below) |
 | `dwell <f_mhz> [secs [win_ms]]` | time-domain statistics on one frequency (defaults 60 s, 1000 ms windows). Uses the home LoRa RX filter |
 | `cad [f_mhz [count]]` | LoRa channel-activity detections out of `count` tries (default the home frequency, 100) |
 | `stop` | abort any activity, return to monitor |
@@ -227,6 +227,26 @@ crossed, either end is outside 150–960 MHz, the step is below 1 kHz or above
 goes further and **requires** both ends — it has no default span, because the
 span is the whole point of it — and is refused for a step below 100 Hz (finer
 than the radio tunes) as well.
+
+**A `hist` line's bins add up to its `n`.** Each of the `n` samples lands in
+exactly one of the 33 bins, so a line that does not add up is not a histogram
+of anything — and the firmware proves that to itself before it says the line.
+A frequency whose result does not add up is **measured again, three scans at
+most**; if the third does not add up either, the pass ends with one `err`
+naming the frequency, what the bins came to and what `n` was, and **no `hist`
+line is written for it**:
+
+```
+{"t":"err","msg":"hist bins at 869.518 add up to 4140 and not 2048 after 3 scans; no line was sent"}
+```
+
+Asking for more `samples` buys a longer look at one frequency and nothing
+else: 8.2 µs a sample, so 2 ms at the least (256), 17 ms at the default
+2048 and 0.54 s at the most (65535) — plus the time the line itself takes on
+the port, which at 115200 baud is about 15 ms. A scan is never taken as
+finished before its samples can have been taken, whatever the chip's status
+register reads, and a scan that says nothing in twice its own duration plus
+50 ms ends the pass with `scan timeout`.
 
 **`hang` is the one command whose point is to break something**, and it is here so that
 *the watchdog is live* can be walked on a bench instead of argued about
@@ -358,7 +378,9 @@ whatever it was asked for.
 
 `hist` — one line per frequency per pass. `bins[i]` counts RSSI samples in the
 4 dB slot starting at `b0 - 4*i` dBm (bin 0 = −11 dBm, bin 32 = −139 dBm); `n`
-samples were taken ~8.2 µs apart (≈17 ms per line at n=2048). The histogram
+samples were taken ~8.2 µs apart (≈17 ms per line at n=2048). **The bins add
+up to `n`** — every sample is counted once — and a result that does not is
+measured again and then refused rather than sent (above). The histogram
 preserves transients that averaging destroys: a 1 % duty-cycle burster shows
 up as a distinct population in a high bin.
 
@@ -545,6 +567,16 @@ before it is flashed: its descriptor's role byte is 3.
   (level and true duty cycle), then `sweep` with the max-hold to find its
   frequency.
 * A high `cad.det` on a clean-looking channel = other LoRa traffic.
+* **`hist` is what a `scope` cannot be.** A `scope` point is one RSSI reading
+  through a filter the radio retunes a few hundred times a second: it says
+  *where* in an 810 MHz span something is, 250 points in about 21 ms, and a
+  burst shorter than a sweep either lands in the picture or does not. A `hist`
+  point is 2048 readings of **one** frequency in 17 ms (0.54 s if you ask for
+  65535), kept as a distribution instead of a number — so it says what
+  fraction of the time that frequency is at each level, which is the one
+  question a max-hold and a mean cannot both answer. Find it with `scope`,
+  then measure it with `hist`; its bins add up to its `n`, so a population in
+  a high bin is a real duty cycle and not a dropped sample.
 * A **`scope` with `--baseline`** is that comparison made automatic: capture
   the same span on a 50 Ω dummy load, and the plotter subtracts its
   per-frequency median from everything it draws. What is left is the site and
