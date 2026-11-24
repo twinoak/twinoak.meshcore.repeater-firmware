@@ -1182,13 +1182,34 @@ decides whether any of the rest can be walked at all.
   of the matching network across the whole tuning range, and every later
   reading is worth more with it to subtract (`--baseline`). Keep the file with
   the site's notes. Peaks seen on the dummy load → ______. (bench, 2026-10-22, 479f482)
-- [ ] **p3.1-01** **The image check**, which is what the segments exist for.
+- [ ] **p3.1-01, p3.16-01** **The image check**, which is what the segments exist for.
   The tinySA Ultra as a generator at a known frequency, through an attenuator
   into the RAK, and a `scope` of a wide span around it: there should be **one
   peak where the generator is**, and nothing at the image (or no more than the
   baseline already had). If a ghost shows, lower `kScopeSegmentMhz` in
   `src/roles/scanner/Sweep.h` until it does not, and **write the number down**
   → ______ (the task's follow-ups are where it goes).
+  **This line has never been walked** (22 October), and the picture of
+  23 November says what it would find: not one ghost but a block at the first
+  point of every segment and about every 5.6 MHz after it, whenever a strong
+  signal is in the passband (`docs/noisescope.md` §7). `p3.16-01` built the two
+  tools for it and **answered none of its questions**, because no board was on
+  this bench that day. One command asks them all, with the generator on
+  869.618 MHz at about −30 dBm into the radio and the scanner flashed:
+  `python tools/noisescope/hunt.py --label bellevue-carrier --carrier 869.618`.
+  Thirteen lines — the 180 MHz of 23 November and 13 MHz around the carrier;
+  the same 180 MHz begun 7 MHz lower, and spans of 60, 31 and 20 MHz, which say
+  whether the blocks move with the segments; the same span with its step halved
+  and at 234.3, 117.3 and 58.6 kHz, which say whether the interval is MHz,
+  points or time; and the first line once more with `boost off`. It keeps a
+  capture per line under `out/bench/echoes/<label>/` and prints one table: how
+  many echoes, how far each is from its segment's first point, how long its tail
+  is, where the carrier's own peak landed, each sweep's `sps`, and the one line
+  that names the unit the interval keeps → ______. Then
+  `python tools/noisescope/echoes.py <capture> --carrier 869.618` reads any one
+  of them again, and `--json` gives the same as data. **Lower nothing on the
+  strength of it**: which width and settle `scope` takes is a later task's, from
+  the tables (`tasks/phase-3.16/README.md`, *Afterwards*).
 - [ ] **p3.1-01** **The site through the cavity filter.** `scope 791 960` with
   the baseline subtracted: LTE800 downlink (791–821) and GSM900 downlink
   (925–960) as they actually reach the radio. Strongest carrier → ______ at

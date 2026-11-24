@@ -301,10 +301,12 @@ _section("9", "NoiseScope", [
              "the `ack`'s n, rbw, seg and cov, and the frames' `sps`"),
     PageLine("9.9", ("p3.1-01",), "**The baseline.**",
              "`scope 150 960 2048` on the dummy load, the NDJSON kept and the picture saved"),
-    PageLine("9.10", ("p3.1-01",), "**The image check**, which is what the segments exist for",
+    PageLine("9.10", ("p3.1-01", "p3.16-01"),
+             "**The image check**, which is what the segments exist for",
              "one peak where the generator is, and nothing at the image",
              person="the tinySA Ultra as a generator, an attenuator, and the judgement that may "
-                    "lower kScopeSegmentMhz"),
+                    "lower kScopeSegmentMhz; p3.16-01's `hunt.py` is the run that asks it, and "
+                    "this tool does not flash the scanner for it"),
     PageLine("9.11", ("p3.1-01",), "**The site through the cavity filter.**",
              "`scope 791 960` with the baseline subtracted",
              person="the site, the antenna and the cavity filter - not a bench with a dummy load"),

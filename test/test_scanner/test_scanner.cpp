@@ -19,6 +19,9 @@
 //      three of those and is therefore kept together at the end: the command, the plan (the
 //      span cut into segments, each with its own image calibration), the frame and its base64,
 //      the three aggregates, and the pinned binary of the plugin that runs inside the radio.
+//      The plan is also held to **tools/noisescope/scope_plans.json**, the table
+//      tools/noisescope/echoes.py's copy of this arithmetic is held to, so that a change to
+//      either side without the other fails in both places at once (p3.16-01).
 //   5. **the histogram** - how one frequency of a `hist` is measured, which phase 3.15's task
 //      01 moved out of the radio file so that the chip of 21 November could be driven from here:
 //      a result belongs to the scan that was started for it, and the bins add up to the `n` of
@@ -39,13 +42,23 @@
 
 #include <ArduinoJson.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
+
+// PROJECT_DIR is platformio.ini's ([env:native]); `Scope.ThePlanTableIsPlanScopes` reads
+// tools/noisescope/scope_plans.json through it, as test/test_image reads the specification's
+// fixtures through the same define.
+#ifndef PROJECT_DIR
+#error "PROJECT_DIR must be defined; platformio.ini's [env:native] does it"
+#endif
 
 #include "roles/scanner/Commands.h"
 #include "roles/scanner/Lines.h"
@@ -898,6 +911,30 @@ std::vector<uint8_t> fromBase64(const std::string& text) {
   return out;
 }
 
+// How close a number read out of tools/noisescope/scope_plans.json has to be to the one
+// planScope() makes. **This build's ArduinoJson reads a number into a `float`**
+// (ARDUINOJSON_USE_DOUBLE is not defined for [env:native]), so 863.014 comes back as
+// 863.013977: about seven significant digits, and a tolerance of 1e-9 would be failing the
+// parser and not the arithmetic. A few of that type's own steps is what can be asked here, and
+// it is still many orders tighter than any change to a plan would be - a segment that moved
+// moves by kilohertz. The file itself is exact and is read at full precision by the other half
+// of this check, tools/noisescope/test_echoes.py.
+double planTableTolerance(double want) { return 1e-6 * std::max(1.0, std::fabs(want)); }
+
+// And the same parser the other way round: a `rbw_khz` of the table is one of the chip's own
+// filters, and read into a `float` it is no longer *equal* to that filter - 234.3 comes back as
+// 234.30000305, which narrowestRbwKhz() answers with the next filter up (312 kHz) and the plan
+// is then another plan altogether. So a bandwidth the table names is snapped to the filter it
+// names before it is handed to planScope(): what the row describes is a command asking for
+// 234.3 kHz, and a request of 234.30000305 is not that command. Anything that is not one of the
+// filters (and 0, "the default") is passed through untouched.
+double rbwAsTheTableNamesIt(double khz) {
+  for (size_t i = 0; i < kFskRbwCount; i++) {
+    if (std::fabs(khz - kFskRbwKhz[i]) < 1e-3) return kFskRbwKhz[i];
+  }
+  return khz;
+}
+
 ScopeRequest request(double f0, double f1) {
   ScopeRequest r;
   r.f0 = f0;
@@ -1142,6 +1179,74 @@ TEST(Scope, ARequestThatIsNotAScopeIsRefused) {
 
   // And the one that is not a refusal: 150-960 is exactly what this mode is for.
   EXPECT_TRUE(planScope(request(kRadioLowMhz, kRadioHighMhz), plan));
+}
+
+TEST(Scope, ThePlanTableIsPlanScopes) {
+  // tools/noisescope/scope_plans.json, the one table two tests read. Everything that lays a
+  // `scope`'s segments out lives here, in planScope() and scopeSegment(); a tool that reads a
+  // capture has to lay the same segments out to say where in one an echo fell, and
+  // tools/noisescope/echoes.py therefore carries a copy of this arithmetic. The table is what
+  // holds the two equal: this test is the firmware's half of it (the Python half is
+  // tools/noisescope/test_echoes.py, and `echoes.py --check-plans` is it by hand), so a change to
+  // either side without the other fails in both places at once.
+  //
+  // Phase 3.16's task 01. Every `request` is a `scope` command somebody asked a unit for.
+  const std::string path = std::string(PROJECT_DIR) + "/tools/noisescope/scope_plans.json";
+  std::ifstream in(path, std::ios::binary);
+  ASSERT_TRUE(in.good()) << "cannot read " << path;
+  const std::string text((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+  JsonDocument doc;
+  const DeserializationError err = deserializeJson(doc, text);
+  ASSERT_FALSE(err) << path << ": " << err.c_str();
+  JsonArray plans = doc["plans"].as<JsonArray>();
+  ASSERT_FALSE(plans.isNull()) << path << " has no `plans`";
+  ASSERT_GE(plans.size(), 10u) << "the table has lost rows";
+
+  size_t checked = 0;
+  for (JsonObject entry : plans) {
+    const char* name = entry["name"] | "(unnamed)";
+    SCOPED_TRACE(name);
+    JsonObject req = entry["request"].as<JsonObject>();
+    ASSERT_FALSE(req.isNull()) << "no `request`";
+    ScopeRequest r = request(req["f0"].as<double>(), req["f1"].as<double>());
+    r.points = req["points"] | 0u;
+    r.rbw_khz = rbwAsTheTableNamesIt(req["rbw_khz"] | 0.0);
+    ScopePlan plan;
+    ASSERT_TRUE(planScope(r, plan)) << "this firmware does not run that request";
+
+    JsonObject want = entry["plan"].as<JsonObject>();
+    ASSERT_FALSE(want.isNull()) << "no `plan`";
+    EXPECT_EQ(want["points"].as<uint16_t>(), plan.points);
+    EXPECT_EQ(want["segments"].as<uint16_t>(), plan.segments);
+    for (const auto& pair : {std::make_pair("step_khz", plan.step_khz),
+                             std::make_pair("rbw_khz", plan.rbw_khz),
+                             std::make_pair("first_mhz", plan.first_mhz)}) {
+      const double expected = want[pair.first].as<double>();
+      EXPECT_NEAR(expected, pair.second, planTableTolerance(expected)) << pair.first;
+    }
+
+    JsonArray segments = entry["segments"].as<JsonArray>();
+    ASSERT_FALSE(segments.isNull()) << "no `segments`";
+    ASSERT_EQ(size_t(plan.segments), segments.size()) << "the table has another number of them";
+    uint16_t index = 0;
+    for (JsonObject expect : segments) {
+      ScopeSegment seg;
+      ASSERT_TRUE(scopeSegment(plan, index, seg)) << "segment " << index;
+      EXPECT_EQ(expect["first"].as<uint16_t>(), seg.first) << "segment " << index;
+      EXPECT_EQ(expect["points"].as<uint16_t>(), seg.points) << "segment " << index;
+      for (const auto& pair : {std::make_pair("first_mhz", seg.first_mhz),
+                               std::make_pair("cal_lo_mhz", seg.cal_lo_mhz),
+                               std::make_pair("cal_hi_mhz", seg.cal_hi_mhz)}) {
+        const double expected = expect[pair.first].as<double>();
+        EXPECT_NEAR(expected, pair.second, planTableTolerance(expected))
+            << "segment " << index << " " << pair.first;
+      }
+      index++;
+    }
+    checked++;
+  }
+  EXPECT_EQ(plans.size(), checked);
 }
 
 TEST(Scope, NoLegalRequestNeedsMoreSegmentsThanThereIsRoomFor) {

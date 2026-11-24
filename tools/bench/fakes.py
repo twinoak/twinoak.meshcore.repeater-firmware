@@ -371,7 +371,7 @@ class FakeScannerFirmware(object):
     def __init__(self, version="0.0.0-dev", rom="SX1261 V2D 2D02", radio_ok=True,
                  devid="deadbeef01020304", extra_lines=None, sweep_points=281, scope_frames=3,
                  scope_sps=476, answers_data=True, chatter=None, prints_banner=True,
-                 reset="soft", wdt="", hangs=True):
+                 reset="soft", wdt="", hangs=True, scope_frames_for=None, scope_ack_for=None):
         self.version = version
         # What `boot` and `info` say the last reset was, and which watchdog it was when the word
         # is `wdt` (docs/noisescope.md section 5). `hang` moves both, which is what the walk of
@@ -391,6 +391,14 @@ class FakeScannerFirmware(object):
         self.sweep_points = sweep_points
         self.scope_frames = scope_frames
         self.scope_sps = scope_sps
+        # A caller that wants the frames of a `scope` to belong to the span that was asked for
+        # hands in `scope_frames_for(words) -> [frame dict, ...]` and, with it, `scope_ack_for
+        # (words) -> the ack's own `msg`. None for both is the one frame shape the walk of
+        # docs/bench.md section 9 is held to, which is what every test before p3.16-01 reads; the
+        # hook is here and not the arithmetic, because this file knows nothing of `planScope()`
+        # and tools/bench must not learn (tools/noisescope/test_hunt.py is where it lives).
+        self.scope_frames_for = scope_frames_for
+        self.scope_ack_for = scope_ack_for
         self.answers_data = answers_data            # False: acks and no scan lines at all
         # False: a `hist` line whose bins do not add up to its `n` - the chip of 21 November,
         # which docs/bench.md section 9's two `p3.15-01` lines exist to catch.
@@ -490,6 +498,13 @@ class FakeScannerFirmware(object):
             line.update(self._next())
             return [line]
         if word == "scope":
+            if self.scope_frames_for is not None:
+                out = []
+                for line in self.scope_frames_for(words):
+                    line = dict(line)
+                    line.update(self._next())
+                    out.append(line)
+                return out
             points = 250
             if len(words) > 3:
                 try:
@@ -540,7 +555,9 @@ class FakeScannerFirmware(object):
         elif word in ("sweep", "hist", "dwell", "cad", "stop", "scope", "home", "boost", "auto", "time",
                       "help"):
             msg = "started"
-            if word == "scope":
+            if word == "scope" and self.scope_ack_for is not None:
+                msg = self.scope_ack_for(words)
+            elif word == "scope":
                 msg = ("n=%d step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=86ms"
                        % (int(words[3]) if len(words) > 3 and words[3].isdigit() and int(words[3])
                           else 250))
