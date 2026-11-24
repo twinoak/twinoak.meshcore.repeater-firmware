@@ -185,8 +185,11 @@ NARROW = dict(f0=863.1, f1=876.1, points=250, rbw_khz=0.0)            # 250, 52.
 
 
 def plan_of(spec):
+    """The plan a spec asks for. `seg_mhz` and `settle_us` are phase 3.16's task 02's and are
+    optional, so that a spec written before it is a spec still."""
     plan = echoes.plan_scope(spec["f0"], spec["f1"], points=spec["points"],
-                             rbw_khz=spec["rbw_khz"])
+                             rbw_khz=spec["rbw_khz"], seg_mhz=spec.get("seg_mhz", 0.0),
+                             settle_us=spec.get("settle_us", 0))
     assert plan is not None, spec
     return plan
 
@@ -734,6 +737,25 @@ class TheTwoNumbers(unittest.TestCase):
 
 # ----------------------------------------------------------- phase 3.16's words and new members
 
+def grow_frame(text, us=1193, usx=1207, dev="0044"):
+    """One `scope` line as a scanner carrying phase 3.16's task 03 would have sent it.
+
+    `us`, `usx` and `dev` after `sps` and before `lv`, which is where src/roles/scanner/Lines.cpp
+    writes them; `dev` None for the one plan that carries none, a plan of a single segment. Each
+    of the three is left out when it is None, so one function makes a frame of a scanner before
+    that task, a frame of one segment after it and a frame of six.
+    """
+    obj = json.loads(text)
+    grown = {}
+    for key, value in obj.items():
+        if key == "lv":
+            for name, number in (("us", us), ("usx", usx), ("dev", dev)):
+                if number is not None:
+                    grown[name] = number
+        grown[key] = value
+    return json.dumps(grown)
+
+
 def with_new_members(lines, dev="0044", us=1193, usx=1207):
     """The same capture as a scanner carrying phase 3.16's task 03 would have sent it.
 
@@ -748,20 +770,118 @@ def with_new_members(lines, dev="0044", us=1193, usx=1207):
             continue
         obj = json.loads(text)
         if obj.get("t") == "scope":
-            grown = {}
-            for key, value in obj.items():
-                if key == "lv":
-                    grown["us"] = us
-                    grown["usx"] = usx
-                    grown["dev"] = dev
-                grown[key] = value
-            out.append(json.dumps(grown))
+            out.append(grow_frame(text, us=us, usx=usx, dev=dev))
         elif obj.get("t") == "ack" and obj.get("cmd") == "scope":
             obj["msg"] = str(obj.get("msg", "")) + " reg=ldo gain=noboost"
             out.append(json.dumps(obj))
         else:
             out.append(text)
     return out
+
+
+# ------------------------------------------------------- a session's download, made (task 04)
+
+# How far over the floor a planted echo's place stands in the frames that do **not** hold the
+# carrier. The frames of /noisescope/3 read the echoes' places 4 to 8 dB high even when quiet
+# (tasks/phase-3.16/README.md), which is the thing the quiet-frame rule has to see past and the
+# thing the table prints beside each place.
+QUIET_OVER_DB = 5.0
+
+# The garden's own spans, which are whole megahertz because a session's step is forty characters
+# (tools/noisescope/lists/garden-a.txt). All four are rows of scope_plans.json.
+GARDEN_WIDE = dict(f0=780.0, f1=960.0, points=0, rbw_khz=467.0)          # 386, 466.32, 6 segments
+GARDEN_WIDE_LOWER = dict(f0=773.0, f1=953.0, points=0, rbw_khz=467.0)    # the same, 7 MHz lower
+GARDEN_SIXTY = dict(f0=840.0, f1=900.0, points=0, rbw_khz=467.0)         # 129, 465.12, 2 segments
+GARDEN_NARROW = dict(f0=863.0, f1=876.0, points=250, rbw_khz=58.6)       # 250, 52.00, 1 segment
+# And the same wide span begun one whole interval lower, which is the one shift that cannot
+# answer anything: both readings then predict the same places.
+GARDEN_WIDE_ONE_INTERVAL = dict(f0=774.404, f1=954.404, points=0, rbw_khz=467.0)
+
+GARDEN_PLACES_MHZ = (800.0, 820.0, 840.0, 860.0, 880.0, 900.0, 920.0, 940.0)
+
+
+def plant_at_mhz(plan, places_mhz, carrier_mhz=None, tail=6):
+    """One sweep's levels with a block at each **frequency**, wherever this plan's segments fall.
+
+    The other reading of the echoes of 23 November: a block that belongs to the signal or to the
+    site sits at a frequency and does not care where a segment began. `plant()` is the first
+    reading; a pair of scopes planted with one of the two and read by `echoes.py --steps` is how
+    the pair's line is held to both.
+    """
+    levels = [FLOOR_DBM + RIPPLE_DB * ((i % 3) - 1) for i in range(plan.points)]
+    for mhz in places_mhz:
+        at = int(round((mhz - plan.first_mhz) / plan.step_mhz))
+        if not 0 <= at < plan.points:
+            continue
+        for k in range(tail + 1):
+            index = at + k
+            if index >= plan.points:
+                break
+            over = BLOCK_DB * (1.0 - float(k) / float(tail + 1))
+            levels[index] = max(levels[index], FLOOR_DBM + over)
+    if carrier_mhz is not None:
+        index = int(round((carrier_mhz - plan.first_mhz) / plan.step_mhz))
+        if 0 <= index < plan.points:
+            levels[index] = CARRIER_DBM
+    return levels
+
+
+def garden_step(spec, rule=None, value=None, places_mhz=None, carrier_mhz=869.618, lit=10,
+                quiet=50, reg=None, gain=None, us=1193, usx=1207, dev="0000", seq=0):
+    """The lines of one step of a session: its `ack`, its lit frames and its quiet ones.
+
+    A garden step is not a bench capture: the signal that lights the echoes is a neighbour's
+    traffic, so it is in some frames and not in others - ten of sixty in session 3, which is this
+    function's default. A quiet frame carries the floor and the echoes' own places QUIET_OVER_DB
+    over it, and no carrier at all. Returns (lines, the next seq).
+    """
+    plan = plan_of(spec)
+    ack = json.loads(ack_line(plan))
+    for name, word in (("reg", reg), ("gain", gain)):
+        if word is not None:
+            ack["msg"] = "%s %s=%s" % (ack["msg"], name, word)
+    lines = [json.dumps(ack)]
+    if rule is not None:
+        bright = plant(plan, rule, value, carrier_mhz=carrier_mhz)
+    else:
+        bright = plant_at_mhz(plan, places_mhz or (), carrier_mhz=carrier_mhz)
+    floor = [FLOOR_DBM + RIPPLE_DB * ((i % 3) - 1) for i in range(plan.points)]
+    dim = [floor[i] + (bright[i] - floor[i]) * (QUIET_OVER_DB / BLOCK_DB)
+           for i in range(plan.points)]
+    carrier_index = int(round((carrier_mhz - plan.first_mhz) / plan.step_mhz))
+    if 0 <= carrier_index < plan.points:
+        dim[carrier_index] = floor[carrier_index]       # the signal is what a quiet frame lacks
+    for number in range(lit + quiet):
+        seq += 1
+        levels = bright if number < lit else dim
+        lines.append(grow_frame(frame_line(plan, levels, seq=seq), us=us, usx=usx, dev=dev))
+    return lines, seq
+
+
+def garden_capture(steps, chatter=True):
+    """A session's download: the boot line, then one step of lines after another."""
+    lines = []
+    if chatter:
+        lines.append(json.dumps({"t": "boot", "fw": "noisescope", "ver": "0.1.8",
+                                 "role": "scanner", "board": "rak4630-single", "reset": "soft",
+                                 "wdt": "", "radio_ok": True, "rtc": 1, "ina": 1, "ts": 0}))
+    seq = 0
+    for step in steps:
+        more, seq = garden_step(seq=seq, **step)
+        lines.extend(more)
+        if chatter:
+            lines.append(json.dumps({"t": "stat", "ts": 0, "ms": 1000 * seq, "up": 1,
+                                     "mode": "scope", "home": 869.618}))
+    return lines
+
+
+def read_steps(lines, carrier_mhz=869.618, **kwargs):
+    """What `--steps` reads: the rows, the pairs, and the readings behind them."""
+    scopes, skipped, bad = echoes.read_capture(lines)
+    scopes = [scope for scope in scopes if scope.frames]
+    readings = [echoes.ScopeReading(scope, carrier_mhz=carrier_mhz, quiet_rule=True, **kwargs)
+                for scope in scopes]
+    return readings, echoes.steps_rows(readings), echoes.pairs_of(readings), skipped, bad
 
 
 class TheFourWordsAndTheNewMembers(unittest.TestCase):
@@ -873,6 +993,325 @@ def _rmtree(path):
     import shutil
     shutil.rmtree(path, ignore_errors=True)
 
+# ------------------------------------------------- phase 3.16's task 04: a session, as one table
+
+class TheGardensTable(unittest.TestCase):
+    """`echoes.py --steps`: a session's download as one table, a row a scope.
+
+    A garden capture is not a bench capture. The signal is a neighbour's traffic, so some frames
+    hold it and some do not; the scanner carries `us`, `usx` and `dev`, or - if the session ran
+    before phase 3.16's task 03 - it does not; and the words `ldo` and `noboost` are in the `ack`
+    and nowhere else. Each of those is a column, and each is held here.
+    """
+
+    def test_a_row_a_scope_carries_the_plan_the_words_the_time_and_the_error_word(self):
+        rows = read_steps(garden_capture([
+            dict(spec=GARDEN_WIDE, rule="mhz", value=5.596, dev="0000"),
+            dict(spec=GARDEN_WIDE, rule="mhz", value=5.596, reg="ldo", gain="noboost",
+                 dev="0040", us=1193, usx=1207),
+            dict(spec=GARDEN_NARROW, rule="points", value=12, dev=None, us=6912, usx=7104),
+        ]))[1]
+        self.assertEqual([1, 2, 3], [row["step"] for row in rows])
+
+        first, second, third = rows
+        self.assertEqual(386, first["points"])
+        self.assertEqual(6, first["segments"])
+        self.assertEqual(32.0, first["seg_mhz"])
+        self.assertEqual(0, first["settle_us"])
+        self.assertIsNone(first["regulator"])
+        self.assertIsNone(first["gain"], "no word on the line is not `boost`")
+        self.assertEqual(60, first["frames"])
+        self.assertEqual(10, first["lit_frames"], "ten of sixty, as session 3 had it")
+        self.assertEqual(50, first["quiet_frames"])
+        self.assertTrue(first["places"])
+
+        # The two words come from the ack and from nowhere else: no frame carries them.
+        self.assertEqual("ldo", second["regulator"])
+        self.assertEqual("noboost", second["gain"])
+
+        # The time a point cost, with both figures beside it. 1193 us over 386 points is 3.09 us,
+        # against 3.43 for an update of 1.6 ms / RBW and 2.01 for Semtech's 0.94.
+        self.assertAlmostEqual(1193 / 386.0, second["us_per_point_min"], places=6)
+        self.assertAlmostEqual(1207 / 386.0, second["us_per_point_max"], places=6)
+        self.assertAlmostEqual(3.4261, second["point_us_at_1_6"], places=3)
+        self.assertAlmostEqual(2.0128, second["point_us_at_0_94"], places=3)
+
+        # The error word, OR-ed over the scope and said in words when it is not 0000.
+        self.assertEqual(0, first["device_errors"])
+        self.assertEqual("0000, nothing", first["device_errors_said"])
+        self.assertEqual(0x0040, second["device_errors"])
+        self.assertIn("the PLL did not lock", second["device_errors_said"])
+
+        # A `scope` of one segment carries no `dev` at all, and that is the only way to know.
+        self.assertEqual(1, third["segments"])
+        self.assertIsNone(third["device_errors"])
+        self.assertEqual("-", third["device_errors_said"])
+        self.assertAlmostEqual(6912 / 250.0, third["us_per_point_min"], places=6)
+
+    def test_a_capture_made_before_03_is_read_with_the_two_columns_empty(self):
+        """Every line typed before that task is such a capture, and there is a year of them."""
+        rows = read_steps(capture([plan_of(GARDEN_WIDE)], rule="mhz", value=5.596, frames=60))[1]
+        self.assertEqual(1, len(rows))
+        row = rows[0]
+        self.assertIsNone(row["us_min"])
+        self.assertIsNone(row["us_max"])
+        self.assertIsNone(row["us_per_point_min"])
+        self.assertIsNone(row["us_per_point_max"])
+        self.assertIsNone(row["device_errors"])
+        self.assertTrue(row["places"], "and everything else of the row is read as always")
+        out = io.StringIO()
+        echoes.print_steps("(before 03)", read_steps(
+            capture([plan_of(GARDEN_WIDE)], rule="mhz", value=5.596, frames=60))[0], 0, 0,
+            out=out)
+        printed = [line for line in out.getvalue().splitlines() if line.startswith("   1 ")]
+        self.assertEqual(1, len(printed), out.getvalue())
+        self.assertEqual(4, len([word for word in printed[0].split() if word == "-"]),
+                         "the regulator, the gain, the time a point cost and `dev` are all "
+                         "empty in such a capture: %r" % printed[0])
+
+    def test_the_quiet_frame_rule_is_used_with_five_quiet_frames_and_not_with_four(self):
+        for quiet, rule, said in ((4, "floor", "floor"), (5, "quiet", "quiet(5)")):
+            readings, rows, _pairs, _skipped, _bad = read_steps(garden_capture([
+                dict(spec=GARDEN_SIXTY, rule="points", value=12, lit=10, quiet=quiet)]))
+            self.assertEqual(rule, readings[0].rule, "%d quiet frame(s)" % quiet)
+            self.assertEqual(rule, rows[0]["rule"])
+            self.assertEqual(quiet, rows[0]["quiet_frames"])
+            out = io.StringIO()
+            echoes.print_steps("(planted)", readings, 0, 0, out=out)
+            self.assertIn(said, out.getvalue(), "the row must say which rule it used")
+            if rule == "floor":
+                self.assertIn("fewer than %d" % echoes.MIN_QUIET_FRAMES, out.getvalue())
+                for place in rows[0]["places"]:
+                    self.assertIsNone(place["quiet_over_floor_db"])
+            else:
+                for place in rows[0]["places"]:
+                    self.assertIsNotNone(place["quiet_over_floor_db"])
+
+    def test_a_places_height_in_the_quiet_frames_is_printed_beside_it(self):
+        """The 4 to 8 dB /noisescope/3 reads at the same places with no carrier in the frame."""
+        _readings, rows, _pairs, _skipped, _bad = read_steps(garden_capture([
+            dict(spec=GARDEN_SIXTY, rule="points", value=12)]))
+        self.assertTrue(rows[0]["places"])
+        for place in rows[0]["places"]:
+            self.assertGreater(place["quiet_over_floor_db"], QUIET_OVER_DB - 2.0)
+            self.assertLess(place["quiet_over_floor_db"], QUIET_OVER_DB + 4.0)
+
+    def test_a_frame_is_never_longer_than_the_bytes_a_step_is_priced_with(self):
+        """The arithmetic a session's step is sized by, against real lines.
+
+        `scopeFrameBytes()` is a **bound** and a session's budget is worked out from it
+        (tools/noisescope/hunt.py, `step_lines()`). The two frames below are real: printed by
+        phase 3.16's task 03 over the real src/roles/scanner/Lines.cpp and quoted in its report
+        (*What a frame says now*), levels and all. Every `scope` line of every capture kept under
+        tools/noisescope/captures/ is held to the same bound, and the report says so when there is
+        none to hold.
+        """
+        for points, emitted in ((386, 705), (250, 513)):
+            bound = echoes.frame_bytes(points)
+            self.assertGreaterEqual(bound, emitted,
+                                    "%d points: a real line was %d bytes" % (points, emitted))
+        self.assertEqual(762, echoes.frame_bytes(386))
+        self.assertEqual(582, echoes.frame_bytes(250))
+        self.assertEqual(2978, echoes.frame_bytes(2048))
+        # And the port's floor, which is what an interval of 0 becomes on the Walter's UART.
+        self.assertEqual(134, echoes.interval_floor_ms(386, 115200))
+        self.assertEqual(102, echoes.interval_floor_ms(250, 115200))
+
+        directory = os.path.join(os.path.dirname(os.path.abspath(echoes.__file__)), "captures")
+        real = []
+        for root, _dirs, files in os.walk(directory):
+            for name in files:
+                if name.endswith(".ndjson"):
+                    real.append(os.path.join(root, name))
+        for path in real:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for text in handle:
+                    if '"t":"scope"' not in text.replace(" ", ""):
+                        continue
+                    obj = json.loads(text)
+                    self.assertLessEqual(
+                        len(text.rstrip("\r\n")) + 1, echoes.frame_bytes(int(obj["n"])),
+                        "%s: a real frame of %d points is longer than the bound"
+                        % (os.path.basename(path), obj["n"]))
+
+    def test_every_step_of_the_four_garden_lists_is_a_scope_this_firmware_runs(self):
+        """The lines of tasks/phase-3.16/README.md's four lists, read by hunt.py's own reader."""
+        directory = os.path.join(os.path.dirname(os.path.abspath(echoes.__file__)), "lists")
+        for letter in ("a", "b", "c", "d"):
+            path = os.path.join(directory, "garden-%s.txt" % letter)
+            self.assertTrue(os.path.isfile(path), path)
+            sessions = hunt.read_sessions(path)
+            self.assertEqual(1, len(sessions), path)
+            self.assertEqual(6, len(sessions[0].steps), path)
+            for step in sessions[0].steps:
+                request = echoes.parse_scope(step.command)
+                self.assertIsNotNone(request, "%s: %r" % (path, step.command))
+                self.assertIsNotNone(request.plan, "%s: %r" % (path, step.command))
+                self.assertGreater(request.interval_ms, 0,
+                                   "%s: a garden step keeps its own interval" % path)
+
+    def test_the_table_and_the_pairs_from_the_command_line(self):
+        import tempfile
+        lines = garden_capture([
+            dict(spec=GARDEN_WIDE, rule="mhz", value=5.596),
+            dict(spec=GARDEN_WIDE_LOWER, rule="mhz", value=5.596),
+        ])
+        directory = tempfile.mkdtemp(prefix="echoes-steps-")
+        self.addCleanup(_rmtree, directory)
+        path = os.path.join(directory, "noisescope-bellevue-20261125-193000.ndjson")
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("".join(line + "\n" for line in lines))
+
+        out = io.StringIO()
+        self.assertEqual(0, echoes.main(["--steps", path, "--carrier", "869.618"], out=out))
+        text = out.getvalue()
+        self.assertIn("step span MHz", text)
+        self.assertIn("the pairs of this capture", text)
+        self.assertIn(echoes.MOVES, text)
+
+        out = io.StringIO()
+        self.assertEqual(0, echoes.main(["--steps", path, "--carrier", "869.618", "--json"],
+                                        out=out))
+        parsed = json.loads(out.getvalue())
+        self.assertEqual(2, len(parsed["steps"]))
+        self.assertEqual(1, len(parsed["pairs"]))
+        self.assertEqual("first_point", parsed["pairs"][0]["kind"])
+        self.assertEqual(echoes.MOVES, parsed["pairs"][0]["verdict"])
+
+    def test_a_step_that_lost_its_ack_is_said_to_have_lost_it(self):
+        """Two steps of one span are two scopes only because their `ack`s differ.
+
+        A download carries every line the scanner sent, this one included; a file that lost them
+        would read garden-b's first three steps as one scope and say nothing about it, which is
+        the one way `--steps` could be quietly wrong.
+        """
+        lines = [text for text in garden_capture([
+            dict(spec=GARDEN_SIXTY, rule="points", value=12)])
+            if '"t": "ack"' not in text and '"t":"ack"' not in text]
+        readings, rows, _pairs, _skipped, _bad = read_steps(lines)
+        self.assertEqual(1, len(rows))
+        self.assertFalse(rows[0]["has_ack"])
+        out = io.StringIO()
+        echoes.print_steps("(no ack)", readings, 0, 0, out=out)
+        self.assertIn("carries no `ack`", out.getvalue())
+        # And with the acks it says nothing of the kind.
+        rows = read_steps(garden_capture([
+            dict(spec=GARDEN_SIXTY, rule="points", value=12)]))[1]
+        self.assertTrue(rows[0]["has_ack"])
+
+    def test_the_old_table_is_untouched_by_the_new_one(self):
+        """`echoes.py` without `--steps` reads what it always read: no quiet rule, no columns."""
+        lines = garden_capture([dict(spec=GARDEN_SIXTY, rule="points", value=12)])
+        scopes, _skipped, _bad = echoes.read_capture(lines)
+        reading = echoes.ScopeReading(scopes[0], carrier_mhz=869.618)
+        self.assertEqual("floor", reading.rule, "the quiet rule is --steps' and nothing else's")
+        self.assertEqual({}, reading.quiet_floors)
+        self.assertEqual([], reading.quiet_levels)
+        out = io.StringIO()
+        echoes.print_report("(planted)", [reading], 0, 0, out=out)
+        self.assertNotIn("quiet", out.getvalue())
+
+
+class ThePairsSay(unittest.TestCase):
+    """Two scopes of a session that differ in exactly one thing, and what they are allowed to say.
+
+    The pile's whole question is one pair: the same span begun somewhere else. An echo that
+    follows the sweep's segments moves with them; one that follows the signal or the site stays
+    where it is; and there are two shapes of capture that cannot tell the two apart and have to
+    say so rather than guess.
+    """
+
+    def _pairs(self, steps):
+        return read_steps(garden_capture(steps))[2]
+
+    def test_echoes_planted_on_the_segments_move_with_the_segments(self):
+        pairs = self._pairs([dict(spec=GARDEN_WIDE, rule="mhz", value=5.596),
+                             dict(spec=GARDEN_WIDE_LOWER, rule="mhz", value=5.596)])
+        self.assertEqual(1, len(pairs))
+        pair = pairs[0]
+        self.assertEqual("first_point", pair["kind"])
+        self.assertEqual(echoes.MOVES, pair["verdict"], pair["why"])
+        self.assertEqual(0, pair["counted"]["frequency"])
+        self.assertGreater(pair["counted"]["distance"], 2)
+        self.assertAlmostEqual(-7.0, pair["shift_mhz"], places=3)
+
+    def test_echoes_planted_on_the_frequency_stay_with_the_frequency(self):
+        pairs = self._pairs([dict(spec=GARDEN_WIDE, places_mhz=GARDEN_PLACES_MHZ),
+                             dict(spec=GARDEN_WIDE_LOWER, places_mhz=GARDEN_PLACES_MHZ)])
+        self.assertEqual(1, len(pairs))
+        pair = pairs[0]
+        self.assertEqual(echoes.STAYS, pair["verdict"], pair["why"])
+        self.assertEqual(0, pair["counted"]["distance"])
+        self.assertGreater(pair["counted"]["frequency"], 2)
+
+    def test_a_span_begun_one_whole_interval_lower_cannot_say_and_says_why(self):
+        """Both readings then predict the same places, whichever one is true."""
+        pairs = self._pairs([dict(spec=GARDEN_WIDE, rule="mhz", value=5.596),
+                             dict(spec=GARDEN_WIDE_ONE_INTERVAL, rule="mhz", value=5.596)])
+        self.assertEqual(1, len(pairs))
+        pair = pairs[0]
+        self.assertEqual(echoes.CANNOT, pair["verdict"])
+        self.assertIn("both readings predict the same places", pair["why"])
+        self.assertIn("1 x the", pair["why"])
+
+    def test_fewer_than_three_echoes_cannot_say_and_says_which(self):
+        pairs = self._pairs([dict(spec=GARDEN_WIDE, places_mhz=(820.0, 900.0)),
+                             dict(spec=GARDEN_WIDE_LOWER, places_mhz=(820.0, 900.0))])
+        self.assertEqual(1, len(pairs))
+        pair = pairs[0]
+        self.assertEqual(echoes.CANNOT, pair["verdict"])
+        self.assertIn("fewer than %d echoes" % echoes.MIN_ECHOES_FOR_A_VERDICT, pair["why"])
+        self.assertIn("step 2 (2)", pair["why"], "it names which scope was too thin, and how thin")
+
+    def test_the_regulator_the_gain_the_width_and_the_settle_are_each_one_pair(self):
+        """One line each and no verdict beyond the counts: what a word means is not read here."""
+        steps = [
+            dict(spec=GARDEN_SIXTY, rule="points", value=12),
+            dict(spec=GARDEN_SIXTY, rule="points", value=12, reg="ldo"),
+            dict(spec=GARDEN_SIXTY, rule="points", value=12, gain="noboost"),
+        ]
+        pairs = self._pairs(steps)
+        kinds = sorted(pair["kind"] for pair in pairs)
+        self.assertEqual(["gain", "regulator"], kinds,
+                         "steps 2 and 3 differ in two things and are no pair")
+        for pair in pairs:
+            self.assertNotIn("verdict", pair, "a word is not given a verdict here")
+            self.assertEqual([], pair["only_first"])
+            self.assertEqual([], pair["only_second"])
+            self.assertEqual(10, len(pair["both"]))
+            self.assertAlmostEqual(0.0, pair["median_difference_db"], places=6)
+
+        # A width and a settle come from the ack, which is the only place they are written.
+        plan = echoes.plan_scope(840.0, 900.0, rbw_khz=467.0, seg_mhz=11.0)
+        self.assertIsNotNone(plan)
+        wide = dict(f0=840.0, f1=900.0, points=0, rbw_khz=467.0)
+        # Six points a block here and not twelve: a segment of 11 MHz holds 22 points and three
+        # blocks is the fewest that say an interval (`plant()`).
+        pairs = read_steps(garden_capture([
+            dict(spec=wide, rule="points", value=6),
+            dict(spec=dict(wide, seg_mhz=11.0), rule="points", value=6),
+            dict(spec=dict(wide, settle_us=500), rule="points", value=6),
+        ]))[2]
+        kinds = sorted(pair["kind"] for pair in pairs)
+        self.assertEqual(["settle", "width"], kinds)
+        for pair in pairs:
+            if pair["kind"] == "width":
+                self.assertEqual("32.0 MHz -> 11.0 MHz", pair["differ"])
+            else:
+                self.assertEqual("0 us -> 500 us", pair["differ"])
+
+    def test_a_pair_that_differs_in_two_things_is_no_pair_at_all(self):
+        pairs = self._pairs([dict(spec=GARDEN_WIDE, rule="mhz", value=5.596),
+                             dict(spec=GARDEN_WIDE_LOWER, rule="mhz", value=5.596, reg="ldo")])
+        self.assertEqual([], pairs)
+
+    def test_a_capture_with_no_pair_in_it_says_so(self):
+        readings = read_steps(garden_capture([
+            dict(spec=GARDEN_WIDE, rule="mhz", value=5.596)]))[0]
+        out = io.StringIO()
+        echoes.print_steps("(one scope)", readings, 0, 0, out=out)
+        self.assertIn("no two scopes of this capture differ in exactly one thing",
+                      out.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

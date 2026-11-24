@@ -1,0 +1,36 @@
+# Session C - a segment's width
+#
+#   python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-c.txt
+#
+# A NoiseScope session's program for the unit at Bellevue (tasks/phase-3.16/README.md, *The garden
+# instead of the bench*). **It needs a release carrying phase 3.16's task 02** - `scope`'s sixth
+# number, the widest a segment may be - and task 03 for `us` and `dev` to be in the frames.
+#
+# 60 MHz around the signal, which is where the strongest echo of 23 November was (887.1 MHz, 47 to
+# 55 dB over the floor), asked four ways: as it is asked today, and then in segments of 11, 5.6 and
+# 4 MHz. If the blocks *after* a segment's first point go as the segments narrow, they are the
+# synthesizer's and the width is the mend; if they only move with the new segment starts, they are
+# the instrument in a different place and nothing is gained. 5.6 MHz because that is the interval
+# they were read to repeat at.
+#
+# The two narrow steps are the same question at an eighth of the bandwidth: a span that is one
+# segment today, and the same span cut into three.
+#
+# 85 seconds a step: the wide steps bring 85 frames of 418 bytes and the narrow ones 85 of 582,
+# both well inside the 65 536 bytes the Walter keeps of a step.
+#
+# a segment's width, 60 MHz around the signal
+--- garden-c
+seconds = 85
+# as it is asked today: 60 MHz at 467 kHz, two segments, the reference
+today = scope 840 900 0 467 1000
+# the same 60 MHz in segments of 11 MHz
+seg-11 = scope 840 900 0 467 1000 max 11
+# and of 5.6 MHz, the interval the blocks of 23 November were read to repeat at
+seg-5.6 = scope 840 900 0 467 1000 max 5.6
+# and of 4 MHz, narrower than the interval
+seg-4 = scope 840 900 0 467 1000 max 4
+# 13 MHz at 58.6 kHz around the signal, one segment as it is asked today
+narrow = scope 863 876 250 58.6 1000
+# and the same 13 MHz in segments of 5.6 MHz, which is three of them
+narrow-5.6 = scope 863 876 250 58.6 1000 max 5.6

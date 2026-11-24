@@ -1,6 +1,6 @@
 """tools/noisescope/hunt.py against tools/bench/fakes.py's scanner - no board, and none needed.
 
-Run where tools/bench's own tests are (tools/release/selfcheck.py). Two kinds of thing:
+Run where tools/bench's own tests are (tools/release/selfcheck.py). Three kinds of thing:
 
   * **the rails**: no `bench.local.json` or no port with its serial number is exit 3 and *no
     bench*, a board in its bootloader is refused, a board another process holds is exit 4, and
@@ -8,6 +8,11 @@ Run where tools/bench's own tests are (tools/release/selfcheck.py). Two kinds of
   * **the run**: the list sent line for line on one open port, a capture per `scope` under
     `out/bench/echoes/<label>/`, `run.json` beside them, and tools/noisescope/echoes.py's answer
     for each - including the verdict over a capture whose scopes were planted with one rule.
+
+  * **the garden** (phase 3.16's task 04): a list as the session programs meshmaster.dk and the
+    Walter would take, every rule of theirs broken once and named in the refusal, the four lists
+    of `tools/noisescope/lists/` taken as they are written, and a bench that explodes on being
+    looked at - because `--sessions` must ask tools/bench for nothing at all.
 
 The fake scanner is given the one thing it did not have: frames that belong to the span that was
 asked for. It takes them from a hook (`scope_frames_for`), and the arithmetic behind the hook is
@@ -349,6 +354,251 @@ class TheRun(HuntCase):
                 handle.write("%s = %s\n" % (name, line))
         return path
 
+# ------------------------------------------- the garden: a list as session programs, and no board
+
+# A `scope` that costs a session almost nothing: sixteen points and a whole minute between
+# frames, so a step of it brings two lines. It is here so that a test of one rule breaks that one
+# rule and no other.
+CHEAP = "scope 869 870.2 16 4.8 60000"
+# And the longest line a session takes: forty characters exactly, every number and both of phase
+# 3.16's task 02's.
+FORTY = "scope 869 870.2 16 4.8 60000 max 5.6 500"
+
+
+class NoBenchIsAsked(object):
+    """A bench that cannot be used at all: every attribute of it is an error.
+
+    `--sessions` must open no port and ask tools/bench for nothing (the task's deliverable 1), and
+    the strongest way to say that in a test is to hand the tool a bench that explodes on being
+    looked at.
+    """
+
+    def __getattr__(self, name):
+        raise AssertionError("--sessions asked the bench for %r" % name)
+
+
+class TheSessions(HuntCase):
+    """`hunt.py --sessions`: a list as the programs meshmaster.dk and the Walter would take."""
+
+    def _list(self, text, name="list.txt"):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+        return path
+
+    def _sessions(self, text, argv=()):
+        path = self._list(text)
+        out = io.StringIO()
+        code = hunt.main(["--sessions", path] + list(argv), bench=NoBenchIsAsked(), out=out)
+        return code, out.getvalue()
+
+    def _garden(self, letter):
+        return os.path.join(os.path.dirname(os.path.abspath(hunt.__file__)), "lists",
+                            "garden-%s.txt" % letter)
+
+    # ---- the rails
+
+    def test_sessions_opens_no_port_and_asks_the_bench_for_nothing(self):
+        before = "serial" in sys.modules
+        code, text = self._sessions("one = %s\n" % CHEAP)
+        self.assertEqual(cfg.EXIT_OK, code, text)
+        if not before:
+            self.assertNotIn("serial", sys.modules,
+                             "--sessions must not reach anything that opens a port")
+
+    def test_the_four_garden_lists_would_be_taken(self):
+        """The lists of tasks/phase-3.16/README.md's *The garden instead of the bench*."""
+        for letter in ("a", "b", "c", "d"):
+            out = io.StringIO()
+            code = hunt.main(["--sessions", self._garden(letter)], bench=NoBenchIsAsked(),
+                             out=out)
+            text = out.getvalue()
+            self.assertEqual(cfg.EXIT_OK, code, "garden-%s: %s" % (letter, text))
+            self.assertIn("every session of this list would be taken", text)
+            self.assertNotIn("REFUSED", text)
+            sessions = hunt.read_sessions(self._garden(letter))
+            self.assertEqual(1, len(sessions))
+            self.assertEqual(6, len(sessions[0].steps), "six steps, which is a program's most")
+            program = sessions[0].program().encode("utf-8")
+            self.assertLessEqual(len(program), hunt.SESSION_PROGRAM_BYTES_MAX)
+            for step in sessions[0].steps:
+                self.assertLessEqual(len(step.command), hunt.SESSION_COMMAND_MAX)
+                self.assertEqual(85, step.seconds, "85 seconds a step, sized from a 762-byte frame")
+
+    def test_the_list_with_nothing_to_spare_is_384_of_384(self):
+        """garden-d is the one that cannot grow by a character (the pile's FOLLOWUPS)."""
+        session = hunt.read_sessions(self._garden("d"))[0]
+        self.assertEqual(hunt.SESSION_PROGRAM_BYTES_MAX,
+                         len(session.program().encode("utf-8")))
+
+    def test_the_lines_are_not_rewritten_to_a_frame_a_sweep(self):
+        """A bench list is forced to interval 0 and `last`; a garden step keeps its own."""
+        for letter in ("a", "b", "c", "d"):
+            for step in hunt.read_sessions(self._garden(letter))[0].steps:
+                self.assertEqual(1000, step.request.interval_ms, step.command)
+                self.assertEqual("max", step.request.agg, step.command)
+
+    # ---- every rule of *what a session takes*, broken once
+
+    def test_a_character_a_session_cannot_carry_is_refused_and_named(self):
+        code, text = self._sessions("comma = scope 863 876 250 58,6 1000\n")
+        self.assertEqual(cfg.EXIT_REFUSED, code, text)
+        self.assertIn("it carries ','", text)
+        self.assertIn("`a-z`, `0-9`, space and the full stop only", text)
+
+    def test_a_command_of_more_than_forty_characters_is_refused(self):
+        long_one = "scope 779.618 959.618 2048 467 1000 max 5.6"
+        self.assertEqual(43, len(long_one))
+        code, text = self._sessions("long = %s\n" % long_one)
+        self.assertEqual(cfg.EXIT_REFUSED, code, text)
+        self.assertIn("43 characters, and a step's command is at most 40", text)
+
+    def test_a_first_word_that_is_not_a_scanner_command_is_refused(self):
+        """`boost off` is a line a bench list has in the middle of it and a session cannot."""
+        code, text = self._sessions("boost-off = boost off\n")
+        self.assertEqual(cfg.EXIT_REFUSED, code, text)
+        self.assertIn("its first word is 'boost'", text)
+        self.assertIn("stat sweep scope hist dwell cad", text)
+
+    def test_a_seventh_step_is_refused(self):
+        text = "".join("s%d = %s\n" % (number, CHEAP) for number in range(7))
+        code, said = self._sessions(text)
+        self.assertEqual(cfg.EXIT_REFUSED, code, said)
+        self.assertIn("7 step(s), and a program is 1 to 6", said)
+
+    def test_a_list_with_no_step_in_it_is_refused(self):
+        code, text = self._sessions("# nothing but a comment\n\n")
+        self.assertEqual(cfg.EXIT_REFUSED, code, text)
+        self.assertIn("no step in it", text)
+
+    def test_seconds_outside_five_to_three_hundred_are_refused(self):
+        for seconds in (2, 400):
+            code, text = self._sessions("seconds = %d\none = %s\n" % (seconds, CHEAP))
+            self.assertEqual(cfg.EXIT_REFUSED, code, text)
+            self.assertIn("%d seconds, and a step lasts 5 to 300" % seconds, text)
+
+    def test_a_program_of_more_than_six_hundred_seconds_is_refused(self):
+        text = "seconds = 150\n" + "".join("s%d = %s\n" % (n, CHEAP) for n in range(5))
+        code, said = self._sessions(text)
+        self.assertEqual(cfg.EXIT_REFUSED, code, said)
+        self.assertIn("750 seconds over 5 step(s), and a program lasts 600 at most", said)
+
+    def test_a_program_of_more_than_384_bytes_is_refused(self):
+        self.assertEqual(hunt.SESSION_COMMAND_MAX, len(FORTY))
+        text = "".join("s%d = %s\n" % (number, FORTY) for number in range(6))
+        code, said = self._sessions(text)
+        self.assertEqual(cfg.EXIT_REFUSED, code, said)
+        self.assertIn("428 bytes as it goes out, and a program is at most 384", said)
+
+    def test_a_step_whose_frames_would_not_fit_the_walters_bytes_is_refused(self):
+        """The README's own 90 seconds of the wide span, which is why the lists say 85."""
+        code, text = self._sessions("seconds = 90\nwide = scope 780 960 0 467 1000\n")
+        self.assertEqual(cfg.EXIT_REFUSED, code, text)
+        self.assertIn("90 frame(s) of 762 bytes is 68580, and the Walter keeps 65536 bytes of "
+                      "lines a step", text)
+        # And the same line at 85 seconds is 64 770 and is taken.
+        code, text = self._sessions("seconds = 85\nwide = scope 780 960 0 467 1000\n")
+        self.assertEqual(cfg.EXIT_OK, code, text)
+        self.assertIn("64770 of 65536", text)
+
+    def test_the_servers_two_numbers_cannot_be_reached_before_the_walters(self):
+        """So no list can break them, and that is why no test breaks them.
+
+        The server keeps 512 kB and 4 000 lines of a session, and the Walter keeps 65 536 bytes of
+        a step: six steps of the Walter's most is a third of a megabyte, and six steps of as many
+        of the shortest frames as 65 536 bytes hold is 1 452 lines. Both are checked by
+        `refusals_of()` all the same - if a Walter one day keeps more of a step, this test is what
+        fails first and says why the two checks are there.
+        """
+        self.assertLess(hunt.SESSION_STEPS_MAX * hunt.WALTER_STEP_BYTES,
+                        hunt.SESSION_SERVER_BYTES)
+        shortest = echoes.frame_bytes(echoes.MIN_POINTS)
+        self.assertEqual(270, shortest, "sixteen points is the fewest a `scope` has")
+        self.assertLess(hunt.SESSION_STEPS_MAX * (hunt.WALTER_STEP_BYTES // shortest),
+                        hunt.SESSION_SERVER_LINES)
+
+    def test_a_step_that_asks_for_a_frame_per_sweep_is_refused_by_the_same_rule(self):
+        """`interval 0` is what a bench list types; the Walter's UART would cut such a step off."""
+        code, text = self._sessions("wide = scope 780 960 0 467 0\n")
+        self.assertEqual(cfg.EXIT_REFUSED, code, text)
+        self.assertIn("the Walter keeps 65536 bytes", text)
+
+    # ---- the list, and what is printed
+
+    def test_a_list_of_two_sessions_is_two_programs_and_the_seconds_line_sets_the_steps(self):
+        code, text = self._sessions(
+            "# the first\n"
+            "--- one\n"
+            "seconds = 20\n"
+            "a = %s\n"
+            "# the second\n"
+            "--- two\n"
+            "seconds = 30\n"
+            "b = %s\n" % (CHEAP, CHEAP))
+        self.assertEqual(cfg.EXIT_OK, code, text)
+        self.assertIn("20 %s" % CHEAP, text)
+        self.assertIn("30 %s" % CHEAP, text)
+        sessions = hunt.read_sessions(self._list(
+            "--- one\nseconds = 20\na = %s\n--- two\nseconds = 30\nb = %s\n"
+            % (CHEAP, CHEAP), name="two.txt"))
+        self.assertEqual(["one", "two"], [one.name for one in sessions])
+        self.assertEqual([20], [step.seconds for step in sessions[0].steps])
+        self.assertEqual([30], [step.seconds for step in sessions[1].steps])
+
+    def test_a_list_with_no_session_mark_is_one_session_named_after_the_file(self):
+        sessions = hunt.read_sessions(self._list("a = %s\n" % CHEAP, name="unmarked.txt"))
+        self.assertEqual(["unmarked"], [one.name for one in sessions])
+
+    def test_eighty_five_seconds_a_step_when_the_list_does_not_say(self):
+        sessions = hunt.read_sessions(self._list("a = %s\n" % CHEAP, name="default.txt"))
+        self.assertEqual(hunt.SESSION_SECONDS_DEFAULT, sessions[0].steps[0].seconds)
+
+    def test_what_is_printed_is_what_the_form_takes_and_what_it_costs(self):
+        out = io.StringIO()
+        code = hunt.main(["--sessions", self._garden("b")], bench=NoBenchIsAsked(), out=out)
+        text = out.getvalue()
+        self.assertEqual(cfg.EXIT_OK, code, text)
+        # The lines to paste, the seconds and the command, as meshmaster.dk's form takes them.
+        self.assertIn("85 scope 780 960 0 467 1000 ldo", text)
+        # The program as it goes out, byte for byte, and the bytes it is.
+        self.assertIn('{"slot":0,"steps":[{"command":"scope 780 960 0 467 1000","seconds":85}',
+                      text)
+        self.assertIn("358 of 384 bytes as it goes out", text)
+        # What each step is expected to bring, and how long Bellevue is off the mesh.
+        self.assertIn("64770 of 65536", text)
+        self.assertIn("Bellevue off the mesh: about 27 minutes", text)
+
+    def test_the_same_as_json(self):
+        out = io.StringIO()
+        code = hunt.main(["--sessions", self._garden("c"), "--json"], bench=NoBenchIsAsked(),
+                         out=out)
+        self.assertEqual(cfg.EXIT_OK, code, out.getvalue())
+        parsed = json.loads(out.getvalue())
+        self.assertTrue(parsed["taken"])
+        self.assertEqual(1, len(parsed["sessions"]))
+        session = parsed["sessions"][0]
+        self.assertEqual("garden-c", session["name"])
+        self.assertEqual(6, len(session["steps"]))
+        self.assertEqual(510, session["seconds"])
+        self.assertEqual([], session["refusals"])
+        self.assertEqual(1590, session["off_mesh_seconds"])
+        first = session["steps"][0]
+        self.assertEqual(129, first["points"])
+        self.assertEqual(2, first["segments"])
+        self.assertEqual(85, first["frames"])
+        self.assertEqual(418, first["frame_bytes"])
+        self.assertEqual(85 * 418, first["bytes_back"])
+        self.assertEqual("85 scope 840 900 0 467 1000", first["typed"])
+
+    def test_a_refused_list_as_json_is_exit_2_and_names_the_rule(self):
+        path = self._list("seconds = 90\nwide = scope 780 960 0 467 1000\n")
+        out = io.StringIO()
+        code = hunt.main(["--sessions", path, "--json"], bench=NoBenchIsAsked(), out=out)
+        self.assertEqual(cfg.EXIT_REFUSED, code)
+        parsed = json.loads(out.getvalue())
+        self.assertFalse(parsed["taken"])
+        self.assertEqual(1, len(parsed["sessions"][0]["refusals"]))
+        self.assertIn("65536", parsed["sessions"][0]["refusals"][0])
 
 if __name__ == "__main__":
     unittest.main()

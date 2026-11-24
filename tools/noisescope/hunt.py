@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""The echoes, asked of the board: a list of `scope` lines run, captured and read.
+"""The echoes, asked of the board - or of the unit, as a NoiseScope session's program.
 
     python tools/noisescope/hunt.py --label bellevue-carrier --carrier 869.618
     python tools/noisescope/hunt.py --label weaker --seconds 20
     python tools/noisescope/hunt.py --list my-lines.txt --label mine
+    python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-b.txt
+
+**`--sessions` touches nothing.** The echoes have only ever been seen on the unit at Bellevue, so
+the rest of the hunt is made there and not on a bench (tasks/phase-3.16/README.md, *The garden
+instead of the bench*). A session is not a serial port: its program is at most six typed steps of
+at most forty characters, it goes out over LTE and it comes back as a file of lines an hour later.
+`--sessions` turns a list into those programs and **checks every rule the two repositories that
+take them have** before anybody types one: exit 0 when every session of the list would be taken,
+2 when one would not, and no port is opened and nothing of tools/bench is asked for anything on
+the way. `tools/noisescope/echoes.py --steps` is what reads the download afterwards.
 
 What it does, in order, for each line of its list: send it on the scanner's console, keep
 everything the board says for `--seconds` on the **same open port**, write that to
@@ -35,6 +45,7 @@ Exit codes are tools/bench's: 0 done, 1 the board did not answer as asked, 2 ref
 
 import argparse
 import json
+import math
 import os
 import sys
 
@@ -102,6 +113,332 @@ DEFAULT_LIST = [
      "boost on",
      "and boosted gain back on, which is how the scanner is left"),
 ]
+
+
+# ------------------------------------------------------------- what a NoiseScope session takes
+#
+# Read on 24 November 2026; **these are other repositories' numbers** and not choices of this
+# tool's, which is why they are here, once, with their sources beside them:
+#
+#   * a program is 1 to 6 steps; a step lasts 5 to 300 seconds, and all of them 600 at most;
+#   * a step's command is 1 to 40 characters of `a-z`, `0-9`, space and the full stop, and its
+#     first word is one of `stat sweep scope hist dwell cad`;
+#   * the program as it goes out is at most 384 bytes of
+#     `{"slot":0,"steps":[{"command":"...","seconds":N},...]}`;
+#   * the Walter keeps 65 536 bytes of lines a step and ends a step that fills it `full`; the
+#     server keeps 512 kB and 4 000 lines a session. Both are checked, from the frames a step's
+#     seconds and interval would bring and the bytes the firmware's own `scopeFrameBytes()` says
+#     a frame of that many points is.
+#
+# meshmaster.dk `src/MeshMaster.Contracts/NoiseScope.cs`, `NoiseScopeProgram`; the Walter's
+# `components/core/include/core/update/scanner_session.h`: `kStepsMax` 6, `kCommandMax` 40.
+# Neither repository is this task's to read or to change (tasks/RUNBOOK.md: they are read-only
+# here), so a number of theirs that moves moves in this block and nowhere else.
+SESSION_STEPS_MIN = 1
+SESSION_STEPS_MAX = 6
+SESSION_SECONDS_MIN = 5
+SESSION_SECONDS_MAX = 300
+SESSION_TOTAL_SECONDS_MAX = 600
+SESSION_COMMAND_MAX = 40
+SESSION_COMMAND_WORDS = ("stat", "sweep", "scope", "hist", "dwell", "cad")
+SESSION_COMMAND_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789 ."
+SESSION_PROGRAM_BYTES_MAX = 384
+SESSION_SLOT = 0
+WALTER_STEP_BYTES = 65536
+
+# And what the server keeps of a whole session. Counted here over the `scope` frames alone,
+# because they are the only lines this tool can size: a session's `ack`s and its `stat` heartbeat
+# are a few kilobytes more over six steps, which is inside the margin every list of
+# tools/noisescope/lists/ has (the widest comes to a third of the bytes).
+#
+# **Neither of these two can be reached before the Walter's**: six steps of 65 536 bytes is
+# 393 216, and six steps of as many of the shortest frames as 65 536 bytes hold is 1 452 lines.
+# They are checked all the same, because a number of another repository's that moves should move
+# here and not be left out as unreachable - and `test_hunt.py` holds the implication itself, so a
+# Walter that one day keeps more of a step cannot quietly start overrunning the server.
+SESSION_SERVER_BYTES = 512 * 1024
+SESSION_SERVER_LINES = 4000
+
+# The port a session's lines come out on: the scanner's management UART, 115200 baud, where a
+# `scope` frame's interval has a floor and the interval the line asked for is not always the one
+# it gets (`scopeIntervalFloorMs()`, docs/noisescope.md section 5).
+WALTER_BAUD = 115200
+
+# 85 seconds a step when a list does not say (tasks/phase-3.16/README.md, *The garden instead of
+# the bench*).
+SESSION_SECONDS_DEFAULT = 85
+
+# What a session costs Bellevue besides its steps: two flashes and the proof. The README's figure
+# is about 27 minutes for a program of nine minutes of steps, so the rest of it is this.
+SESSION_OFF_MESH_OVERHEAD_S = 18 * 60
+
+# The line of a list that begins a new session, and the one that sets the seconds after it.
+SESSION_MARK = "---"
+SESSION_SECONDS_KEY = "seconds"
+
+
+class Step(object):
+    """One typed step of a session's program: the seconds and the command, as the form takes them."""
+
+    def __init__(self, name, command, seconds, about=""):
+        self.name = name
+        self.command = command
+        self.seconds = seconds
+        self.about = about
+        self.request = echoes.parse_scope(command)
+
+    @property
+    def typed(self):
+        """The one line meshmaster.dk's form takes: the seconds, then the command."""
+        return "%d %s" % (self.seconds, self.command)
+
+    def as_step(self):
+        return {"command": self.command, "seconds": self.seconds}
+
+
+class Session(object):
+    """One program: a name, what it asks, and up to six steps."""
+
+    def __init__(self, name, about=""):
+        self.name = name
+        self.about = about
+        self.steps = []
+
+    @property
+    def seconds(self):
+        return sum(step.seconds for step in self.steps)
+
+    def program(self):
+        """The bytes as they go out, built from the same JSON the contract names."""
+        return json.dumps({"slot": SESSION_SLOT,
+                           "steps": [step.as_step() for step in self.steps]},
+                          separators=(",", ":"))
+
+    def off_mesh_seconds(self):
+        return SESSION_OFF_MESH_OVERHEAD_S + self.seconds
+
+
+def step_lines(step):
+    """How many lines a step brings back and how many bytes they are: (frames, each, total).
+
+    (None, None, None) for a step this tool cannot size - anything but a `scope`, and a `scope`
+    whose numbers the firmware refuses. For a `scope`: the frames come from **the seconds and the
+    interval**, where the interval is the one the line asked for or the port's floor, whichever is
+    longer, because that is the one the `ack` says it took; and a frame's bytes come from the
+    plan's points, by the firmware's own `scopeFrameBytes()` - 762 at 386 points and 582 at 250
+    since phase 3.16's task 03 put `us`, `usx` and `dev` on the line (its report, *What a frame
+    says now*). That length is the **most** a frame can be, newline included, which is the side to
+    be wrong on: a step over the Walter's 65 536 bytes is cut off `full` and a session that is cut
+    off costs Bellevue the whole half hour again.
+    """
+    request = step.request
+    if request is None or request.plan is None:
+        return (None, None, None)
+    plan = request.plan
+    interval_ms = max(request.interval_ms, echoes.interval_floor_ms(plan.points, WALTER_BAUD))
+    if interval_ms <= 0:
+        return (None, None, None)
+    each = echoes.frame_bytes(plan.points)
+    # Frames at 0, one interval, two intervals... inside the step's own seconds.
+    frames = int(math.ceil(step.seconds * 1000.0 / interval_ms))
+    return (frames, each, frames * each)
+
+
+def read_sessions(path):
+    """A list as sessions. `hunt.py`'s own format with two more lines in it.
+
+    `name = <the line>` is a step and `#` a comment, as `read_list()` reads them. A line
+    `--- <name>` begins a new session, and `seconds = N` sets the seconds of the steps after it
+    (SESSION_SECONDS_DEFAULT when it is never said). Steps before the first `---` belong to a
+    session named after the file. **The one comment line directly over a step says what that step
+    asks** and is printed beside it, and the one over a `---` says what the session asks; a step
+    with a comment of two lines gets the second of them, so the lists keep theirs to one.
+
+    A garden step keeps **its own interval and aggregate**: the lines are not rewritten to
+    interval 0 and `last` the way `--list` asks for them on a bench, because the signal that
+    lights the echoes is a neighbour's traffic rather than a generator, so a frame is the strongest
+    reading of a second and not of one sweep.
+    """
+    sessions = []
+    current = None
+    seconds = SESSION_SECONDS_DEFAULT
+    about = ""
+    with open(path, "r", encoding="utf-8") as handle:
+        for number, text in enumerate(handle, 1):
+            text = text.strip()
+            if text.startswith("#"):
+                about = text.lstrip("#").strip()
+                continue
+            if not text:
+                continue
+            if text.startswith(SESSION_MARK):
+                current = Session(text[len(SESSION_MARK):].strip() or "session-%d" % number,
+                                  about=about)
+                sessions.append(current)
+                about = ""
+                continue
+            if "=" in text:
+                name, line = text.split("=", 1)
+                name, line = name.strip(), line.strip()
+            else:
+                name, line = "step-%02d" % number, text
+            if name == SESSION_SECONDS_KEY:
+                seconds = int(line)
+                continue
+            if not line:
+                continue
+            if current is None:
+                current = Session(os.path.splitext(os.path.basename(path))[0], about=about)
+                sessions.append(current)
+            current.steps.append(Step(name, line, seconds, about=about))
+            about = ""
+    if not sessions:
+        raise cfg.Refused("%s has no step in it" % path)
+    return sessions
+
+
+def refusals_of(session):
+    """Every rule of *what a session takes* this session breaks, each naming its own number."""
+    out = []
+    if not SESSION_STEPS_MIN <= len(session.steps) <= SESSION_STEPS_MAX:
+        out.append("%s: %d step(s), and a program is %d to %d"
+                   % (session.name, len(session.steps), SESSION_STEPS_MIN, SESSION_STEPS_MAX))
+    for number, step in enumerate(session.steps, 1):
+        where = "%s, step %d (%r)" % (session.name, number, step.command)
+        for char in step.command:
+            if char not in SESSION_COMMAND_CHARS:
+                out.append("%s: it carries %r, and a step's command is `a-z`, `0-9`, space and "
+                           "the full stop only" % (where, char))
+                break
+        if not step.command:
+            out.append("%s: no command at all, and a step's command is 1 to %d characters"
+                       % (where, SESSION_COMMAND_MAX))
+        elif len(step.command) > SESSION_COMMAND_MAX:
+            out.append("%s: %d characters, and a step's command is at most %d"
+                       % (where, len(step.command), SESSION_COMMAND_MAX))
+        first = step.command.split()[0] if step.command.split() else ""
+        if first not in SESSION_COMMAND_WORDS:
+            out.append("%s: its first word is %r, and a step's command begins with one of %s"
+                       % (where, first, " ".join(SESSION_COMMAND_WORDS)))
+        if not SESSION_SECONDS_MIN <= step.seconds <= SESSION_SECONDS_MAX:
+            out.append("%s: %d seconds, and a step lasts %d to %d"
+                       % (where, step.seconds, SESSION_SECONDS_MIN, SESSION_SECONDS_MAX))
+        frames, each, total = step_lines(step)
+        if total is not None and total > WALTER_STEP_BYTES:
+            out.append("%s: %d frame(s) of %d bytes is %d, and the Walter keeps %d bytes of "
+                       "lines a step (a step that fills it ends `full`)"
+                       % (where, frames, each, total, WALTER_STEP_BYTES))
+    frames = [step_lines(step) for step in session.steps]
+    lines = sum(one[0] for one in frames if one[0] is not None)
+    back = sum(one[2] for one in frames if one[2] is not None)
+    if back > SESSION_SERVER_BYTES:
+        out.append("%s: %d bytes of frames over %d step(s), and the server keeps %d a session"
+                   % (session.name, back, len(session.steps), SESSION_SERVER_BYTES))
+    if lines > SESSION_SERVER_LINES:
+        out.append("%s: %d frames over %d step(s), and the server keeps %d lines a session"
+                   % (session.name, lines, len(session.steps), SESSION_SERVER_LINES))
+    if session.seconds > SESSION_TOTAL_SECONDS_MAX:
+        out.append("%s: %d seconds over %d step(s), and a program lasts %d at most"
+                   % (session.name, session.seconds, len(session.steps),
+                      SESSION_TOTAL_SECONDS_MAX))
+    program = session.program()
+    if len(program.encode("utf-8")) > SESSION_PROGRAM_BYTES_MAX:
+        out.append("%s: %d bytes as it goes out, and a program is at most %d"
+                   % (session.name, len(program.encode("utf-8")), SESSION_PROGRAM_BYTES_MAX))
+    return out
+
+
+def session_as_dict(session):
+    program = session.program()
+    out = {
+        "name": session.name,
+        "about": session.about,
+        "steps": [],
+        "seconds": session.seconds,
+        "program": program,
+        "program_bytes": len(program.encode("utf-8")),
+        "program_bytes_max": SESSION_PROGRAM_BYTES_MAX,
+        "off_mesh_seconds": session.off_mesh_seconds(),
+        "frames": sum(one[0] for one in (step_lines(step) for step in session.steps)
+                      if one[0] is not None),
+        "bytes_back": sum(one[2] for one in (step_lines(step) for step in session.steps)
+                          if one[2] is not None),
+        "bytes_back_max": SESSION_SERVER_BYTES,
+        "frames_max": SESSION_SERVER_LINES,
+        "paste": [step.typed for step in session.steps],
+        "refusals": refusals_of(session),
+    }
+    for number, step in enumerate(session.steps, 1):
+        frames, each, total = step_lines(step)
+        plan = None if step.request is None else step.request.plan
+        out["steps"].append({
+            "step": number,
+            "name": step.name,
+            "command": step.command,
+            "seconds": step.seconds,
+            "typed": step.typed,
+            "about": step.about,
+            "points": None if plan is None else plan.points,
+            "segments": None if plan is None else plan.segments,
+            "interval_ms": None if step.request is None else step.request.interval_ms,
+            "frames": frames,
+            "frame_bytes": each,
+            "bytes_back": total,
+            "bytes_back_max": WALTER_STEP_BYTES,
+        })
+    out["taken"] = not out["refusals"]
+    return out
+
+
+def print_sessions(path, sessions, out=sys.stdout, as_json=False):
+    """Every session of a list, as the form takes it - or the rule it breaks. 0 or EXIT_REFUSED."""
+    rows = [session_as_dict(session) for session in sessions]
+    if as_json:
+        out.write(json.dumps({"list": path, "sessions": rows,
+                              "taken": all(row["taken"] for row in rows)},
+                             indent=2, sort_keys=True) + "\n")
+        return cfg.EXIT_OK if all(row["taken"] for row in rows) else cfg.EXIT_REFUSED
+
+    out.write("%s: %d session(s)\n" % (path, len(rows)))
+    for row in rows:
+        out.write("\n%s%s\n" % (row["name"], " - " + row["about"] if row["about"] else ""))
+        out.write("  paste into the form (%d step(s), %d s, %d of %d bytes as it goes out):\n\n"
+                  % (len(row["steps"]), row["seconds"], row["program_bytes"],
+                     row["program_bytes_max"]))
+        for step in row["steps"]:
+            out.write("    %s\n" % step["typed"])
+        out.write("\n  %-5s %-8s %-7s %-5s %-10s %-7s %-20s %s\n"
+                  % ("step", "seconds", "points", "seg", "interval", "frames", "bytes back",
+                     "what it asks"))
+        for step in row["steps"]:
+            out.write("  %-5d %-8d %-7s %-5s %-10s %-7s %-20s %s\n"
+                      % (step["step"], step["seconds"], _said(step["points"]),
+                         _said(step["segments"]),
+                         "-" if step["interval_ms"] is None else "%d ms" % step["interval_ms"],
+                         _said(step["frames"]),
+                         ("-" if step["bytes_back"] is None
+                          else "%d of %d" % (step["bytes_back"], step["bytes_back_max"])),
+                         step["about"] or step["name"]))
+        out.write("\n  the program as it goes out:\n    %s\n" % row["program"])
+        out.write("  what comes back: %d frame(s) of %d, %d bytes of %d the server keeps\n"
+                  % (row["frames"], row["frames_max"], row["bytes_back"],
+                     row["bytes_back_max"]))
+        out.write("  Bellevue off the mesh: about %d minutes - %d for the two flashes and the "
+                  "proof, %.1f of steps\n"
+                  % (int(math.floor(row["off_mesh_seconds"] / 60.0 + 0.5)),
+                     SESSION_OFF_MESH_OVERHEAD_S // 60, row["seconds"] / 60.0))
+        for refusal in row["refusals"]:
+            out.write("  REFUSED %s\n" % refusal)
+    taken = all(row["taken"] for row in rows)
+    out.write("\n%s\n" % ("every session of this list would be taken as it is written"
+                          if taken else
+                          "this list would not be taken: %d refusal(s) above"
+                          % sum(len(row["refusals"]) for row in rows)))
+    return cfg.EXIT_OK if taken else cfg.EXIT_REFUSED
+
+
+def _said(value):
+    return "-" if value is None else str(value)
 
 
 def read_list(path):
@@ -314,11 +651,29 @@ def build_parser():
     parser.add_argument("--out", default=None,
                         help="where the captures go (default out/bench/echoes/<label>)")
     parser.add_argument("--repo", default=REPO, help="the repository root (default: this checkout)")
+    parser.add_argument("--sessions", default=None, dest="sessions_file", metavar="FILE",
+                        help="a list as NoiseScope session programs, checked against every rule "
+                             "a session has and printed to paste into meshmaster.dk's form. No "
+                             "board is touched and no port is opened")
+    parser.add_argument("--json", action="store_true", help="--sessions, as JSON")
     return parser
 
 
 def main(argv=None, bench=None, out=sys.stdout):
     args = build_parser().parse_args(argv)
+    # The garden's half of this tool, and the whole of it: no bench is loaded, no port is opened
+    # and nothing of tools/bench is asked for anything. A list is read, priced and printed.
+    if args.sessions_file:
+        try:
+            sessions = read_sessions(args.sessions_file)
+        except cfg.Refused as exc:
+            out.write("refused: %s\n" % exc)
+            return cfg.EXIT_REFUSED
+        except (IOError, OSError, ValueError) as exc:
+            out.write("refused: %s cannot be read as a list of sessions (%s)\n"
+                      % (args.sessions_file, exc))
+            return cfg.EXIT_REFUSED
+        return print_sessions(args.sessions_file, sessions, out=out, as_json=args.json)
     bench = bench or bench_tool.Bench(repo=args.repo)
     hunt = Hunt(bench, out=out, repo=args.repo)
     directory = args.out or os.path.join(args.repo, "out", "bench", "echoes", args.label)

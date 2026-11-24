@@ -1,0 +1,38 @@
+# Session D - the settle on a segment's first point
+#
+#   python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-d.txt
+#
+# A NoiseScope session's program for the unit at Bellevue (tasks/phase-3.16/README.md, *The garden
+# instead of the bench*). **It needs a release carrying phase 3.16's task 02** - `scope`'s seventh
+# number, how long the receiver stands on a segment's first point before the reading that counts -
+# and task 03 for `us` and `dev` to be in the frames.
+#
+# The same 60 MHz as session C, in today's segments, with the settle moved: none, 100, 500 and
+# 2 000 microseconds. A hop of 10 MHz takes the synthesizer 30 us by the maker's own table and a
+# segment's first point is up to 16 MHz from where the receiver stands, while the plugin gives that
+# jump two RSSI updates - 6.9 us at 467 kHz. So if the block *at* a segment's first point is the
+# synthesizer still on its way, a settle of 100 us is already enough to see it go; 2 000 is there
+# to show that more buys nothing.
+#
+# `max 32` is today's width written out, so that each of these lines differs from the first in the
+# **settle alone** - which is what `echoes.py --steps` pairs them on.
+#
+# **This is the list with nothing to spare**: 384 bytes of 384 as it goes out, so a step's line
+# cannot grow by one character and the seconds cannot grow to three digits. If the hunt goes on,
+# the forty characters and the 384 bytes are what to raise (tasks/phase-3.16/FOLLOWUPS.md).
+#
+# the settle on a segment's first point
+--- garden-d
+seconds = 85
+# as it is asked today: 60 MHz at 467 kHz, two segments, no settle at all, the reference
+today = scope 840 900 0 467 1000
+# today's width, and 100 us on each segment's first point before the reading that counts
+settle-100 = scope 840 900 0 467 1000 max 32 100
+# and 500 us
+settle-500 = scope 840 900 0 467 1000 max 32 500
+# and 2 000 us, where more can buy nothing the synthesizer has not already had
+settle-2000 = scope 840 900 0 467 1000 max 32 2000
+# 13 MHz at 58.6 kHz around the signal, one segment as it is asked today
+narrow = scope 863 876 250 58.6 1000
+# and the same 13 MHz with 1 000 us on its one first point
+narrow-1000 = scope 863 876 250 58.6 1000 max 32 1000

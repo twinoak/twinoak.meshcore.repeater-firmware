@@ -1182,7 +1182,7 @@ decides whether any of the rest can be walked at all.
   of the matching network across the whole tuning range, and every later
   reading is worth more with it to subtract (`--baseline`). Keep the file with
   the site's notes. Peaks seen on the dummy load → ______. (bench, 2026-10-22, 479f482)
-- [ ] **p3.1-01, p3.16-01, p3.16-02, p3.16-03** **The image check**, which is what the segments exist for.
+- [ ] **p3.1-01, p3.16-01, p3.16-02, p3.16-03, p3.16-04** **The image check**, which is what the segments exist for.
   The tinySA Ultra as a generator at a known frequency, through an attenuator
   into the RAK, and a `scope` of a wide span around it: there should be **one
   peak where the generator is**, and nothing at the image (or no more than the
@@ -1237,6 +1237,15 @@ decides whether any of the rest can be walked at all.
   **49 ms** if it is Semtech's 0.94 (→ ______ µs). `dev` of every frame of the
   wide span should be `0000`, and anything else is the first time this chip has
   said its synthesizer lost lock (→ ______).
+  `p3.16-04` made the two tools work the garden's way, and **nothing of it is
+  this bench's**: `python tools/noisescope/hunt.py --sessions
+  tools/noisescope/lists/garden-b.txt` prints the four lines above as the
+  session program meshmaster.dk takes, and
+  `python tools/noisescope/echoes.py --steps <download.ndjson> --carrier
+  869.618` reads what comes back — one table across the session's steps and
+  what every two of them that differ in one thing say
+  (`docs/noisescope.md` §7, *The garden's way*). If this line is ever walked
+  with the generator in place, `--steps` reads its captures too.
 - [ ] **p3.1-01** **The site through the cavity filter.** `scope 791 960` with
   the baseline subtracted: LTE800 downlink (791–821) and GSM900 downlink
   (925–960) as they actually reach the radio. Strongest carrier → ______ at
