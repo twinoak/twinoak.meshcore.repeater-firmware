@@ -1,0 +1,43 @@
+# Session A - does an echo follow the segments or the signal?
+#
+#   python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-a.txt
+#
+# The echoes have only ever been seen on the unit at Bellevue, with its antenna, its cavity filter
+# and the neighbour 200 m away; the bench has never shown one. So this is not a bench list: it is
+# a NoiseScope session's program, typed into meshmaster.dk's form on the session's page, and its
+# lines come back an hour later as one file (tasks/phase-3.16/README.md, *The garden instead of
+# the bench*).
+#
+# **This one needs nothing new.** It runs on the scanner that is on the unit (0.1.7), uses no word
+# and no number that phase 3.16's tasks 02 and 03 added, and it answers the question the two
+# captures of 23 November differ on - which is the question everything after it rests on. It is
+# here for the record and for the tool's own test.
+#
+# Steps 1 to 3 are the wide span begun 0, 7 and 2.8 MHz lower: an echo that follows the segments
+# moves down by 7 and by 2.8 MHz, one that follows the signal stays where it is. Steps 5 and 6 are
+# the 13 MHz capture begun at 862 and at 865 MHz, where an echo that follows the segment is at
+# 873.2 and then at 876.2 MHz and one that follows the signal is near 874.4 MHz in both.
+#
+# **85 seconds a step and not the README's 90.** A frame of the wide span is 762 bytes since
+# phase 3.16's task 03 put `us`, `usx` and `dev` on the line (its report, *What a frame says
+# now*), and the Walter keeps 65 536 bytes of lines a step: 90 frames of 762 is 68 580 and would
+# be cut off `full`, 85 is 64 770 and fits. The lines are the README's, unchanged - it is the
+# seconds that moved, which is what the task asks for (its deliverable 2). This session's own
+# frames are smaller than that, because 0.1.7 has none of the three members, so 90 would have fitted
+# it; one rule for all four lists is worth more than five seconds of one of them.
+#
+# does an echo follow the segments or the signal?
+--- garden-a
+seconds = 85
+# as it is asked today: the reference every other step of this session is read against
+today = scope 780 960 0 467 1000
+# the same span begun 7 MHz lower: the echoes move down by 7 MHz, or they do not move at all
+lower-7 = scope 773 953 0 467 1000
+# and begun 2.8 MHz lower, which is half the interval they were read to repeat at
+lower-2.8 = scope 777.2 957.2 0 467 1000
+# 40 MHz around the signal in two segments: where a segment begins, close up
+span-40 = scope 850 890 0 467 1000
+# the 13 MHz capture of 23 November, begun at 862 MHz: one segment at 58.6 kHz
+narrow-862 = scope 862 875 250 58.6 1000
+# and the same 13 MHz begun at 865: the segment's own echo moves 3 MHz, the signal's does not
+narrow-865 = scope 865 878 250 58.6 1000

@@ -1,0 +1,36 @@
+# Session B - the regulator, the gain and the time a point costs
+#
+#   python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-b.txt
+#
+# A NoiseScope session's program for the unit at Bellevue, typed into meshmaster.dk's form
+# (tasks/phase-3.16/README.md, *The garden instead of the bench*). **It needs a release carrying
+# phase 3.16's task 03** - the four words `ldo`, `dcdc`, `boost`, `noboost`, and `us`, `usx` and
+# `dev` on every frame - and *Fetch a scanner image* run on the unit.
+#
+# What each pair of its steps answers: echoes that are gone on the LDO are the DC-DC converter's
+# (it switches at about 5 MHz off the synthesizer, and that is the second of the two readings of
+# 23 November); echoes that fall by more than the signal does at the lower gain are the receiver
+# being driven too hard. The last step is the one measurement that settles how long an RSSI update
+# really takes on this part: 250 points at 4.8 kHz in one segment, whose `us` reads about 83 000
+# if an update is 1.6 ms / RBW and about 48 000 if it is Semtech's 0.94.
+#
+# 85 seconds a step: a frame of the wide span is 762 bytes and the Walter keeps 65 536 of lines a
+# step, so 85 frames at a one-second interval is 64 770 and fits with nothing to spare.
+# Every session begins with the span asked as today, because the traffic of one hour is not the
+# traffic of the next.
+#
+# the regulator, the gain and the time a point costs
+--- garden-b
+seconds = 85
+# as it is asked today, on the build's regulator and at the gain `boost` left: the reference
+today = scope 780 960 0 467 1000
+# the same span with the radio begun on its linear regulator: an echo the DC-DC made is gone
+ldo = scope 780 960 0 467 1000 ldo
+# and the same span at the lower gain: an echo of a front end driven too hard falls further
+noboost = scope 780 960 0 467 1000 noboost
+# 13 MHz at 58.6 kHz around the signal, as it is asked today: one segment, so no `dev`
+narrow = scope 863 876 250 58.6 1000
+# the same 13 MHz on the LDO
+narrow-ldo = scope 863 876 250 58.6 1000 ldo
+# 250 points at 4.8 kHz in one segment: `us` here tells 1.6 ms / RBW from 0.94 outright
+point-cost = scope 869 870.2 250 4.8 1000

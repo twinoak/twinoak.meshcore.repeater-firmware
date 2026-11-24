@@ -12,7 +12,8 @@
     "section 5 takes it, with 0 for 'the default'; `plan` and `segments` are what this firmware",
     "makes of it. Frequencies are MHz, steps and bandwidths kHz. Add a row rather than changing",
     "one: a row is a span somebody asked a unit for.",
-    "Phase 3.16's task 02 added `seg_mhz` (and `settle_us`) to a request and `seg_mhz` to a plan: the widest a segment of it may be, which is 32 for every line typed before that task. A settle changes no segment, only the time a sweep is planned to take."
+    "Phase 3.16's task 02 added `seg_mhz` (and `settle_us`) to a request and `seg_mhz` to a plan: the widest a segment of it may be, which is 32 for every line typed before that task. A settle changes no segment, only the time a sweep is planned to take.",
+    "Phase 3.16's task 04 added the four the garden types: a session's step is at most forty characters, so its spans are whole megahertz and not the decimals of 23 November's own line (tools/noisescope/lists/garden-a.txt)."
   ],
   "plans": [
     {
@@ -1441,6 +1442,191 @@
           "first_mhz": 871.8280000000001,
           "cal_lo_mhz": 871.7987,
           "cal_hi_mhz": 876.1213000000001
+        }
+      ]
+    },
+    {
+      "name": "the garden's wide span, as session A asks it",
+      "about": "`scope 780 960 0 467`: the 180 MHz of 23 November in whole megahertz, which is what fits a session's forty characters. Six segments, 386 points, as the line with the decimals",
+      "request": {
+        "f0": 780.0,
+        "f1": 960.0,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 386,
+        "segments": 6,
+        "step_khz": 466.32124352331607,
+        "rbw_khz": 467.0,
+        "first_mhz": 780.2331606217616,
+        "seg_mhz": 32.0
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 65,
+          "first_mhz": 780.2331606217616,
+          "cal_lo_mhz": 779.9996606217616,
+          "cal_hi_mhz": 810.3112202072539
+        },
+        {
+          "first": 65,
+          "points": 65,
+          "first_mhz": 810.5440414507772,
+          "cal_lo_mhz": 810.3105414507771,
+          "cal_hi_mhz": 840.6221010362694
+        },
+        {
+          "first": 130,
+          "points": 64,
+          "first_mhz": 840.8549222797927,
+          "cal_lo_mhz": 840.6214222797927,
+          "cal_hi_mhz": 870.4666606217617
+        },
+        {
+          "first": 194,
+          "points": 64,
+          "first_mhz": 870.699481865285,
+          "cal_lo_mhz": 870.4659818652849,
+          "cal_hi_mhz": 900.3112202072539
+        },
+        {
+          "first": 258,
+          "points": 64,
+          "first_mhz": 900.5440414507772,
+          "cal_lo_mhz": 900.3105414507771,
+          "cal_hi_mhz": 930.1557797927461
+        },
+        {
+          "first": 322,
+          "points": 64,
+          "first_mhz": 930.3886010362694,
+          "cal_lo_mhz": 930.1551010362693,
+          "cal_hi_mhz": 960.0003393782383
+        }
+      ]
+    },
+    {
+      "name": "the garden's wide span begun seven megahertz lower",
+      "about": "`scope 773 953 0 467`: step 2 of session A. The same step and the same point count, every segment begun 7 MHz lower - which is the one measurement that tells the two readings apart",
+      "request": {
+        "f0": 773.0,
+        "f1": 953.0,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 386,
+        "segments": 6,
+        "step_khz": 466.32124352331607,
+        "rbw_khz": 467.0,
+        "first_mhz": 773.2331606217616,
+        "seg_mhz": 32.0
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 65,
+          "first_mhz": 773.2331606217616,
+          "cal_lo_mhz": 772.9996606217616,
+          "cal_hi_mhz": 803.3112202072539
+        },
+        {
+          "first": 65,
+          "points": 65,
+          "first_mhz": 803.5440414507772,
+          "cal_lo_mhz": 803.3105414507771,
+          "cal_hi_mhz": 833.6221010362694
+        },
+        {
+          "first": 130,
+          "points": 64,
+          "first_mhz": 833.8549222797927,
+          "cal_lo_mhz": 833.6214222797927,
+          "cal_hi_mhz": 863.4666606217617
+        },
+        {
+          "first": 194,
+          "points": 64,
+          "first_mhz": 863.699481865285,
+          "cal_lo_mhz": 863.4659818652849,
+          "cal_hi_mhz": 893.3112202072539
+        },
+        {
+          "first": 258,
+          "points": 64,
+          "first_mhz": 893.5440414507772,
+          "cal_lo_mhz": 893.3105414507771,
+          "cal_hi_mhz": 923.1557797927461
+        },
+        {
+          "first": 322,
+          "points": 64,
+          "first_mhz": 923.3886010362694,
+          "cal_lo_mhz": 923.1551010362693,
+          "cal_hi_mhz": 953.0003393782383
+        }
+      ]
+    },
+    {
+      "name": "the garden's sixty megahertz around the signal",
+      "about": "`scope 840 900 0 467`: the span of sessions C and D, where the strongest echo of 23 November was. Two segments as it is asked today",
+      "request": {
+        "f0": 840.0,
+        "f1": 900.0,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 129,
+        "segments": 2,
+        "step_khz": 465.1162790697674,
+        "rbw_khz": 467.0,
+        "first_mhz": 840.2325581395348,
+        "seg_mhz": 32.0
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 65,
+          "first_mhz": 840.2325581395348,
+          "cal_lo_mhz": 839.9990581395348,
+          "cal_hi_mhz": 870.2335
+        },
+        {
+          "first": 65,
+          "points": 64,
+          "first_mhz": 870.4651162790698,
+          "cal_lo_mhz": 870.2316162790697,
+          "cal_hi_mhz": 900.0009418604652
+        }
+      ]
+    },
+    {
+      "name": "the garden's thirteen megahertz around the signal",
+      "about": "`scope 863 876 250 58.6`: the narrow step of every garden session. One segment, so its frames carry no `dev`",
+      "request": {
+        "f0": 863.0,
+        "f1": 876.0,
+        "points": 250,
+        "rbw_khz": 58.6
+      },
+      "plan": {
+        "points": 250,
+        "segments": 1,
+        "step_khz": 52.0,
+        "rbw_khz": 58.6,
+        "first_mhz": 863.026,
+        "seg_mhz": 32.0
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 250,
+          "first_mhz": 863.026,
+          "cal_lo_mhz": 862.9966999999999,
+          "cal_hi_mhz": 876.0033
         }
       ]
     }

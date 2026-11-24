@@ -761,6 +761,60 @@ before it is flashed: its descriptor's role byte is 3.
   `tools/noisescope/lists/p3.16-02.txt` is the whole comparison — four widths,
   six settles, both spans — as one `hunt.py` run.
 
+### The garden's way: measuring the echoes on a unit, not on a bench
+
+The echoes above have **only ever been seen on the unit at Bellevue**, with its
+antenna, its cavity filter and the neighbour 200 m away; a bench board with a
+generator on its antenna port has never shown one. So the rest of the hunt is
+made where they are: in a **NoiseScope session** started from meshmaster.dk,
+which types `scope` lines at the unit and brings every line back.
+
+A session is not a serial port, and that shapes everything:
+
+1. **A list** of typed steps — `tools/noisescope/lists/garden-a.txt` to
+   `garden-d.txt` are the four this pile asks. A program is **1 to 6 steps**, a
+   step lasts **5 to 300 seconds** and all of them 600 at most, a step's command
+   is **1 to 40 characters** of `a-z`, `0-9`, space and the full stop beginning
+   with one of `stat sweep scope hist dwell cad`, and the program as it goes out
+   is at most **384 bytes**. The Walter keeps **65 536 bytes of lines a step**
+   and ends a step that fills it `full`.
+2. **`python tools/noisescope/hunt.py --sessions <list>`** checks every one of
+   those rules before anybody types anything, and prints each session as the
+   lines to paste, the program as it goes out, what each step is expected to
+   bring back and how long the repeater is off the mesh for it. It opens no port
+   and touches no board; a list that breaks a rule is refused by name, with the
+   session, the step and the number that broke, and the exit code is 2.
+3. **The form**, on the session's page: one line a step, the seconds and then
+   the command — `85 scope 780 960 0 467 1000`. Whole megahertz, because forty
+   characters leave no room for the decimals of 23 November's own line.
+4. **The download**, an hour later: *Download the lines*, every line as the
+   scanner sent it, one JSON object a line. It goes in
+   `tools/noisescope/captures/garden/` under its own name, unedited.
+5. **`python tools/noisescope/echoes.py --steps <download> --carrier 869.618`** —
+   one table across the session's scopes in the order they were asked, and under
+   it **every two of them that differ in exactly one thing**. The pair that
+   differs in *where the span begins* is the one this pile exists for, and it
+   says **stays with the frequency**, **moves with the segments** or **cannot
+   say**; the pairs that differ in the regulator, the gain, a segment's width or
+   the settle get the counts and the levels and no verdict beyond them.
+
+One thing reads differently from a bench capture, and it is the signal's fault.
+A generator is in every frame; a neighbour's traffic is not — ten frames of
+sixty held it in session 3. So `--steps` reads a place as an echo when it stands
+over **the same place's median in the scope's own quiet frames**, once the scope
+has five quiet frames or more, and over its segment's floor across the frequency
+axis when it has not; each row says which rule it used. The quiet frames are
+worth reading on their own: the echoes' places read 4 to 8 dB over the floor even
+with no carrier in the frame, and the table prints that per place.
+
+**What a session cannot show, and the bench still can:** a signal of a *known*
+level in every frame, a 50 Ω dummy load, and an attenuator between a generator
+and the radio. A level that comes and goes means a step is long, that each frame
+is the strongest reading of a second rather than of one sweep, and that an
+absolute number off a garden capture is worth less than the difference between
+two of its steps. `tools/bench/` and `hunt.py` without `--sessions` are the
+bench's half and are unchanged.
+
 ## 8. The fast sweep, as built
 
 *Phase 3.1's task [`01`](../tasks/phase-3.1/01-the-fast-sweep.md); the page for
