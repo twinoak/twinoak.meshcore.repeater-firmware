@@ -1,0 +1,998 @@
+{
+  "note": [
+    "The scope plans two tests read: `planScope()` and `scopeSegment()` of",
+    "src/roles/scanner/Sweep.cpp are where that arithmetic lives, and this table is what holds",
+    "every other copy of it to them. test/test_scanner/test_scanner.cpp",
+    "(Scope.ThePlanTableIsPlanScopes) runs the firmware's own functions over every `request`",
+    "below and holds them to its `plan` and `segments`; tools/noisescope/test_echoes.py does the",
+    "same for the Python copy in tools/noisescope/echoes.py (and `echoes.py --check-plans` is",
+    "that check by hand). A plan that moves therefore fails in both places at once, and neither",
+    "copy can drift without the other noticing.",
+    "Written by phase 3.16's task 01. `request` is a `scope` command as docs/noisescope.md",
+    "section 5 takes it, with 0 for 'the default'; `plan` and `segments` are what this firmware",
+    "makes of it. Frequencies are MHz, steps and bandwidths kHz. Add a row rather than changing",
+    "one: a row is a span somebody asked a unit for."
+  ],
+  "plans": [
+    {
+      "name": "the home band, as `scope 863 870` asks it",
+      "about": "one plugin call and no gaps: the default point count, and the bandwidth the step picks",
+      "request": {
+        "f0": 863.0,
+        "f1": 870.0,
+        "points": 0,
+        "rbw_khz": 0.0
+      },
+      "plan": {
+        "points": 250,
+        "segments": 1,
+        "step_khz": 28.0,
+        "rbw_khz": 39.0,
+        "first_mhz": 863.014
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 250,
+          "first_mhz": 863.014,
+          "cal_lo_mhz": 862.9945,
+          "cal_hi_mhz": 870.0055
+        }
+      ]
+    },
+    {
+      "name": "the fewest points a spectrum is",
+      "about": "`scope 863 870 16`: a step of 437.5 kHz, so the widest bandwidth there is",
+      "request": {
+        "f0": 863.0,
+        "f1": 870.0,
+        "points": 16,
+        "rbw_khz": 0.0
+      },
+      "plan": {
+        "points": 16,
+        "segments": 1,
+        "step_khz": 437.5,
+        "rbw_khz": 467.0,
+        "first_mhz": 863.21875
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 16,
+          "first_mhz": 863.21875,
+          "cal_lo_mhz": 862.98525,
+          "cal_hi_mhz": 870.01475
+        }
+      ]
+    },
+    {
+      "name": "twenty megahertz at the most points a frame holds",
+      "about": "`scope 860 880 2048`: the plugin's 250 points a call is what cuts it, not the 32 MHz",
+      "request": {
+        "f0": 860.0,
+        "f1": 880.0,
+        "points": 2048,
+        "rbw_khz": 0.0
+      },
+      "plan": {
+        "points": 2048,
+        "segments": 9,
+        "step_khz": 9.765625,
+        "rbw_khz": 11.7,
+        "first_mhz": 860.0048828125
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 228,
+          "first_mhz": 860.0048828125,
+          "cal_lo_mhz": 859.9990328125,
+          "cal_hi_mhz": 862.2275296875
+        },
+        {
+          "first": 228,
+          "points": 228,
+          "first_mhz": 862.2314453125,
+          "cal_lo_mhz": 862.2255953125,
+          "cal_hi_mhz": 864.4540921875
+        },
+        {
+          "first": 456,
+          "points": 228,
+          "first_mhz": 864.4580078125,
+          "cal_lo_mhz": 864.4521578125,
+          "cal_hi_mhz": 866.6806546875
+        },
+        {
+          "first": 684,
+          "points": 228,
+          "first_mhz": 866.6845703125,
+          "cal_lo_mhz": 866.6787203125,
+          "cal_hi_mhz": 868.9072171875
+        },
+        {
+          "first": 912,
+          "points": 228,
+          "first_mhz": 868.9111328125,
+          "cal_lo_mhz": 868.9052828125,
+          "cal_hi_mhz": 871.1337796875
+        },
+        {
+          "first": 1140,
+          "points": 227,
+          "first_mhz": 871.1376953125,
+          "cal_lo_mhz": 871.1318453125,
+          "cal_hi_mhz": 873.3505765625
+        },
+        {
+          "first": 1367,
+          "points": 227,
+          "first_mhz": 873.3544921875,
+          "cal_lo_mhz": 873.3486421875,
+          "cal_hi_mhz": 875.5673734375
+        },
+        {
+          "first": 1594,
+          "points": 227,
+          "first_mhz": 875.5712890625,
+          "cal_lo_mhz": 875.5654390625,
+          "cal_hi_mhz": 877.7841703125
+        },
+        {
+          "first": 1821,
+          "points": 227,
+          "first_mhz": 877.7880859375,
+          "cal_lo_mhz": 877.7822359375,
+          "cal_hi_mhz": 880.0009671875
+        }
+      ]
+    },
+    {
+      "name": "the whole tuning range at the most points a frame holds",
+      "about": "`scope 150 960 2048`: 395.5 kHz a step, so a segment of 32 MHz holds 80 points and *that* is what cuts it",
+      "request": {
+        "f0": 150.0,
+        "f1": 960.0,
+        "points": 2048,
+        "rbw_khz": 0.0
+      },
+      "plan": {
+        "points": 2048,
+        "segments": 26,
+        "step_khz": 395.5078125,
+        "rbw_khz": 467.0,
+        "first_mhz": 150.19775390625
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 79,
+          "first_mhz": 150.19775390625,
+          "cal_lo_mhz": 149.96425390625,
+          "cal_hi_mhz": 181.28086328125
+        },
+        {
+          "first": 79,
+          "points": 79,
+          "first_mhz": 181.44287109375,
+          "cal_lo_mhz": 181.20937109375,
+          "cal_hi_mhz": 212.52598046875
+        },
+        {
+          "first": 158,
+          "points": 79,
+          "first_mhz": 212.68798828125,
+          "cal_lo_mhz": 212.45448828125,
+          "cal_hi_mhz": 243.77109765625
+        },
+        {
+          "first": 237,
+          "points": 79,
+          "first_mhz": 243.93310546875,
+          "cal_lo_mhz": 243.69960546875,
+          "cal_hi_mhz": 275.01621484375
+        },
+        {
+          "first": 316,
+          "points": 79,
+          "first_mhz": 275.17822265625,
+          "cal_lo_mhz": 274.94472265625,
+          "cal_hi_mhz": 306.26133203125
+        },
+        {
+          "first": 395,
+          "points": 79,
+          "first_mhz": 306.42333984375,
+          "cal_lo_mhz": 306.18983984375,
+          "cal_hi_mhz": 337.50644921875
+        },
+        {
+          "first": 474,
+          "points": 79,
+          "first_mhz": 337.66845703125,
+          "cal_lo_mhz": 337.43495703125,
+          "cal_hi_mhz": 368.75156640625
+        },
+        {
+          "first": 553,
+          "points": 79,
+          "first_mhz": 368.91357421875,
+          "cal_lo_mhz": 368.68007421875,
+          "cal_hi_mhz": 399.99668359375
+        },
+        {
+          "first": 632,
+          "points": 79,
+          "first_mhz": 400.15869140625,
+          "cal_lo_mhz": 399.92519140625,
+          "cal_hi_mhz": 431.24180078125
+        },
+        {
+          "first": 711,
+          "points": 79,
+          "first_mhz": 431.40380859375,
+          "cal_lo_mhz": 431.17030859375,
+          "cal_hi_mhz": 462.48691796875
+        },
+        {
+          "first": 790,
+          "points": 79,
+          "first_mhz": 462.64892578125,
+          "cal_lo_mhz": 462.41542578125,
+          "cal_hi_mhz": 493.73203515625
+        },
+        {
+          "first": 869,
+          "points": 79,
+          "first_mhz": 493.89404296875,
+          "cal_lo_mhz": 493.66054296875,
+          "cal_hi_mhz": 524.97715234375
+        },
+        {
+          "first": 948,
+          "points": 79,
+          "first_mhz": 525.13916015625,
+          "cal_lo_mhz": 524.90566015625,
+          "cal_hi_mhz": 556.22226953125
+        },
+        {
+          "first": 1027,
+          "points": 79,
+          "first_mhz": 556.38427734375,
+          "cal_lo_mhz": 556.15077734375,
+          "cal_hi_mhz": 587.46738671875
+        },
+        {
+          "first": 1106,
+          "points": 79,
+          "first_mhz": 587.62939453125,
+          "cal_lo_mhz": 587.39589453125,
+          "cal_hi_mhz": 618.71250390625
+        },
+        {
+          "first": 1185,
+          "points": 79,
+          "first_mhz": 618.87451171875,
+          "cal_lo_mhz": 618.64101171875,
+          "cal_hi_mhz": 649.95762109375
+        },
+        {
+          "first": 1264,
+          "points": 79,
+          "first_mhz": 650.11962890625,
+          "cal_lo_mhz": 649.88612890625,
+          "cal_hi_mhz": 681.20273828125
+        },
+        {
+          "first": 1343,
+          "points": 79,
+          "first_mhz": 681.36474609375,
+          "cal_lo_mhz": 681.13124609375,
+          "cal_hi_mhz": 712.44785546875
+        },
+        {
+          "first": 1422,
+          "points": 79,
+          "first_mhz": 712.60986328125,
+          "cal_lo_mhz": 712.37636328125,
+          "cal_hi_mhz": 743.69297265625
+        },
+        {
+          "first": 1501,
+          "points": 79,
+          "first_mhz": 743.85498046875,
+          "cal_lo_mhz": 743.62148046875,
+          "cal_hi_mhz": 774.93808984375
+        },
+        {
+          "first": 1580,
+          "points": 78,
+          "first_mhz": 775.10009765625,
+          "cal_lo_mhz": 774.86659765625,
+          "cal_hi_mhz": 805.78769921875
+        },
+        {
+          "first": 1658,
+          "points": 78,
+          "first_mhz": 805.94970703125,
+          "cal_lo_mhz": 805.71620703125,
+          "cal_hi_mhz": 836.63730859375
+        },
+        {
+          "first": 1736,
+          "points": 78,
+          "first_mhz": 836.79931640625,
+          "cal_lo_mhz": 836.56581640625,
+          "cal_hi_mhz": 867.48691796875
+        },
+        {
+          "first": 1814,
+          "points": 78,
+          "first_mhz": 867.64892578125,
+          "cal_lo_mhz": 867.41542578125,
+          "cal_hi_mhz": 898.33652734375
+        },
+        {
+          "first": 1892,
+          "points": 78,
+          "first_mhz": 898.49853515625,
+          "cal_lo_mhz": 898.26503515625,
+          "cal_hi_mhz": 929.18613671875
+        },
+        {
+          "first": 1970,
+          "points": 78,
+          "first_mhz": 929.34814453125,
+          "cal_lo_mhz": 929.11464453125,
+          "cal_hi_mhz": 960.03574609375
+        }
+      ]
+    },
+    {
+      "name": "the whole tuning range in fifty-one points",
+      "about": "`scope 150 960 51`: a step of 15.9 MHz, so a segment is two points and there are 26 of them - the most a plan ever has",
+      "request": {
+        "f0": 150.0,
+        "f1": 960.0,
+        "points": 51,
+        "rbw_khz": 0.0
+      },
+      "plan": {
+        "points": 51,
+        "segments": 26,
+        "step_khz": 15882.35294117647,
+        "rbw_khz": 467.0,
+        "first_mhz": 157.94117647058823
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 2,
+          "first_mhz": 157.94117647058823,
+          "cal_lo_mhz": 157.70767647058824,
+          "cal_hi_mhz": 174.0570294117647
+        },
+        {
+          "first": 2,
+          "points": 2,
+          "first_mhz": 189.70588235294116,
+          "cal_lo_mhz": 189.47238235294117,
+          "cal_hi_mhz": 205.82173529411762
+        },
+        {
+          "first": 4,
+          "points": 2,
+          "first_mhz": 221.47058823529412,
+          "cal_lo_mhz": 221.23708823529412,
+          "cal_hi_mhz": 237.58644117647057
+        },
+        {
+          "first": 6,
+          "points": 2,
+          "first_mhz": 253.23529411764707,
+          "cal_lo_mhz": 253.00179411764708,
+          "cal_hi_mhz": 269.3511470588235
+        },
+        {
+          "first": 8,
+          "points": 2,
+          "first_mhz": 285.0,
+          "cal_lo_mhz": 284.7665,
+          "cal_hi_mhz": 301.11585294117646
+        },
+        {
+          "first": 10,
+          "points": 2,
+          "first_mhz": 316.7647058823529,
+          "cal_lo_mhz": 316.53120588235294,
+          "cal_hi_mhz": 332.8805588235294
+        },
+        {
+          "first": 12,
+          "points": 2,
+          "first_mhz": 348.52941176470586,
+          "cal_lo_mhz": 348.29591176470586,
+          "cal_hi_mhz": 364.6452647058823
+        },
+        {
+          "first": 14,
+          "points": 2,
+          "first_mhz": 380.29411764705884,
+          "cal_lo_mhz": 380.06061764705885,
+          "cal_hi_mhz": 396.4099705882353
+        },
+        {
+          "first": 16,
+          "points": 2,
+          "first_mhz": 412.05882352941177,
+          "cal_lo_mhz": 411.8253235294118,
+          "cal_hi_mhz": 428.1746764705882
+        },
+        {
+          "first": 18,
+          "points": 2,
+          "first_mhz": 443.8235294117647,
+          "cal_lo_mhz": 443.5900294117647,
+          "cal_hi_mhz": 459.93938235294115
+        },
+        {
+          "first": 20,
+          "points": 2,
+          "first_mhz": 475.5882352941177,
+          "cal_lo_mhz": 475.3547352941177,
+          "cal_hi_mhz": 491.70408823529414
+        },
+        {
+          "first": 22,
+          "points": 2,
+          "first_mhz": 507.3529411764706,
+          "cal_lo_mhz": 507.1194411764706,
+          "cal_hi_mhz": 523.4687941176471
+        },
+        {
+          "first": 24,
+          "points": 2,
+          "first_mhz": 539.1176470588235,
+          "cal_lo_mhz": 538.8841470588235,
+          "cal_hi_mhz": 555.2335
+        },
+        {
+          "first": 26,
+          "points": 2,
+          "first_mhz": 570.8823529411765,
+          "cal_lo_mhz": 570.6488529411764,
+          "cal_hi_mhz": 586.998205882353
+        },
+        {
+          "first": 28,
+          "points": 2,
+          "first_mhz": 602.6470588235295,
+          "cal_lo_mhz": 602.4135588235295,
+          "cal_hi_mhz": 618.762911764706
+        },
+        {
+          "first": 30,
+          "points": 2,
+          "first_mhz": 634.4117647058824,
+          "cal_lo_mhz": 634.1782647058824,
+          "cal_hi_mhz": 650.527617647059
+        },
+        {
+          "first": 32,
+          "points": 2,
+          "first_mhz": 666.1764705882354,
+          "cal_lo_mhz": 665.9429705882353,
+          "cal_hi_mhz": 682.2923235294119
+        },
+        {
+          "first": 34,
+          "points": 2,
+          "first_mhz": 697.9411764705883,
+          "cal_lo_mhz": 697.7076764705882,
+          "cal_hi_mhz": 714.0570294117648
+        },
+        {
+          "first": 36,
+          "points": 2,
+          "first_mhz": 729.7058823529412,
+          "cal_lo_mhz": 729.4723823529412,
+          "cal_hi_mhz": 745.8217352941177
+        },
+        {
+          "first": 38,
+          "points": 2,
+          "first_mhz": 761.4705882352941,
+          "cal_lo_mhz": 761.2370882352941,
+          "cal_hi_mhz": 777.5864411764707
+        },
+        {
+          "first": 40,
+          "points": 2,
+          "first_mhz": 793.2352941176471,
+          "cal_lo_mhz": 793.001794117647,
+          "cal_hi_mhz": 809.3511470588236
+        },
+        {
+          "first": 42,
+          "points": 2,
+          "first_mhz": 825.0,
+          "cal_lo_mhz": 824.7665,
+          "cal_hi_mhz": 841.1158529411765
+        },
+        {
+          "first": 44,
+          "points": 2,
+          "first_mhz": 856.7647058823529,
+          "cal_lo_mhz": 856.5312058823529,
+          "cal_hi_mhz": 872.8805588235294
+        },
+        {
+          "first": 46,
+          "points": 2,
+          "first_mhz": 888.5294117647059,
+          "cal_lo_mhz": 888.2959117647058,
+          "cal_hi_mhz": 904.6452647058824
+        },
+        {
+          "first": 48,
+          "points": 2,
+          "first_mhz": 920.2941176470589,
+          "cal_lo_mhz": 920.0606176470588,
+          "cal_hi_mhz": 936.4099705882354
+        },
+        {
+          "first": 50,
+          "points": 1,
+          "first_mhz": 952.0588235294118,
+          "cal_lo_mhz": 951.8253235294118,
+          "cal_hi_mhz": 952.2923235294119
+        }
+      ]
+    },
+    {
+      "name": "the wide scope of 23 November",
+      "about": "`scope 779.618 959.618 0 467 1000` as the unit at Bellevue was asked it: no point count, so as many as 467 kHz covers without gaps",
+      "request": {
+        "f0": 779.618,
+        "f1": 959.618,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 386,
+        "segments": 6,
+        "step_khz": 466.32124352331607,
+        "rbw_khz": 467.0,
+        "first_mhz": 779.8511606217617
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 65,
+          "first_mhz": 779.8511606217617,
+          "cal_lo_mhz": 779.6176606217616,
+          "cal_hi_mhz": 809.9292202072539
+        },
+        {
+          "first": 65,
+          "points": 65,
+          "first_mhz": 810.1620414507772,
+          "cal_lo_mhz": 809.9285414507772,
+          "cal_hi_mhz": 840.2401010362695
+        },
+        {
+          "first": 130,
+          "points": 64,
+          "first_mhz": 840.4729222797928,
+          "cal_lo_mhz": 840.2394222797927,
+          "cal_hi_mhz": 870.0846606217617
+        },
+        {
+          "first": 194,
+          "points": 64,
+          "first_mhz": 870.317481865285,
+          "cal_lo_mhz": 870.083981865285,
+          "cal_hi_mhz": 899.9292202072539
+        },
+        {
+          "first": 258,
+          "points": 64,
+          "first_mhz": 900.1620414507772,
+          "cal_lo_mhz": 899.9285414507772,
+          "cal_hi_mhz": 929.7737797927462
+        },
+        {
+          "first": 322,
+          "points": 64,
+          "first_mhz": 930.0066010362694,
+          "cal_lo_mhz": 929.7731010362694,
+          "cal_hi_mhz": 959.6183393782384
+        }
+      ]
+    },
+    {
+      "name": "the wide scope of 23 November with its step halved",
+      "about": "`scope 779.618 959.618 772 467`: the same span and bandwidth, twice the points",
+      "request": {
+        "f0": 779.618,
+        "f1": 959.618,
+        "points": 772,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 772,
+        "segments": 6,
+        "step_khz": 233.16062176165804,
+        "rbw_khz": 467.0,
+        "first_mhz": 779.7345803108809
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 129,
+          "first_mhz": 779.7345803108809,
+          "cal_lo_mhz": 779.5010803108809,
+          "cal_hi_mhz": 809.8126398963732
+        },
+        {
+          "first": 129,
+          "points": 129,
+          "first_mhz": 809.8123005181347,
+          "cal_lo_mhz": 809.5788005181347,
+          "cal_hi_mhz": 839.890360103627
+        },
+        {
+          "first": 258,
+          "points": 129,
+          "first_mhz": 839.8900207253887,
+          "cal_lo_mhz": 839.6565207253886,
+          "cal_hi_mhz": 869.968080310881
+        },
+        {
+          "first": 387,
+          "points": 129,
+          "first_mhz": 869.9677409326425,
+          "cal_lo_mhz": 869.7342409326425,
+          "cal_hi_mhz": 900.0458005181348
+        },
+        {
+          "first": 516,
+          "points": 128,
+          "first_mhz": 900.0454611398964,
+          "cal_lo_mhz": 899.8119611398963,
+          "cal_hi_mhz": 929.890360103627
+        },
+        {
+          "first": 644,
+          "points": 128,
+          "first_mhz": 929.8900207253887,
+          "cal_lo_mhz": 929.6565207253886,
+          "cal_hi_mhz": 959.7349196891194
+        }
+      ]
+    },
+    {
+      "name": "the wide scope of 23 November at 234.3 kHz",
+      "about": "`scope 779.618 959.618 0 234.3`: half the bandwidth, so twice the points",
+      "request": {
+        "f0": 779.618,
+        "f1": 959.618,
+        "points": 0,
+        "rbw_khz": 234.3
+      },
+      "plan": {
+        "points": 769,
+        "segments": 6,
+        "step_khz": 234.0702210663199,
+        "rbw_khz": 234.3,
+        "first_mhz": 779.7350351105332
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 129,
+          "first_mhz": 779.7350351105332,
+          "cal_lo_mhz": 779.6178851105332,
+          "cal_hi_mhz": 809.8131734070222
+        },
+        {
+          "first": 129,
+          "points": 128,
+          "first_mhz": 809.9300936280885,
+          "cal_lo_mhz": 809.8129436280884,
+          "cal_hi_mhz": 839.7741617035111
+        },
+        {
+          "first": 257,
+          "points": 128,
+          "first_mhz": 839.8910819245774,
+          "cal_lo_mhz": 839.7739319245774,
+          "cal_hi_mhz": 869.7351500000001
+        },
+        {
+          "first": 385,
+          "points": 128,
+          "first_mhz": 869.8520702210664,
+          "cal_lo_mhz": 869.7349202210663,
+          "cal_hi_mhz": 899.696138296489
+        },
+        {
+          "first": 513,
+          "points": 128,
+          "first_mhz": 899.8130585175553,
+          "cal_lo_mhz": 899.6959085175553,
+          "cal_hi_mhz": 929.657126592978
+        },
+        {
+          "first": 641,
+          "points": 128,
+          "first_mhz": 929.7740468140443,
+          "cal_lo_mhz": 929.6568968140442,
+          "cal_hi_mhz": 959.6181148894669
+        }
+      ]
+    },
+    {
+      "name": "the wide scope of 23 November at 234.3 kHz with its step halved",
+      "about": "`scope 779.618 959.618 1538 234.3`: the step halved again, and now the plugin's 250 points a call is what cuts the span and not the 32 MHz - seven segments and not six",
+      "request": {
+        "f0": 779.618,
+        "f1": 959.618,
+        "points": 1538,
+        "rbw_khz": 234.3
+      },
+      "plan": {
+        "points": 1538,
+        "segments": 7,
+        "step_khz": 117.03511053315995,
+        "rbw_khz": 234.3,
+        "first_mhz": 779.6765175552666
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 220,
+          "first_mhz": 779.6765175552666,
+          "cal_lo_mhz": 779.5593675552666,
+          "cal_hi_mhz": 805.4243567620287
+        },
+        {
+          "first": 220,
+          "points": 220,
+          "first_mhz": 805.4242418725618,
+          "cal_lo_mhz": 805.3070918725617,
+          "cal_hi_mhz": 831.1720810793238
+        },
+        {
+          "first": 440,
+          "points": 220,
+          "first_mhz": 831.171966189857,
+          "cal_lo_mhz": 831.054816189857,
+          "cal_hi_mhz": 856.919805396619
+        },
+        {
+          "first": 660,
+          "points": 220,
+          "first_mhz": 856.9196905071522,
+          "cal_lo_mhz": 856.8025405071521,
+          "cal_hi_mhz": 882.6675297139142
+        },
+        {
+          "first": 880,
+          "points": 220,
+          "first_mhz": 882.6674148244474,
+          "cal_lo_mhz": 882.5502648244474,
+          "cal_hi_mhz": 908.4152540312094
+        },
+        {
+          "first": 1100,
+          "points": 219,
+          "first_mhz": 908.4151391417425,
+          "cal_lo_mhz": 908.2979891417425,
+          "cal_hi_mhz": 934.0459432379714
+        },
+        {
+          "first": 1319,
+          "points": 219,
+          "first_mhz": 934.0458283485045,
+          "cal_lo_mhz": 933.9286783485045,
+          "cal_hi_mhz": 959.6766324447334
+        }
+      ]
+    },
+    {
+      "name": "the wide scope of 23 November at 58.6 kHz, clamped",
+      "about": "`scope 779.618 959.618 0 58.6`: 3072 points would cover it without gaps and a frame holds 2048, so the points are clamped and the step is wider than the bandwidth",
+      "request": {
+        "f0": 779.618,
+        "f1": 959.618,
+        "points": 0,
+        "rbw_khz": 58.6
+      },
+      "plan": {
+        "points": 2048,
+        "segments": 9,
+        "step_khz": 87.890625,
+        "rbw_khz": 58.6,
+        "first_mhz": 779.6619453125
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 228,
+          "first_mhz": 779.6619453125,
+          "cal_lo_mhz": 779.6326453125,
+          "cal_hi_mhz": 799.6424171875001
+        },
+        {
+          "first": 228,
+          "points": 228,
+          "first_mhz": 799.7010078125,
+          "cal_lo_mhz": 799.6717078125,
+          "cal_hi_mhz": 819.6814796875001
+        },
+        {
+          "first": 456,
+          "points": 228,
+          "first_mhz": 819.7400703125,
+          "cal_lo_mhz": 819.7107703125,
+          "cal_hi_mhz": 839.7205421875001
+        },
+        {
+          "first": 684,
+          "points": 228,
+          "first_mhz": 839.7791328125,
+          "cal_lo_mhz": 839.7498328125,
+          "cal_hi_mhz": 859.7596046875001
+        },
+        {
+          "first": 912,
+          "points": 228,
+          "first_mhz": 859.8181953125,
+          "cal_lo_mhz": 859.7888953125,
+          "cal_hi_mhz": 879.7986671875001
+        },
+        {
+          "first": 1140,
+          "points": 227,
+          "first_mhz": 879.8572578125,
+          "cal_lo_mhz": 879.8279578125,
+          "cal_hi_mhz": 899.7498390625001
+        },
+        {
+          "first": 1367,
+          "points": 227,
+          "first_mhz": 899.8084296875,
+          "cal_lo_mhz": 899.7791296875,
+          "cal_hi_mhz": 919.7010109375001
+        },
+        {
+          "first": 1594,
+          "points": 227,
+          "first_mhz": 919.7596015625,
+          "cal_lo_mhz": 919.7303015625,
+          "cal_hi_mhz": 939.6521828125001
+        },
+        {
+          "first": 1821,
+          "points": 227,
+          "first_mhz": 939.7107734375,
+          "cal_lo_mhz": 939.6814734375,
+          "cal_hi_mhz": 959.6033546875001
+        }
+      ]
+    },
+    {
+      "name": "thirteen megahertz around the carrier, as near as 23 November's line is known",
+      "about": "`scope 863.1 876.1 250`: 52 kHz a step, the bandwidth the step picks, one segment",
+      "request": {
+        "f0": 863.1,
+        "f1": 876.1,
+        "points": 250,
+        "rbw_khz": 0.0
+      },
+      "plan": {
+        "points": 250,
+        "segments": 1,
+        "step_khz": 52.0,
+        "rbw_khz": 58.6,
+        "first_mhz": 863.126
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 250,
+          "first_mhz": 863.126,
+          "cal_lo_mhz": 863.0966999999999,
+          "cal_hi_mhz": 876.1033
+        }
+      ]
+    },
+    {
+      "name": "sixty megahertz around the carrier",
+      "about": "`scope 839.618 899.618 0 467`: two segments",
+      "request": {
+        "f0": 839.618,
+        "f1": 899.618,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 129,
+        "segments": 2,
+        "step_khz": 465.1162790697674,
+        "rbw_khz": 467.0,
+        "first_mhz": 839.8505581395349
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 65,
+          "first_mhz": 839.8505581395349,
+          "cal_lo_mhz": 839.6170581395348,
+          "cal_hi_mhz": 869.8515000000001
+        },
+        {
+          "first": 65,
+          "points": 64,
+          "first_mhz": 870.0831162790698,
+          "cal_lo_mhz": 869.8496162790698,
+          "cal_hi_mhz": 899.6189418604653
+        }
+      ]
+    },
+    {
+      "name": "thirty-one megahertz around the carrier",
+      "about": "`scope 854.118 885.118 0 467`: one segment, and nearly the whole of what one may measure",
+      "request": {
+        "f0": 854.118,
+        "f1": 885.118,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 67,
+        "segments": 1,
+        "step_khz": 462.6865671641791,
+        "rbw_khz": 467.0,
+        "first_mhz": 854.3493432835821
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 67,
+          "first_mhz": 854.3493432835821,
+          "cal_lo_mhz": 854.1158432835821,
+          "cal_hi_mhz": 885.120156716418
+        }
+      ]
+    },
+    {
+      "name": "twenty megahertz around the carrier",
+      "about": "`scope 859.618 879.618 0 467`: one segment",
+      "request": {
+        "f0": 859.618,
+        "f1": 879.618,
+        "points": 0,
+        "rbw_khz": 467.0
+      },
+      "plan": {
+        "points": 43,
+        "segments": 1,
+        "step_khz": 465.1162790697674,
+        "rbw_khz": 467.0,
+        "first_mhz": 859.8505581395349
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 43,
+          "first_mhz": 859.8505581395349,
+          "cal_lo_mhz": 859.6170581395348,
+          "cal_hi_mhz": 879.6189418604652
+        }
+      ]
+    }
+  ]
+}

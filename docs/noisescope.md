@@ -586,6 +586,34 @@ before it is flashed: its descriptor's role byte is 3.
   carrier. Step the sweep across the likely blockers (LTE800 DL 791–821,
   GSM-R/GSM900 DL 921–960) and remember that you are looking through the
   cavity filter — that attenuation is part of the honest answer.
+* **A wide `scope` with a strong signal in it shows blocks that are not
+  there, and they follow the sweep's own segments and not the frequency.**
+  This is the thing to know before reading a wide picture. With a neighbour's
+  carrier at −32 dBm on the home channel, the 180 MHz picture of 23 November
+  (meshmaster.dk `/noisescope/3`) had bright blocks at 816, 840–847, 888–893,
+  900, 912 and 930 MHz — behind a cavity filter that passes 863 to 870, where
+  nothing can be. Worked out by hand, every one of them began **at the first
+  point of a segment, or about 5.6 MHz after one**, and faded over five to
+  fifteen points **in the sweep's direction**; the same interval showed in a
+  second capture at a quarter of the step and an eighth of the bandwidth. In
+  the frames without the carrier the same places read 4 to 8 dB over the floor
+  and in the frames with it 14 to 35 dB, so a faint line there is not a signal
+  either. **Outside the passband, treat a block that sits a whole number of
+  5.6 MHz from a segment's start as the instrument and not the site** — the
+  `ack`'s `seg` says how many segments there are and §6 says where they begin
+  — and confirm anything you care about with a narrow `scope` whose segments
+  begin somewhere else, or with a `hist` on the frequency itself.
+
+  **Those numbers are read and not measured**: two captures from one unit,
+  worked out by hand. What makes them is not known — the sweep runs inside the
+  radio and retunes after every RSSI update, and the synthesizer changing band
+  is a guess. `python tools/noisescope/echoes.py <capture.ndjson> --carrier
+  869.618` counts the blocks of any capture and says their distance from their
+  own segment's first point in MHz, in points and in microseconds; inside one
+  span those three are the same number, so it takes two captures of different
+  step or bandwidth to say which of them the echoes keep.
+  `python tools/noisescope/hunt.py` is that pair of captures and more, run on a
+  bench board with a generator on its antenna port (`docs/bench.md` §9).
 
 ## 8. The fast sweep, as built
 

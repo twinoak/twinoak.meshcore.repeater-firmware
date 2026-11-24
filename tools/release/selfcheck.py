@@ -19,7 +19,11 @@ and without the release key:
   1. tools/release/test_release.py - every test of the tooling - and tools/bench's own,
      test_bench.py and test_walk.py: the guards of the bench tool a session may touch a board
      with, and every walk of docs/bench.md run end to end, both against its fake serial layer
-     (no board here and none needed).
+     (no board here and none needed). tools/noisescope's two are here for the same reason
+     (p3.16-01): test_echoes.py holds tools/noisescope/echoes.py to the plan table the firmware's
+     own test reads and to echoes it plants itself, and test_hunt.py drives
+     tools/noisescope/hunt.py against the same fake serial layer - standard library only, no
+     board, and the one place a tool that may open a board's port is proved on every commit.
   2. the base under the application, tools/base/check.py: the vendored file of boards/base/ is
      the one its pin names (SHA-256), passes spec/FIRMWARE-MANIFEST.md section 4a against the
      application region of every build directory's linker script, and its README says the same
@@ -60,10 +64,16 @@ sys.path.insert(0, os.path.join(REPO, "tools", "bench"))
 import test_bench  # noqa: E402
 import test_walk  # noqa: E402  (phase 3.3's task 03: the walks of docs/bench.md)
 
+# tools/noisescope's own (phase 3.16's task 01), beside them and for the same reasons: standard
+# library only, no board, and hunt.py is the second tool that may open one's port.
+sys.path.insert(0, os.path.join(REPO, "tools", "noisescope"))
+import test_echoes  # noqa: E402
+import test_hunt  # noqa: E402
+
 
 def run_tests():
     suite = unittest.TestSuite()
-    for module in (test_release, test_bench, test_walk):
+    for module in (test_release, test_bench, test_walk, test_echoes, test_hunt):
         suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
     result = unittest.TextTestRunner(verbosity=2, stream=sys.stdout).run(suite)
     return result.wasSuccessful(), result.testsRun
