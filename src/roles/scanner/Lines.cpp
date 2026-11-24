@@ -204,8 +204,15 @@ void Lines::scope(const ScopeFields& f) {
   // `cov` is the receiver bandwidth over the step: below 1 and a narrow carrier can fall between
   // two points, which is a thing a reader must be able to say on the picture (section 5).
   field("cov", f.plan.cov, 3);
-  text(",\"agg\":\"%s\",\"sweeps\":%u,\"sps\":%u,\"lv\":\"", scopeAggName(f.plan.agg),
-       unsigned(f.sweeps), unsigned(f.sps_x10));
+  // `us` and `usx` after `sps`, then `dev`, then `lv`: how long the plugin's calls took for the
+  // shortest and the longest whole sweep of this frame, and what the chip's error word held at
+  // this frame's arms. `dev` is four hex digits in a string - `0010` is not a JSON number and 16
+  // would lose the shape the data sheet's table has - and it is written only for a plan of more
+  // than one segment, which is the only one that has a standby to read the word in.
+  text(",\"agg\":\"%s\",\"sweeps\":%u,\"sps\":%u,\"us\":%lu,\"usx\":%lu", scopeAggName(f.plan.agg),
+       unsigned(f.sweeps), unsigned(f.sps_x10), (unsigned long)f.us, (unsigned long)f.usx);
+  if (f.plan.segments > 1) text(",\"dev\":\"%04x\"", f.device_errors & 0xFFFFu);
+  raw(",\"lv\":\"");
   base64(f.levels, f.plan.points);
   raw("\"}");
   end();
@@ -294,6 +301,8 @@ void Lines::help(const char* version) {
       "#                                                  in-radio sweep, streamed to this port;\n"
       "#                                                  agg max|mean|last; seg_mhz <= 32 MHz,\n"
       "#                                                  settle_us <= 20000; scope off\n"
+      "#         ldo|dcdc boost|noboost                  this scope's regulator and gain,\n"
+      "#                                                  anywhere after the two ends\n"
       "#   hist  [f0 f1 [step_khz [samples [passes]]]]    spectral-scan histograms (33 x 4dB bins)\n"
       "#   dwell <f_mhz> [secs [win_ms]]                  time-domain stats on one frequency\n"
       "#   cad   [f_mhz [count]]                          LoRa preamble detection ratio\n"

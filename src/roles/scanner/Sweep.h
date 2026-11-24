@@ -356,6 +356,56 @@ enum ScopeAgg : uint8_t {
 const char* scopeAggName(ScopeAgg agg);
 bool scopeAggOf(const char* word, ScopeAgg& out);
 
+// Which regulator the chip is begun with **for one scope**, and which receive gain. Neither is
+// the build's own or what `boost on|off` left: a `scope` line may carry one word of each pair and
+// that word holds for that scope alone, because the two readings of the echoes of 23 November
+// are told apart by the same sweep made on the other regulator and at the lower gain
+// (tasks/phase-3.16/FOLLOWUPS.md, *The data sheet itself*: in receive the chip's DC-DC converter
+// is clocked from the synthesizer at about 5 MHz, SX1261/2 data sheet 5.1).
+enum ScopeRegulator : uint8_t {
+  kScopeRegulatorBuild = 0,  // no word on the line: the build's, which is what beginPlugin() asks
+  kScopeRegulatorLdo = 1,    // `ldo`
+  kScopeRegulatorDcDc = 2,   // `dcdc`
+};
+enum ScopeGain : uint8_t {
+  kScopeGainAsLeft = 0,   // no word on the line: whatever `boost on|off` left
+  kScopeGainBoost = 1,    // `boost`
+  kScopeGainNoBoost = 2,  // `noboost`
+};
+
+// The word the `ack` carries for each, and "" for the pair nobody named.
+const char* scopeRegulatorName(ScopeRegulator reg);
+const char* scopeGainName(ScopeGain gain);
+
+// The word the command takes, and the other way round. False for a word that is not one of the
+// two of that pair, and `out` is untouched then.
+bool scopeRegulatorOf(const char* word, ScopeRegulator& out);
+bool scopeGainOf(const char* word, ScopeGain& out);
+
+// What a mode begins the chip with: the regulator and the boosted gain, as arguments of the
+// vendored begin() (vendor/sx126x_spectrum/SX126xSpectrumScanner.h) and of RadioLib's.
+//
+// **A scope's two words are the only thing that ever moves either, and they move it for that
+// scope alone.** Every other mode - a `sweep`, a `hist`, a `dwell`, a `cad` - and every `scope`
+// asked for without a word is kScopeRegulatorBuild and kScopeGainAsLeft, which this answers with
+// the build's regulator and the gain `boost on|off` left, exactly as on main. There is no state
+// to put back when a scope ends, because the words live in the plan of the scope that asked for
+// them and nowhere else.
+struct ScopeRadioSetup {
+  bool ldo = false;    // the useRegulatorLDO of begin(): false is the DC-DC converter
+  bool boost = false;  // SX126x::setRxBoostedGainMode()
+};
+ScopeRadioSetup scopeRadioSetup(ScopeRegulator reg, ScopeGain gain, bool build_ldo,
+                                bool boost_setting);
+
+// The bits of the chip's GetDeviceErrors word a scope is read for, beside the image
+// calibration's below (SX1261/2 data sheet Rev 2.2, 13.6.1, table 13-86; RadioLib 7.8.0,
+// SX126x_commands.h:291-298). The synthesizer's two are why the word is read at all: a retune of
+// the plugin's that left the loop unlocked would say so here and nowhere else.
+constexpr unsigned kScopePllLockError = 0x0040;   // bit 6, PLL_LOCK_ERR
+constexpr unsigned kScopeXoscStartError = 0x0020; // bit 5, XOSC_START_ERR
+constexpr unsigned kScopePllCalibError = 0x0004;  // bit 2, PLL_CALIB_ERR
+
 // One plugin call: a run of consecutive points of the frame, with the first point's centre and
 // the range its image rejection is calibrated for (RadioLib's calibrateImageRejection()).
 //
@@ -413,6 +463,11 @@ struct ScopeRequest {
   // How long the receiver stands on a segment's first point before the sweep that counts: 0 is
   // today's arm, which stands there for the plugin's own two extra updates and no longer.
   uint32_t settle_us = 0;
+  // The regulator and the receive gain for this scope alone (phase 3.16's task 03). The words
+  // `ldo`/`dcdc` and `boost`/`noboost` on the `scope` line, taken out of it wherever they stand;
+  // the defaults are no word, which is the build's regulator and what `boost on|off` left.
+  ScopeRegulator reg = kScopeRegulatorBuild;
+  ScopeGain gain = kScopeGainAsLeft;
 };
 
 // A scope, planned. `points` is 0 for a request this firmware does not run.
@@ -431,6 +486,10 @@ struct ScopePlan {
   uint32_t sweep_ms = 0;     // and the whole span, every segment of it, settles included
   double seg_mhz = kScopeSegmentMhz;  // the widest a segment of this plan may be, as taken
   uint32_t settle_us = 0;             // and the settle before each segment's first reading
+  // What this scope asked the chip to be begun as, and nothing beyond this scope: the plan is
+  // the only place either word is kept, so the mode after it begins the chip as it always did.
+  ScopeRegulator reg = kScopeRegulatorBuild;
+  ScopeGain gain = kScopeGainAsLeft;
 };
 
 // False - and `out` untouched - when the request is not a scope: the ends crossed or outside the
@@ -443,10 +502,10 @@ bool planScope(const ScopeRequest& request, ScopePlan& out);
 // Segment `index` of a plan (0 .. plan.segments - 1). False for an index the plan does not have.
 bool scopeSegment(const ScopePlan& plan, uint16_t index, ScopeSegment& out);
 
-// The radio, as arming a segment sees it: one member per call, each exactly one call of
-// RadioLib's or the plugin's and nothing else (src/roles/scanner/Radio.cpp is the chip half).
-// The order they are made in is armScopeSegment()'s, below, and host-tested - because the order
-// is the whole fix of p3.5-02 (tasks/phase-3.5/reports/02.md).
+// The radio, as a scope sees it: one member per call, each exactly one call of RadioLib's or the
+// plugin's and nothing else (src/roles/scanner/Radio.cpp is the chip half). The order they are
+// made in is armScopeSegment()'s and sweepScopeSegment()'s, below, and host-tested - because the
+// order is the whole fix of p3.5-02 (tasks/phase-3.5/reports/02.md).
 struct ScopeArmRadio {
   virtual ~ScopeArmRadio() {}
   virtual int standby() = 0;
@@ -458,9 +517,20 @@ struct ScopeArmRadio {
   // calibration after it until a hardware reset. The chip half passes skipCalibration = true.
   virtual int setFrequency(double mhz) = 0;
   virtual int calibrateImage(double lo_mhz, double hi_mhz) = 0;
-  // The chip's GetDeviceErrors word, read in standby (where it answers).
+  // The chip's GetDeviceErrors word, read in standby (where it answers), and the command that
+  // clears it - the word is sticky until it is cleared (SX1261/2 data sheet 13.6.1, 13.6.2), so
+  // a word read at an arm belongs to the sweep before it only if the arm before that one
+  // cleared it.
   virtual unsigned deviceErrors() = 0;
+  virtual void clearDeviceErrors() = 0;
   virtual int setSweep(double first_mhz, double step_mhz, uint16_t points, double rbw_khz) = 0;
+  // The plugin's own call - the 0x9B command, which blocks for the sweep's duration and leaves
+  // one level per point - and the clock the time inside it is measured on. Behind the seam, and
+  // not in src/roles/scanner/Radio.cpp, because `us` and `usx` are what tell an RSSI update of
+  // 1.6 ms / RBW from one of 0.94 and a host test must be able to step the clock for them
+  // (as it steps HistRadio::nowUs for a histogram).
+  virtual int sweep(uint8_t* levels) = 0;
+  virtual uint32_t nowUs() = 0;
   // The receiver left standing where it is, in continuous receive, for `us` microseconds. The
   // chip half is a delay and nothing else; the default is to stand there for no time at all, so
   // that a radio written before this task - every fake of test/test_scanner - is still one.
@@ -488,6 +558,11 @@ struct ScopeArmResult {
   int code = 0;
   unsigned device_errors = 0;  // what the chip said after the last calibration (0 before it)
   bool reloaded = false;       // the chip was reset and the plugin uploaded again on the way
+  // What the chip's error word held when this arm reached standby, which is what the sweep
+  // *before* it left there - and 0 for a plan of one segment, which is never given a standby to
+  // read it in (the frame's `dev`, phase 3.16's task 03). Read before anything else is asked of
+  // the chip and cleared at once, so that the calibration's own verdict below is its own.
+  unsigned before_errors = 0;
 };
 
 // The segment's centre as the plugin's setSweep() computes it - first + step * points / 2, in
@@ -538,9 +613,27 @@ void scopeCalibrationRange(const ScopePlan& plan, const ScopeSegment& seg, doubl
 bool settleScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
                         ScopeArmResult& out);
 
-// Arms `seg`: standby, the centre frequency, the image calibration for the segment's own range,
-// the chip's device errors read, the plugin's parameters, the settle - in that order and no
-// other. True when armed; false with `out` naming the call that returned the code.
+// Arms `seg`: standby, **the chip's error word read and cleared**, the centre frequency, the
+// image calibration for the segment's own range, the chip's device errors read, the plugin's
+// parameters, the settle - in that order and no other. True when armed; false with `out` naming
+// the call that returned the code.
+//
+// The read and the clear are made **only for a plan of more than one segment** and are
+// `out.before_errors`: a plan of one segment arms once and sweeps for ever, so it has no standby
+// to read the word in and is not given one (phase 3.16's task 03, deliverable 4). They stand
+// first because the word is what the *previous* sweep left - the last segment's, for segment 0 -
+// and because clearing it there is what makes the calibration's own verdict below its own.
+//
+// What they cost, by the code: `GetDeviceErrors` is a four-byte SPI stream (the opcode, the
+// status byte and two data bytes) and `ClearDeviceErrors` a three-byte one, at RadioLib's 2 MHz
+// default for this platform (BuildOpt.h, RADIOLIB_DEFAULT_SPI_SETTINGS) - **28 us of clocked
+// bytes** - plus the two one-microsecond BUSY settles of Module::SPItransferStream and the two
+// transactions' own overhead: **about 30 us, under 50**. It is deliberately **not** in
+// scopeSweepMs(): that figure prices an arm at kScopeSegmentUpdates RSSI updates and leaves out
+// the four SPI calls an arm already makes, which are an order of magnitude more (p3.16-02's
+// report, deviation 6), so 30 us of SPI added to it would make it less coherent and no truer.
+// At the widest plan of this pile - 33 segments - it is 0.99 ms, inside the one-millisecond
+// rounding `sweep` is quoted to.
 //
 // `cal` is what the chip was last calibrated for, read and written: a segment that lies inside
 // it is armed with neither a calibration nor the question to the chip that goes with one
@@ -562,6 +655,53 @@ bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSeg
                      ScopeCalibration& cal, ScopeArmResult& out);
 bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
                      ScopeArmResult& out);
+
+// ---------------------------------------------------------- how long the plugin's calls took
+//
+// `us` and `usx` of a frame: the shortest and the longest **whole sweep** among the sweeps that
+// made it, in microseconds, counting **the plugin's calls alone** - the time inside sweep(),
+// added over the sweep's segments. No arm, no settle, nothing between two sweeps.
+//
+// Why it is worth a frame member: with the plan's own point count it is the time a point costs,
+// and that is the one measurement that tells an RSSI update of 1.6 ms / RBW - the number
+// kScopeUpdateMsKhz and the plugin's own timing are built on - from the 0.94 ms / RBW of
+// Semtech's own table (data sheet Rev 2.2, 13.5.4, table 13-82). At 4.8 kHz and 250 points in one
+// segment the two are 83 ms and 48 ms, which no reading of a capture can confuse. And the spread
+// between `us` and `usx` is what the latency the plugin's `wait_update` actually sees looks like
+// on the air (tasks/phase-3.16/FOLLOWUPS.md, *The latency is counted in updates the plugin saw*).
+class ScopeSweepTime {
+ public:
+  // Begins a frame: no sweep measured, and the sweep being run forgotten.
+  void reset();
+
+  // One plugin call of the sweep being run, in microseconds.
+  void segment(uint32_t us);
+
+  // Every segment of one sweep has gone in: that sweep is whole and counts.
+  void sweepDone();
+
+  bool any() const { return sweeps_ != 0; }
+  uint16_t sweeps() const { return sweeps_; }
+  uint32_t shortestUs() const { return shortest_; }  // `us`; 0 before the first whole sweep
+  uint32_t longestUs() const { return longest_; }    // `usx`
+
+ private:
+  uint32_t running_ = 0;   // the sweep being run, so far
+  uint32_t shortest_ = 0;
+  uint32_t longest_ = 0;
+  uint16_t sweeps_ = 0;
+};
+
+// One segment's plugin call, timed: the clock read, sweep() called, the clock read again and the
+// microseconds between them added to `time`. False with `out` naming kScopeArmSweep and carrying
+// the code when the plugin refused, and then nothing is added - a call that failed is not a
+// measurement of one that worked.
+//
+// Unsigned arithmetic on the clock, so a microsecond counter that wrapped mid-call is still the
+// right difference (the board's micros() wraps every 71.6 minutes and the longest call there is
+// holds the chip for 0.7 s).
+bool sweepScopeSegment(ScopeArmRadio& radio, uint8_t* levels, ScopeSweepTime& time,
+                       ScopeArmResult& out);
 
 // How many bytes the NDJSON line of a frame of `points` points is at most, newline included:
 // the base64 of one byte per point plus the longest the envelope can be. The emitted line is
@@ -586,11 +726,19 @@ uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz,
 // can hold it to the byte - and the bytes of a `scope` asked for with neither a segment width nor
 // a settle are the ones this line had before phase 3.16's task 02: the two numbers are named only
 // when one of them is not the default.
+//
+// Phase 3.16's task 03 adds `reg=` and `gain=` after them, each named only when its own word was
+// on the line - so a `scope` asked for with none of the four words gets the line it got before
+// either task, byte for byte.
 void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes);
 
 // And the sentence a request this firmware does not run is refused with, which names every bound
 // planScope() has.
 extern const char kScopeRefusal[];
+
+// The sentence a `scope` line that names a pair of words twice is refused with: one word of each
+// pair at most, and either of them anywhere after the two ends (phase 3.16's task 03).
+extern const char kScopeWordRefusal[];
 
 // Sweeps per second times ten, as the frame's `sps` carries it: 0 when no time has passed.
 uint16_t scopeSweepsPerSecondX10(uint32_t sweeps, uint32_t elapsed_ms);

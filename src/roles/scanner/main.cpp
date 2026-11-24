@@ -252,8 +252,11 @@ void handleCommand(char* line, Source from) {
 
     case kVerbScope: {
       ScopeArgs args;
-      if (!parseScope(tokens, args)) {
-        g_lines.ack(name, false, usageOf(verb));
+      // `why` is the sentence a refusal the parser can name is answered with - a pair of words
+      // named twice - and null for everything else, which is the usage line as it always was.
+      const char* why = nullptr;
+      if (!parseScope(tokens, args, &why)) {
+        g_lines.ack(name, false, why != nullptr ? why : usageOf(verb));
         return;
       }
       radio::stop();  // and the plugin goes with it, whatever is being started next
@@ -283,6 +286,8 @@ void handleCommand(char* line, Source from) {
       request.agg = args.agg;
       request.seg_mhz = args.seg_mhz;
       request.settle_us = args.settle_us;
+      request.reg = args.reg;
+      request.gain = args.gain;
       // The sink's own floor: the Walter's UART is 115200 baud and a frame has to fit inside a
       // fraction of the interval, while USB CDC is asked for every sweep there is.
       request.sink_baud = (from == kFromWalter) ? uint32_t(WALTER_BAUD) : 0u;

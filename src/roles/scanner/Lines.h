@@ -139,6 +139,16 @@ struct ScopeFields {
   ScopePlan plan;
   uint16_t sweeps = 0;            // how many sweeps went into this frame
   uint16_t sps_x10 = 0;           // sweeps per second x10 since the previous frame
+  // How long the plugin's own calls took: the shortest and the longest whole sweep of this frame,
+  // in microseconds, the time inside sweep() added over the sweep's segments and nothing else
+  // (ScopeSweepTime, src/roles/scanner/Sweep.h). `us` and `usx` of the line.
+  uint32_t us = 0;
+  uint32_t usx = 0;
+  // The OR of the chip's GetDeviceErrors word over this frame's arms, each read in standby before
+  // anything else was asked of the chip and cleared there - so a word is the sweep before that
+  // arm's. `dev` of the line, and written **only when the plan has more than one segment**,
+  // because a plan of one has no standby to read it in (phase 3.16's task 03).
+  unsigned device_errors = 0;
   const uint8_t* levels = nullptr;  // plan.points of them
 };
 

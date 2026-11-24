@@ -1182,7 +1182,7 @@ decides whether any of the rest can be walked at all.
   of the matching network across the whole tuning range, and every later
   reading is worth more with it to subtract (`--baseline`). Keep the file with
   the site's notes. Peaks seen on the dummy load → ______. (bench, 2026-10-22, 479f482)
-- [ ] **p3.1-01, p3.16-01, p3.16-02** **The image check**, which is what the segments exist for.
+- [ ] **p3.1-01, p3.16-01, p3.16-02, p3.16-03** **The image check**, which is what the segments exist for.
   The tinySA Ultra as a generator at a known frequency, through an attenuator
   into the RAK, and a `scope` of a wide span around it: there should be **one
   peak where the generator is**, and nothing at the image (or no more than the
@@ -1223,6 +1223,20 @@ decides whether any of the rest can be walked at all.
   → ______. Run it after the thirteen lines above, with the same generator and
   the same `"rf": "antenna"`; the captures go in
   `tools/noisescope/captures/p3.16-02/`.
+  `p3.16-03` then gave `scope` four **words** — `ldo`, `dcdc`, `boost`,
+  `noboost`, anywhere after the two ends — and made every frame say how long its
+  sweeps took (`us`, `usx`) and, with more than one segment, what the chip's
+  error word held (`dev`). **It is measured on the unit at Bellevue and not
+  here** (`tasks/phase-3.16/README.md`, *The garden instead of the bench*): the
+  echoes have only ever been seen there. What this bench can still add, with the
+  generator in place, is three lines run by hand and compared:
+  `scope 780 960 0 467 1000`, the same line with `ldo`, and the same line with
+  `noboost` — echoes gone on the LDO → ______, echoes down by more than the
+  carrier is at the lower gain → ______ — and `scope 869 870.2 250 4.8 1000`,
+  whose `us` reads about **83 ms** if an RSSI update is 1.6 ms / RBW and about
+  **49 ms** if it is Semtech's 0.94 (→ ______ µs). `dev` of every frame of the
+  wide span should be `0000`, and anything else is the first time this chip has
+  said its synthesizer lost lock (→ ______).
 - [ ] **p3.1-01** **The site through the cavity filter.** `scope 791 960` with
   the baseline subtracted: LTE800 downlink (791–821) and GSM900 downlink
   (925–960) as they actually reach the radio. Strongest carrier → ______ at

@@ -28,8 +28,10 @@ namespace scanner {
 constexpr size_t kMaxLineBytes = 160;
 
 // At most this many words are looked at; `scope f0 f1 points rbw interval agg seg_mhz settle_us`
-// is the longest command and has nine (phase 3.16's task 02 added the last two).
-constexpr int kMaxTokens = 9;
+// is the longest command and has nine (phase 3.16's task 02 added the last two), and phase
+// 3.16's task 03 lets one word of `ldo`|`dcdc` and one of `boost`|`noboost` stand anywhere after
+// the two ends - so eleven is the longest line that is still a command.
+constexpr int kMaxTokens = 11;
 
 // A `time` before this is not a time: it is a host that sent a counter, a zero or a parse
 // accident (November 2023).
@@ -102,13 +104,20 @@ struct ScanArgs {
 // together or not at all, as NoiseScope read them - `sweep 865` is the default sweep.
 ScanArgs parseScan(const Tokens& tokens, bool is_hist, const ScanDefaults& defaults);
 
-// `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]`, and `scope off`.
+// `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` with
+// `ldo`|`dcdc` and `boost`|`noboost` anywhere after the two ends, and `scope off`.
 //
 // Unlike `sweep`, both ends are **required**: there is no default span for a mode whose point is
 // that the span is the operator's choice, from a channel to the whole of what the radio tunes.
 // Whether the numbers are a scope this firmware runs is src/roles/scanner/Sweep.h's answer
-// (planScope) and not the parser's; what the parser refuses is a missing end and an `agg` that
-// is not one of the three words.
+// (planScope) and not the parser's; what the parser refuses is a missing end, an `agg` that
+// is not one of the three words, and a pair of words named twice.
+//
+// **The four words are taken out of the line first**, wherever they stand after the two ends,
+// and what is left is read exactly as it was read before they existed - so `scope 780 960 0 467
+// 1000 ldo` and `scope 780 960 0 467 1000 max 5.6 500 ldo noboost` are both lines, and a word
+// never needs the numbers before it. That is for the forty characters a session's step has
+// (tasks/phase-3.16/README.md, *The garden instead of the bench*).
 struct ScopeArgs {
   bool off = false;  // `scope off`, which is `stop` for this mode alone
   double f0 = 0.0;
@@ -119,8 +128,14 @@ struct ScopeArgs {
   ScopeAgg agg = kScopeAggMax;
   double seg_mhz = 0.0;      // 0 = kScopeSegmentMhz, the widest a segment may be
   uint32_t settle_us = 0;    // 0 = today's arm, no stand on the segment's first point
+  ScopeRegulator reg = kScopeRegulatorBuild;  // no word = the build's regulator
+  ScopeGain gain = kScopeGainAsLeft;          // no word = the gain `boost on|off` left
 };
-bool parseScope(const Tokens& tokens, ScopeArgs& out);
+
+// `why`, when it is not null, is the sentence a refusal is answered with - kScopeWordRefusal for
+// a pair named twice, and left as it was for everything else, which the caller answers with the
+// usage line as it always did.
+bool parseScope(const Tokens& tokens, ScopeArgs& out, const char** why = nullptr);
 
 // `dwell <f_mhz> [secs [win_ms]]`. False when no frequency was given; the two optional numbers
 // are clamped by src/roles/scanner/Sweep.h.

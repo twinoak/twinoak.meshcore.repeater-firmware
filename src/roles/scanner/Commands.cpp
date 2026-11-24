@@ -95,7 +95,8 @@ const char* nameOf(Verb verb) {
 const char* usageOf(Verb verb) {
   switch (verb) {
     case kVerbScope: return "usage: scope <f0> <f1> [points [rbw_khz [interval_ms [max|mean|last"
-                            " [seg_mhz [settle_us]]]]]] | scope off";
+                            " [seg_mhz [settle_us]]]]]] [ldo|dcdc] [boost|noboost]"
+                            " | scope off";
     case kVerbDwell: return "usage: dwell <f_mhz> [secs [win_ms]]";
     case kVerbHome: return "usage: home <f_mhz> [bw_khz sf cr]";
     case kVerbBoost: return "usage: boost on|off";
@@ -124,7 +125,7 @@ ScanArgs parseScan(const Tokens& tokens, bool is_hist, const ScanDefaults& defau
   return out;
 }
 
-bool parseScope(const Tokens& tokens, ScopeArgs& out) {
+bool parseScope(const Tokens& tokens, ScopeArgs& out, const char** why) {
   const char* first = arg(tokens, 1);
   if (first == nullptr) return false;
   ScopeArgs parsed;
@@ -136,17 +137,53 @@ bool parseScope(const Tokens& tokens, ScopeArgs& out) {
   }
   // Both ends, together and required - a span is two numbers or it is not a span.
   if (tokens.count < 3) return false;
+
+  // The four words of phase 3.16's task 03, taken out of the line **first** and wherever they
+  // stand after the two ends, so that what is left below is read exactly as it was read before
+  // they existed and a word never needs the numbers before it (forty characters a step).
+  // One word of each pair at most: both words of a pair contradict each other and the same word
+  // twice says nothing new, so either is a line nobody meant and is refused in a sentence.
+  Tokens rest;
+  rest.at[rest.count++] = tokens.at[0];
+  rest.at[rest.count++] = first;
+  rest.at[rest.count++] = tokens.at[2];
+  bool reg_taken = false;
+  bool gain_taken = false;
+  for (int i = 3; i < tokens.count; i++) {
+    ScopeRegulator reg = kScopeRegulatorBuild;
+    ScopeGain gain = kScopeGainAsLeft;
+    if (scopeRegulatorOf(tokens.at[i], reg)) {
+      if (reg_taken) {
+        if (why != nullptr) *why = kScopeWordRefusal;
+        return false;
+      }
+      reg_taken = true;
+      parsed.reg = reg;
+      continue;
+    }
+    if (scopeGainOf(tokens.at[i], gain)) {
+      if (gain_taken) {
+        if (why != nullptr) *why = kScopeWordRefusal;
+        return false;
+      }
+      gain_taken = true;
+      parsed.gain = gain;
+      continue;
+    }
+    rest.at[rest.count++] = tokens.at[i];
+  }
+
   parsed.f0 = asDouble(first, 0.0);
-  parsed.f1 = asDouble(arg(tokens, 2), 0.0);
-  if (tokens.count >= 4) parsed.points = asU32(arg(tokens, 3), 0);
-  if (tokens.count >= 5) parsed.rbw_khz = asDouble(arg(tokens, 4), 0.0);
-  if (tokens.count >= 6) parsed.interval_ms = asU32(arg(tokens, 5), 0);
-  if (tokens.count >= 7 && !scopeAggOf(arg(tokens, 6), parsed.agg)) return false;
+  parsed.f1 = asDouble(arg(rest, 2), 0.0);
+  if (rest.count >= 4) parsed.points = asU32(arg(rest, 3), 0);
+  if (rest.count >= 5) parsed.rbw_khz = asDouble(arg(rest, 4), 0.0);
+  if (rest.count >= 6) parsed.interval_ms = asU32(arg(rest, 5), 0);
+  if (rest.count >= 7 && !scopeAggOf(arg(rest, 6), parsed.agg)) return false;
   // The two numbers of phase 3.16's task 02, after the aggregate so that every line typed before
   // it reads the same: the widest a segment may be, and how long the receiver stands on a
   // segment's first point before the reading that counts. planScope() bounds both.
-  if (tokens.count >= 8) parsed.seg_mhz = asDouble(arg(tokens, 7), 0.0);
-  if (tokens.count >= 9) parsed.settle_us = asU32(arg(tokens, 8), 0);
+  if (rest.count >= 8) parsed.seg_mhz = asDouble(arg(rest, 7), 0.0);
+  if (rest.count >= 9) parsed.settle_us = asU32(arg(rest, 8), 0);
   out = parsed;
   return true;
 }
