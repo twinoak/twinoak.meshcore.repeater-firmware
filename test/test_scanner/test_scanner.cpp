@@ -170,6 +170,25 @@ Meta someMeta() {
   return m;
 }
 
+// A file of the repository, whole, through PROJECT_DIR - as the plan table is read below, and as
+// test/test_rails reads the sources its rules are about. Empty when it cannot be read, which the
+// one test that uses it asserts against.
+std::string fileText(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in.good()) return std::string();
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// How many times `what` occurs in `text`, overlaps not counted.
+size_t countOf(const std::string& text, const std::string& what) {
+  if (what.empty()) return 0;
+  size_t n = 0;
+  for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + what.size())) {
+    n++;
+  }
+  return n;
+}
+
 }  // namespace
 
 // ================================================================= 1. the commands
@@ -184,14 +203,14 @@ TEST(Commands, TheCommandWordIsCaseInsensitiveAndAnArgumentIsNot) {
   EXPECT_EQ(kVerbSweep, verbOf(tokens.at[0]));
 }
 
-TEST(Commands, RepeatedSeparatorsAreOneAndTenWordsAreNine) {
+TEST(Commands, RepeatedSeparatorsAreOneAndTwelveWordsAreEleven) {
   Line line("  dwell \t\t 869.618   300  ");
   const Tokens tokens = tokensOf(line);
   ASSERT_EQ(3, tokens.count);
   EXPECT_STREQ("dwell", tokens.at[0]);
   EXPECT_STREQ("300", tokens.at[2]);
 
-  Line many("sweep 1 2 3 4 5 6 7 8 9");
+  Line many("sweep 1 2 3 4 5 6 7 8 9 10 11");
   const Tokens capped = tokensOf(many);
   EXPECT_EQ(kMaxTokens, capped.count) << "a longer line is read up to the cap and no further";
 }
@@ -1497,8 +1516,17 @@ struct FakeArmRadio : ScopeArmRadio {
   int calibrate_code = 0;
   int sweep_code = 0;
   int reload_code = 0;
+  int sweep_call_code = 0;
   unsigned device_errors = 0;
   int refusals = 0;  // how many calibrations in a row the chip refuses (IMG_CALIB_ERR), then none
+  // Phase 3.16's task 03: the word the chip has *before* an arm reads it - what the sweep
+  // before that arm left - and the clock the sweeps are timed on. `standby_errors` is what
+  // the first read of an arm answers and `clock_us` is stepped by `sweep_us` on every
+  // plugin call, so a test says what a frame's `us`, `usx` and `dev` must come to.
+  unsigned standby_errors = 0;
+  bool cleared = false;
+  uint32_t clock_us = 0;
+  uint32_t sweep_us = 0;
 
   FakeArmRadio() { log[0] = '\0'; }
 
@@ -1512,6 +1540,7 @@ struct FakeArmRadio : ScopeArmRadio {
   }
   int standby() override {
     note("standby;");
+    cleared = false;  // the arm's first read of the word comes after this one and before the clear
     return standby_code;
   }
   int setFrequency(double mhz) override {
@@ -1524,12 +1553,27 @@ struct FakeArmRadio : ScopeArmRadio {
   }
   unsigned deviceErrors() override {
     note("deviceErrors;");
+    // The arm of a plan with more than one segment reads the word twice: first in standby, where
+    // it is the previous sweep's, and again after its own calibration. The clear stands between
+    // the two and standby() unsets it, so `cleared` tells them apart in every arm of a sweep.
+    if (!cleared) return standby_errors;
     if (refusals > 0) {
       refusals--;
       return device_errors | kScopeImageCalibrationError;
     }
     return device_errors;
   }
+  void clearDeviceErrors() override {
+    note("clearDeviceErrors;");
+    cleared = true;
+  }
+  int sweep(uint8_t* levels) override {
+    note("sweep;");
+    (void)levels;
+    clock_us += sweep_us;
+    return sweep_call_code;
+  }
+  uint32_t nowUs() override { return clock_us; }
   int reload() override {
     note("reload;");
     return reload_code;
@@ -1543,6 +1587,12 @@ struct FakeArmRadio : ScopeArmRadio {
   }
 };
 
+// The first calls of an arm for a plan of **more than one segment**: standby, and then the chip's
+// error word read and cleared before anything else is asked of it - the frame's `dev` (phase
+// 3.16's task 03, deliverable 4). A plan of one segment arms once and sweeps for ever, so it is
+// not given a standby to read the word in and its arm begins with "standby;" and nothing else.
+static const char kArmStandby[] = "standby;deviceErrors;clearDeviceErrors;";
+
 static ScopePlan planOf(double f0, double f1, uint32_t points) {
   ScopeRequest r;
   r.f0 = f0;
@@ -1553,7 +1603,7 @@ static ScopePlan planOf(double f0, double f1, uint32_t points) {
   return plan;
 }
 
-TEST(Scope, ASegmentIsArmedInTheOneOrderTheBoardAccepts) {
+TEST(Scope, ASegmentIsArmedInTheOneOrderTheBoardAcceptsWithTheErrorWordReadAndClearedFirst) {
   // `scope 150 250`: four segments of 63 points, 400 kHz apart, through the 467 kHz filter - the
   // span of p3.5-02's probe table, whose third segment the first board refused until the order
   // below. The frequency is set *before* anything is calibrated, exactly one calibration is
@@ -1570,15 +1620,21 @@ TEST(Scope, ASegmentIsArmedInTheOneOrderTheBoardAccepts) {
   EXPECT_NEAR(200.6 + 61 * 0.4 + 0.2335, seg.cal_hi_mhz, 1e-6);
 
   FakeArmRadio radio;
+  radio.standby_errors = kScopePllLockError;  // what the sweep before this arm left
   ScopeArmResult out;
   EXPECT_TRUE(armScopeSegment(radio, plan, seg, out));
   EXPECT_EQ(kScopeArmNone, out.failed);
   EXPECT_EQ(0, out.code);
-  char expected[160];
+  // The word is read in standby, before anything else is asked of the chip, and cleared there -
+  // so what the arm reports is the sweep before it, and the calibration's own verdict below is
+  // its own.
+  EXPECT_EQ(kScopePllLockError, out.before_errors);
+  EXPECT_EQ(0u, out.device_errors) << "the calibration's verdict, after the clear";
+  char expected[200];
   snprintf(expected, sizeof(expected),
-           "standby;setFrequency(213.000);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "%ssetFrequency(213.000);calibrateImage(%.3f,%.3f);deviceErrors;"
            "setSweep(200.600,0.400,62,467.0);",
-           seg.cal_lo_mhz, seg.cal_hi_mhz);
+           kArmStandby, seg.cal_lo_mhz, seg.cal_hi_mhz);
   EXPECT_STREQ(expected, radio.log);
   EXPECT_FALSE(out.reloaded);
 
@@ -1591,11 +1647,11 @@ TEST(Scope, AnArmThatFailsNamesTheCallAndStopsThere) {
   const ScopePlan plan = planOf(150.0, 250.0, 250);
   ScopeSegment seg;
   ASSERT_TRUE(scopeSegment(plan, 2, seg));
-  char calibrated[160];  // the log up to and including the calibration
+  char calibrated[200];  // the log up to and including the calibration
   snprintf(calibrated, sizeof(calibrated),
-           "standby;setFrequency(213.000);calibrateImage(%.3f,%.3f);", seg.cal_lo_mhz,
+           "%ssetFrequency(213.000);calibrateImage(%.3f,%.3f);", kArmStandby, seg.cal_lo_mhz,
            seg.cal_hi_mhz);
-  char asked[200];  // and with the chip asked
+  char asked[256];  // and with the chip asked
   snprintf(asked, sizeof(asked), "%sdeviceErrors;", calibrated);
 
   {
@@ -1614,7 +1670,9 @@ TEST(Scope, AnArmThatFailsNamesTheCallAndStopsThere) {
     EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
     EXPECT_EQ(kScopeArmSetFrequency, out.failed);
     EXPECT_EQ(-705, out.code);
-    EXPECT_STREQ("standby;setFrequency(213.000);", radio.log);
+    char expected[160];
+    snprintf(expected, sizeof(expected), "%ssetFrequency(213.000);", kArmStandby);
+    EXPECT_STREQ(expected, radio.log);
   }
   {
     // A calibration call that returns a code is a refused calibration too: one reload, the
@@ -1626,7 +1684,7 @@ TEST(Scope, AnArmThatFailsNamesTheCallAndStopsThere) {
     EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
     EXPECT_EQ(-707, out.code);
     EXPECT_TRUE(out.reloaded);
-    char expected[400];
+    char expected[512];
     snprintf(expected, sizeof(expected), "%sreload;%s", calibrated, calibrated);
     EXPECT_STREQ(expected, radio.log);
   }
@@ -1644,7 +1702,7 @@ TEST(Scope, AnArmThatFailsNamesTheCallAndStopsThere) {
     EXPECT_EQ(-707, out.code);
     EXPECT_EQ(0x0050u, out.device_errors);
     EXPECT_TRUE(out.reloaded);  // refused, reloaded, refused again: then the err
-    char expected[512];
+    char expected[700];
     snprintf(expected, sizeof(expected), "%sreload;%s", asked, asked);
     EXPECT_STREQ(expected, radio.log);
   }
@@ -1675,9 +1733,9 @@ TEST(Scope, ACalibrationTheChipRefusesIsAskedForOnceMoreAfterAReload) {
   const ScopePlan plan = planOf(150.0, 960.0, 2048);
   ScopeSegment seg;
   ASSERT_TRUE(scopeSegment(plan, 1, seg));
-  char arm[160];
-  snprintf(arm, sizeof(arm), "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;",
-           double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz);
+  char arm[256];
+  snprintf(arm, sizeof(arm), "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;",
+           kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz);
   char sweep[96];
   snprintf(sweep, sizeof(sweep), "setSweep(%.3f,%.3f,%u,%.1f);", seg.first_mhz,
            plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
@@ -1689,7 +1747,7 @@ TEST(Scope, ACalibrationTheChipRefusesIsAskedForOnceMoreAfterAReload) {
     EXPECT_TRUE(out.reloaded);
     EXPECT_EQ(kScopeArmNone, out.failed);
     EXPECT_EQ(0u, out.device_errors & kScopeImageCalibrationError);
-    char expected[512];
+    char expected[700];
     snprintf(expected, sizeof(expected), "%sreload;%s%s", arm, arm, sweep);
     EXPECT_STREQ(expected, radio.log);
   }
@@ -1702,7 +1760,7 @@ TEST(Scope, ACalibrationTheChipRefusesIsAskedForOnceMoreAfterAReload) {
     EXPECT_TRUE(out.reloaded);
     EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
     EXPECT_EQ(kScopeArmCalibrationFailed, out.code);
-    char expected[512];
+    char expected[700];
     snprintf(expected, sizeof(expected), "%sreload;%s", arm, arm);
     EXPECT_STREQ(expected, radio.log);
   }
@@ -1744,12 +1802,13 @@ TEST(Scope, EverySegmentOfTheWholeRangeIsCalibratedForWhereItsSweepRuns) {
     FakeArmRadio radio;
     ScopeArmResult out;
     ASSERT_TRUE(armScopeSegment(radio, plan, seg, out)) << "segment " << i;
-    char expected[160];
+    char expected[256];
     snprintf(expected, sizeof(expected),
-             "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+             "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
              "setSweep(%.3f,%.3f,%u,%.1f);",
-             double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz,
-             seg.first_mhz, plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+             kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz,
+             seg.cal_hi_mhz, seg.first_mhz, plan.step_khz / 1000.0, unsigned(seg.points),
+             plan.rbw_khz);
     EXPECT_STREQ(expected, radio.log) << "segment " << i;
     EXPECT_LT(seg.cal_lo_mhz, seg.first_mhz) << "segment " << i;
     if (i > 0) {
@@ -2016,11 +2075,11 @@ TEST(Scope, ASettleStandsTheReceiverOnTheSegmentsFirstPointAfterTheSweepIsLoaded
   FakeArmRadio radio;
   ScopeArmResult out;
   EXPECT_TRUE(armScopeSegment(radio, plan, seg, out));
-  char expected[256];
+  char expected[320];
   snprintf(expected, sizeof(expected),
-           "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
            "setSweep(%.3f,%.3f,%u,%.1f);setFrequency(%.3f);settle(500);",
-           double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
+           kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
            plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz, seg.first_mhz);
   EXPECT_STREQ(expected, radio.log);
 
@@ -2031,9 +2090,9 @@ TEST(Scope, ASettleStandsTheReceiverOnTheSegmentsFirstPointAfterTheSweepIsLoaded
   FakeArmRadio quiet;
   EXPECT_TRUE(armScopeSegment(quiet, plan, seg, out));
   snprintf(expected, sizeof(expected),
-           "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
            "setSweep(%.3f,%.3f,%u,%.1f);",
-           double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
+           kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
            plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
   EXPECT_STREQ(expected, quiet.log);
 
@@ -2122,21 +2181,21 @@ TEST(Scope, ASegmentInsideACalibratedRangeIsArmedWithoutACalibration) {
       EXPECT_LE(hi - lo, kScopeSegmentMhz + 1e-9) << "segment " << i;
       EXPECT_GE(hi, seg.cal_hi_mhz - 1e-9) << "segment " << i;
       covered_to = hi;
-      char expected[256];
+      char expected[320];
       snprintf(expected, sizeof(expected),
-               "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+               "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
                "setSweep(%.3f,%.3f,%u,%.1f);",
-               double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
+               kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
                plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
       EXPECT_STREQ(expected, one.log) << "segment " << i;
     } else {
       // Standby and the centre frequency still, because setSweep()'s own setFrequency() has to be
       // a move of zero - and then the plugin's parameters, and nothing of the chip asked.
-      char expected[256];
+      char expected[320];
       snprintf(expected, sizeof(expected),
-               "standby;setFrequency(%.3f);setSweep(%.3f,%.3f,%u,%.1f);",
-               double(scopeSegmentCentreMhz(plan, seg)), seg.first_mhz, plan.step_khz / 1000.0,
-               unsigned(seg.points), plan.rbw_khz);
+               "%ssetFrequency(%.3f);setSweep(%.3f,%.3f,%u,%.1f);",
+               kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), seg.first_mhz,
+               plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
       EXPECT_STREQ(expected, one.log) << "segment " << i;
       EXPECT_LE(seg.cal_hi_mhz, covered_to + kScopeCalibrationSlackMhz) << "segment " << i;
     }
@@ -2184,9 +2243,9 @@ TEST(Scope, ACalibrationTheChipRefusesIsStillReloadedAndAskedForWhenARangeIsCarr
   double hi = 0.0;
   scopeCalibrationRange(plan, seg, lo, hi);
 
-  char arm[200];
-  snprintf(arm, sizeof(arm), "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;",
-           double(scopeSegmentCentreMhz(plan, seg)), lo, hi);
+  char arm[256];
+  snprintf(arm, sizeof(arm), "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;",
+           kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), lo, hi);
   char sweep[96];
   snprintf(sweep, sizeof(sweep), "setSweep(%.3f,%.3f,%u,%.1f);", seg.first_mhz,
            plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
@@ -2197,7 +2256,7 @@ TEST(Scope, ACalibrationTheChipRefusesIsStillReloadedAndAskedForWhenARangeIsCarr
     ScopeArmResult out;
     EXPECT_TRUE(armScopeSegment(radio, plan, seg, cal, out));
     EXPECT_TRUE(out.reloaded);
-    char expected[512];
+    char expected[700];
     snprintf(expected, sizeof(expected), "%sreload;%s%s", arm, arm, sweep);
     EXPECT_STREQ(expected, radio.log);
     EXPECT_TRUE(cal.valid) << "the arm the chip accepted is the one that is remembered";
@@ -2224,6 +2283,626 @@ TEST(Scope, ACalibrationTheChipRefusesIsStillReloadedAndAskedForWhenARangeIsCarr
     EXPECT_TRUE(armScopeSegment(radio, plan, seg, cal, out));
     EXPECT_NE(nullptr, strstr(radio.log, "calibrateImage"));
     EXPECT_TRUE(cal.valid);
+  }
+}
+
+// --------------------------------------------- phase 3.16's four words, and what a frame says
+
+// Every `scope` line this section uses as an example, so that one test can hold them all to the
+// forty characters a NoiseScope session's step has (meshmaster.dk's contract and the Walter's;
+// tasks/phase-3.16/README.md, *The garden instead of the bench*). A line that does not fit is a
+// line no session can type, and an example nobody can run is not an example.
+static const char* const kWordLines[] = {
+    "scope 780 960 0 467 1000 ldo",
+    "scope 780 960 0 467 1000 dcdc",
+    "scope 780 960 0 467 1000 noboost",
+    "scope 780 960 0 467 1000 max 5.6 500 ldo noboost",  // every word and both numbers at once
+    "scope 780 960 ldo 0 467 1000",
+    "scope 780 960 0 ldo 467 1000",
+    "scope 780 960 noboost ldo",
+    "scope 780 960 ldo noboost",
+    "scope 863 876 250 58.6 1000 ldo",
+    "scope 863 876 250 58.6 1000 dcdc boost",
+};
+
+TEST(Scope, EveryExampleLineOfTheWordsFitsASessionsFortyCharactersOrIsSaidNotTo) {
+  // Nine of the ten fit. The tenth is every word and both numbers at once - a line the parser
+  // reads and a session cannot type - and it is here to say that out loud rather than to be
+  // copied into a list: the garden's lists are task 04's and are held to 40 there.
+  size_t too_long = 0;
+  for (const char* line : kWordLines) {
+    if (std::strlen(line) > 40) {
+      too_long++;
+      EXPECT_STREQ("scope 780 960 0 467 1000 max 5.6 500 ldo noboost", line)
+          << "a new example longer than a step's line";
+    }
+  }
+  EXPECT_EQ(1u, too_long) << "one example is deliberately longer than a session's line";
+  EXPECT_LE(std::strlen("scope 780 960 0 467 1000 max 5.6 500 ldo"), 40u)
+      << "every word with the two numbers but one still fits";
+}
+
+TEST(Scope, TheFourWordsAreTakenWhereverTheyStandAndWhatIsLeftIsReadAsItAlwaysWas) {
+  // The four words are taken out of the line **first**, wherever they stand after the two ends,
+  // and what is left is read exactly as it was read before they existed - so a word never needs
+  // the numbers before it, which is what forty characters a step buys.
+  {
+    Line at_the_end("scope 780 960 0 467 1000 ldo");
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(at_the_end), args));
+    EXPECT_EQ(kScopeRegulatorLdo, args.reg);
+    EXPECT_EQ(kScopeGainAsLeft, args.gain) << "the other pair is untouched";
+    EXPECT_DOUBLE_EQ(780.0, args.f0);
+    EXPECT_DOUBLE_EQ(960.0, args.f1);
+    EXPECT_EQ(0u, args.points);
+    EXPECT_DOUBLE_EQ(467.0, args.rbw_khz);
+    EXPECT_EQ(1000u, args.interval_ms);
+    EXPECT_EQ(kScopeAggMax, args.agg) << "no aggregate was given and the word is not one";
+    EXPECT_DOUBLE_EQ(0.0, args.seg_mhz);
+    EXPECT_EQ(0u, args.settle_us);
+  }
+  {
+    // The same numbers with the word in the aggregate's own place, and in the point count's.
+    for (const char* text : {"scope 780 960 0 ldo 467 1000", "scope 780 960 ldo 0 467 1000"}) {
+      Line line(text);
+      ScopeArgs args;
+      ASSERT_TRUE(parseScope(tokensOf(line), args)) << text;
+      EXPECT_EQ(kScopeRegulatorLdo, args.reg) << text;
+      EXPECT_EQ(0u, args.points) << text;
+      EXPECT_DOUBLE_EQ(467.0, args.rbw_khz) << text;
+      EXPECT_EQ(1000u, args.interval_ms) << text;
+    }
+  }
+  {
+    // Both pairs, in either order, with no numbers at all after the two ends.
+    for (const char* text : {"scope 780 960 ldo noboost", "scope 780 960 noboost ldo"}) {
+      Line line(text);
+      ScopeArgs args;
+      ASSERT_TRUE(parseScope(tokensOf(line), args)) << text;
+      EXPECT_EQ(kScopeRegulatorLdo, args.reg) << text;
+      EXPECT_EQ(kScopeGainNoBoost, args.gain) << text;
+      EXPECT_EQ(0u, args.points) << text;
+      EXPECT_DOUBLE_EQ(0.0, args.rbw_khz) << text;
+      EXPECT_EQ(0u, args.interval_ms) << text;
+    }
+  }
+  {
+    // And every number there is with both words after them: the longest line the parser reads.
+    Line full("scope 780 960 0 467 1000 max 5.6 500 ldo noboost");
+    Tokens tokens = tokensOf(full);
+    ASSERT_EQ(11, tokens.count) << "eleven words is kMaxTokens, and this is what needs it";
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokens, args));
+    EXPECT_EQ(kScopeRegulatorLdo, args.reg);
+    EXPECT_EQ(kScopeGainNoBoost, args.gain);
+    EXPECT_DOUBLE_EQ(5.6, args.seg_mhz);
+    EXPECT_EQ(500u, args.settle_us);
+    EXPECT_DOUBLE_EQ(467.0, args.rbw_khz);
+    EXPECT_EQ(1000u, args.interval_ms);
+    EXPECT_EQ(kScopeAggMax, args.agg);
+  }
+  {
+    // `dcdc` and `boost` are words too, and neither is "the build's" or "the setting's": a line
+    // that names one asks for it outright.
+    Line dc("scope 863 876 250 58.6 1000 dcdc boost");
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(dc), args));
+    EXPECT_EQ(kScopeRegulatorDcDc, args.reg);
+    EXPECT_EQ(kScopeGainBoost, args.gain);
+  }
+  {
+    // `scope off` is still the one word that is not a number, and it takes nothing else.
+    Line off("scope off ldo");
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(off), args));
+    EXPECT_TRUE(args.off);
+    EXPECT_EQ(kScopeRegulatorBuild, args.reg);
+  }
+}
+
+TEST(Scope, TenLinesOfTodaysParseToWhatTheyParsedToOnMain) {
+  // Ten lines nobody typed a word on, each with what main's parser made of it written out: a
+  // word taken out of a line must not change a line that has none. The last two are the wide
+  // span of 23 November and the garden's 4.8 kHz step.
+  struct Case {
+    const char* line;
+    double f0;
+    double f1;
+    uint32_t points;
+    double rbw_khz;
+    uint32_t interval_ms;
+    ScopeAgg agg;
+    double seg_mhz;
+    uint32_t settle_us;
+  };
+  const Case cases[] = {
+      {"scope 863 870", 863.0, 870.0, 0, 0.0, 0, kScopeAggMax, 0.0, 0},
+      {"scope 150 960 2048", 150.0, 960.0, 2048, 0.0, 0, kScopeAggMax, 0.0, 0},
+      {"scope 863 870 250 39", 863.0, 870.0, 250, 39.0, 0, kScopeAggMax, 0.0, 0},
+      {"scope 863 870 250 39 500", 863.0, 870.0, 250, 39.0, 500, kScopeAggMax, 0.0, 0},
+      {"scope 863 870 250 39 500 mean", 863.0, 870.0, 250, 39.0, 500, kScopeAggMean, 0.0, 0},
+      {"scope 863 870 250 39 500 last", 863.0, 870.0, 250, 39.0, 500, kScopeAggLast, 0.0, 0},
+      {"scope 150 960 2048 467 0 max 5.6", 150.0, 960.0, 2048, 467.0, 0, kScopeAggMax, 5.6, 0},
+      {"scope 150 960 2048 467 0 max 32 500", 150.0, 960.0, 2048, 467.0, 0, kScopeAggMax, 32.0,
+       500},
+      {"scope 779.618 959.618 0 467 1000", 779.618, 959.618, 0, 467.0, 1000, kScopeAggMax, 0.0,
+       0},
+      {"scope 869 870.2 250 4.8 1000", 869.0, 870.2, 250, 4.8, 1000, kScopeAggMax, 0.0, 0},
+  };
+  size_t checked = 0;
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.line);
+    Line line(c.line);
+    ScopeArgs args;
+    const char* why = nullptr;
+    ASSERT_TRUE(parseScope(tokensOf(line), args, &why));
+    EXPECT_EQ(nullptr, why);
+    EXPECT_FALSE(args.off);
+    EXPECT_DOUBLE_EQ(c.f0, args.f0);
+    EXPECT_DOUBLE_EQ(c.f1, args.f1);
+    EXPECT_EQ(c.points, args.points);
+    EXPECT_DOUBLE_EQ(c.rbw_khz, args.rbw_khz);
+    EXPECT_EQ(c.interval_ms, args.interval_ms);
+    EXPECT_EQ(c.agg, args.agg);
+    EXPECT_DOUBLE_EQ(c.seg_mhz, args.seg_mhz);
+    EXPECT_EQ(c.settle_us, args.settle_us);
+    // And neither word, which is the build's regulator and the gain `boost on|off` left.
+    EXPECT_EQ(kScopeRegulatorBuild, args.reg);
+    EXPECT_EQ(kScopeGainAsLeft, args.gain);
+    checked++;
+  }
+  EXPECT_EQ(sizeof(cases) / sizeof(cases[0]), checked);
+}
+
+TEST(Scope, BothWordsOfAPairOnOneLineAreRefusedInASentence) {
+  // One word of each pair at most: two words of a pair contradict each other and the same word
+  // twice says nothing new, so either is a line nobody meant. The sentence names both pairs and
+  // where a word may stand, and it fits in an `ack`.
+  for (const char* text : {"scope 780 960 ldo dcdc", "scope 780 960 dcdc ldo",
+                           "scope 780 960 boost noboost", "scope 780 960 noboost boost",
+                           "scope 780 960 ldo ldo", "scope 780 960 0 467 ldo 1000 dcdc",
+                           "scope 780 960 noboost 0 467 noboost"}) {
+    Line line(text);
+    ScopeArgs args;
+    const char* why = nullptr;
+    EXPECT_FALSE(parseScope(tokensOf(line), args, &why)) << text;
+    EXPECT_STREQ(kScopeWordRefusal, why == nullptr ? "" : why) << text;
+  }
+  // One word of each pair on the same line is not a pair twice.
+  {
+    Line both("scope 780 960 ldo boost");
+    ScopeArgs args;
+    const char* why = nullptr;
+    EXPECT_TRUE(parseScope(tokensOf(both), args, &why));
+    EXPECT_EQ(nullptr, why);
+  }
+  EXPECT_LT(std::strlen(kScopeWordRefusal), kMaxAckMessageBytes);
+  EXPECT_NE(nullptr, std::strstr(kScopeWordRefusal, "ldo or dcdc"));
+  EXPECT_NE(nullptr, std::strstr(kScopeWordRefusal, "boost or noboost"));
+  // A caller that does not want the sentence still gets the refusal, as it did before.
+  Line line("scope 780 960 ldo dcdc");
+  ScopeArgs args;
+  EXPECT_FALSE(parseScope(tokensOf(line), args));
+  // And the usage line names the four words, because that is what a line the parser cannot read
+  // at all is answered with.
+  EXPECT_NE(nullptr, std::strstr(usageOf(kVerbScope), "ldo|dcdc"));
+  EXPECT_NE(nullptr, std::strstr(usageOf(kVerbScope), "boost|noboost"));
+  EXPECT_LT(std::strlen(usageOf(kVerbScope)), kMaxAckMessageBytes);
+}
+
+TEST(Scope, TheFourWordsChangeNoPointNoSegmentAndNoMillisecondOfAPlan) {
+  // The words are what the chip is begun as and nothing else: the plan of a line that names all
+  // four is the plan of the same line with none of them, field for field. That is why
+  // tools/noisescope/scope_plans.json needs no row for them - the table is the plan's
+  // arithmetic, and this task did not touch it.
+  for (const double seg_mhz : {0.0, 5.6}) {
+    for (const uint32_t settle_us : {0u, 500u}) {
+      ScopeRequest plain = request(779.618, 959.618);
+      plain.rbw_khz = 467.0;
+      plain.seg_mhz = seg_mhz;
+      plain.settle_us = settle_us;
+      ScopeRequest worded = plain;
+      worded.reg = kScopeRegulatorLdo;
+      worded.gain = kScopeGainNoBoost;
+      ScopePlan a;
+      ScopePlan b;
+      ASSERT_TRUE(planScope(plain, a));
+      ASSERT_TRUE(planScope(worded, b));
+      EXPECT_EQ(a.points, b.points);
+      EXPECT_EQ(a.segments, b.segments);
+      EXPECT_DOUBLE_EQ(a.step_khz, b.step_khz);
+      EXPECT_DOUBLE_EQ(a.rbw_khz, b.rbw_khz);
+      EXPECT_DOUBLE_EQ(a.first_mhz, b.first_mhz);
+      EXPECT_DOUBLE_EQ(a.cov, b.cov);
+      EXPECT_DOUBLE_EQ(a.seg_mhz, b.seg_mhz);
+      EXPECT_EQ(a.settle_us, b.settle_us);
+      EXPECT_EQ(a.segment_ms, b.segment_ms);
+      EXPECT_EQ(a.sweep_ms, b.sweep_ms);
+      EXPECT_EQ(a.interval_ms, b.interval_ms);
+      // What does differ is the two words, carried for the `ack` and for beginPlugin().
+      EXPECT_EQ(kScopeRegulatorBuild, a.reg);
+      EXPECT_EQ(kScopeGainAsLeft, a.gain);
+      EXPECT_EQ(kScopeRegulatorLdo, b.reg);
+      EXPECT_EQ(kScopeGainNoBoost, b.gain);
+    }
+  }
+}
+
+TEST(Scope, TheAckNamesTheRegulatorAndTheGainOnlyWhenItsOwnWordWasOnTheLine) {
+  char msg[kMaxAckMessageBytes];
+  ScopeRequest r = request(863.0, 870.0);
+  ScopePlan plan;
+
+  // No word: the line of docs/noisescope.md section 5, byte for byte, as before this task.
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms", msg);
+
+  // The regulator alone, and then the gain alone: each named only when its own word was given.
+  r.reg = kScopeRegulatorLdo;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"
+               " reg=ldo", msg);
+  r.reg = kScopeRegulatorBuild;
+  r.gain = kScopeGainNoBoost;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"
+               " gain=noboost", msg);
+
+  // Both, and after what task 02 added - the width and the settle first, then the two words.
+  r = request(779.618, 959.618);
+  r.rbw_khz = 467.0;
+  r.seg_mhz = 5.6;
+  r.settle_us = 500;
+  r.reg = kScopeRegulatorDcDc;
+  r.gain = kScopeGainBoost;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=386 step=466.3212kHz rbw=467.0kHz seg=33 cov=1.001 interval=0ms sweep=19ms"
+               " segw=5.6MHz settle=500us reg=dcdc gain=boost", msg);
+
+  // A word with no width and no settle: the first line, and the words after it.
+  r.seg_mhz = 0.0;
+  r.settle_us = 0;
+  r.gain = kScopeGainNoBoost;
+  r.reg = kScopeRegulatorLdo;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_EQ(nullptr, std::strstr(msg, "segw=")) << msg;
+  EXPECT_NE(nullptr, std::strstr(msg, " reg=ldo gain=noboost")) << msg;
+
+  // The widest `ack` there is still fits in the message an `ack` line may carry.
+  ScopeRequest widest = request(kRadioLowMhz, kRadioHighMhz);
+  widest.points = kScopeMaxPoints;
+  widest.rbw_khz = 4.8;
+  widest.seg_mhz = 0.5;
+  widest.settle_us = kScopeSettleMaxUs;
+  widest.interval_ms = kScopeIntervalMaxMs;
+  widest.sink_baud = 115200;
+  widest.reg = kScopeRegulatorDcDc;
+  widest.gain = kScopeGainNoBoost;
+  ASSERT_TRUE(planScope(widest, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_LT(std::strlen(msg), kMaxAckMessageBytes) << msg;
+
+  EXPECT_STREQ("ldo", scopeRegulatorName(kScopeRegulatorLdo));
+  EXPECT_STREQ("dcdc", scopeRegulatorName(kScopeRegulatorDcDc));
+  EXPECT_STREQ("", scopeRegulatorName(kScopeRegulatorBuild));
+  EXPECT_STREQ("boost", scopeGainName(kScopeGainBoost));
+  EXPECT_STREQ("noboost", scopeGainName(kScopeGainNoBoost));
+  EXPECT_STREQ("", scopeGainName(kScopeGainAsLeft));
+}
+
+TEST(Scope, AfterSuchAScopeTheRadioIsTheBuildsRegulatorAndTheGainBoostLeft) {
+  // What a mode begins the chip with, for every one of the four combinations of the build's
+  // regulator and the setting's gain: a `scope` asked for with no word of a pair, and **every
+  // mode that is not a scope** (kScopeRegulatorBuild, kScopeGainAsLeft), is the build's and the
+  // setting's - so a `sweep`, a `hist`, a `dwell` and a `cad` after a scope that said `ldo` or
+  // `noboost` begin the chip as they do on main.
+  for (const bool build_ldo : {false, true}) {
+    for (const bool setting : {false, true}) {
+      const ScopeRadioSetup mode =
+          scopeRadioSetup(kScopeRegulatorBuild, kScopeGainAsLeft, build_ldo, setting);
+      EXPECT_EQ(build_ldo, mode.ldo);
+      EXPECT_EQ(setting, mode.boost);
+      // And a scope that named one word moves that one and nothing else.
+      EXPECT_TRUE(scopeRadioSetup(kScopeRegulatorLdo, kScopeGainAsLeft, build_ldo, setting).ldo);
+      EXPECT_FALSE(scopeRadioSetup(kScopeRegulatorDcDc, kScopeGainAsLeft, build_ldo, setting).ldo);
+      EXPECT_EQ(setting,
+                scopeRadioSetup(kScopeRegulatorLdo, kScopeGainAsLeft, build_ldo, setting).boost);
+      EXPECT_TRUE(
+          scopeRadioSetup(kScopeRegulatorBuild, kScopeGainBoost, build_ldo, setting).boost);
+      EXPECT_FALSE(
+          scopeRadioSetup(kScopeRegulatorBuild, kScopeGainNoBoost, build_ldo, setting).boost);
+      EXPECT_EQ(build_ldo,
+                scopeRadioSetup(kScopeRegulatorBuild, kScopeGainNoBoost, build_ldo, setting).ldo);
+    }
+  }
+
+  // And the chip half asks for exactly that, which is the other half of the claim: the one place
+  // a scope's own words reach the chip is beginPlugin(), and every other begin goes through
+  // modeRadioSetup(). Read off the file, as test/test_rails reads the sources it is about,
+  // because a mode's bring-up is not host-portable and a comment is not a test.
+  const std::string radio = fileText(std::string(PROJECT_DIR) + "/src/roles/scanner/Radio.cpp");
+  ASSERT_FALSE(radio.empty()) << "cannot read src/roles/scanner/Radio.cpp";
+  EXPECT_EQ(1u, countOf(radio, "scopeRadioSetup(reg, gain, buildUsesLdo(), g_boost)"))
+      << "beginPlugin() is the one place a scope's own words reach the chip";
+  EXPECT_EQ(1u, countOf(radio, "scopeRadioSetup(kScopeRegulatorBuild, kScopeGainAsLeft,"))
+      << "modeRadioSetup() is the one place every other mode's regulator and gain come from";
+  EXPECT_EQ(2u, countOf(radio, "const ScopeRadioSetup setup = modeRadioSetup();"))
+      << "beginLora() and beginFsk(), which every mode but the scope is begun through";
+  EXPECT_EQ(0u, countOf(radio, "applyRxPath(g_boost)"))
+      << "the gain a begin applies is the one that begin asked for, never a global read again";
+  // A scope's words live in its plan and nowhere else, and stop() drops the plan - so there is
+  // no state at all for the mode after a scope to inherit.
+  EXPECT_EQ(1u, countOf(radio, "g_scope.plan = ScopePlan();"))
+      << "however a scope ends, the two words end with it";
+}
+
+TEST(Scope, AFrameSaysHowLongItsSweepsTookCountingThePluginsCallsAlone) {
+  // `us` and `usx`: the shortest and the longest **whole** sweep of a frame, the time inside the
+  // plugin's call added over the sweep's segments and nothing else - no arm, no settle, nothing
+  // between two sweeps. The clock is the seam's and this test steps it.
+  ScopeSweepTime time;
+  EXPECT_FALSE(time.any());
+  EXPECT_EQ(0u, time.shortestUs());
+  EXPECT_EQ(0u, time.longestUs());
+
+  FakeArmRadio radio;
+  ScopeArmResult out;
+  uint8_t levels[4] = {0, 0, 0, 0};
+
+  // Three sweeps of three segments each, every segment timed on its own: 30 + 31 + 32 = 93,
+  // then 40 x 3 = 120, then 20 + 20 + 21 = 61.
+  const uint32_t sweeps[3][3] = {{30, 31, 32}, {40, 40, 40}, {20, 20, 21}};
+  for (const auto& sweep : sweeps) {
+    for (const uint32_t us : sweep) {
+      radio.sweep_us = us;
+      ASSERT_TRUE(sweepScopeSegment(radio, levels, time, out));
+      EXPECT_EQ(kScopeArmNone, out.failed);
+    }
+    time.sweepDone();
+  }
+  EXPECT_TRUE(time.any());
+  EXPECT_EQ(3u, time.sweeps());
+  EXPECT_EQ(61u, time.shortestUs());
+  EXPECT_EQ(120u, time.longestUs());
+
+  // A sweep whose segments are still going in is not a whole sweep and counts for neither.
+  radio.sweep_us = 1000;
+  ASSERT_TRUE(sweepScopeSegment(radio, levels, time, out));
+  EXPECT_EQ(61u, time.shortestUs());
+  EXPECT_EQ(120u, time.longestUs());
+  EXPECT_EQ(3u, time.sweeps());
+
+  // The next frame carries nothing of this one.
+  time.reset();
+  EXPECT_FALSE(time.any());
+  EXPECT_EQ(0u, time.shortestUs());
+  EXPECT_EQ(0u, time.longestUs());
+
+  // A call the plugin refused is named and measures nothing: the mode ends there.
+  {
+    FakeArmRadio refused;
+    refused.sweep_call_code = -2;
+    refused.sweep_us = 500;
+    ScopeSweepTime none;
+    ScopeArmResult failed;
+    EXPECT_FALSE(sweepScopeSegment(refused, levels, none, failed));
+    EXPECT_EQ(kScopeArmSweep, failed.failed);
+    EXPECT_EQ(-2, failed.code);
+    none.sweepDone();
+    EXPECT_EQ(0u, none.longestUs()) << "a call that refused is not a measurement of one that did";
+  }
+
+  // A clock that wrapped between the two reads is still the difference, because the arithmetic
+  // is unsigned (the board's micros() wraps every 71.6 minutes).
+  {
+    FakeArmRadio wrapped;
+    wrapped.clock_us = 0xFFFFFFF0u;
+    wrapped.sweep_us = 0x20u;  // over the end and round
+    ScopeSweepTime over;
+    ScopeArmResult ok;
+    ASSERT_TRUE(sweepScopeSegment(wrapped, levels, over, ok));
+    over.sweepDone();
+    EXPECT_EQ(0x20u, over.longestUs());
+  }
+
+  // What the number is for: 250 points at 4.8 kHz in one segment reads about 83 ms if an RSSI
+  // update is kScopeUpdateMsKhz / RBW and about 49 ms if it is Semtech's 0.94 (data sheet Rev
+  // 2.2, 13.5.4, table 13-82). The two cannot be confused, which is why `us` is on the line.
+  EXPECT_NEAR(83.3, 250.0 * kScopeUpdateMsKhz / 4.8, 0.1);
+  EXPECT_NEAR(48.9, 250.0 * 0.94 / 4.8, 0.1);
+}
+
+TEST(Scope, AFrameOfMoreThanOneSegmentSaysWhatTheChipsErrorWordHeldAndAOneSegmentPlanDoesNot) {
+  // `dev`: the OR of the word over a frame's arms, each read in standby before anything else is
+  // asked of the chip and cleared there - so a word belongs to the sweep that ran before that
+  // arm (the last segment's, for segment 0).
+  ScopeRequest r = request(150.0, 250.0);
+  r.points = 250;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  ASSERT_EQ(4u, plan.segments);
+
+  unsigned frame = 0;
+  const unsigned left[4] = {kScopePllLockError, 0u, kScopePllCalibError, kScopeXoscStartError};
+  for (uint16_t i = 0; i < plan.segments; i++) {
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(plan, i, seg));
+    FakeArmRadio radio;
+    radio.standby_errors = left[i];
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(radio, plan, seg, out)) << "segment " << i;
+    EXPECT_EQ(left[i], out.before_errors) << "segment " << i;
+    EXPECT_NE(nullptr, std::strstr(radio.log, "standby;deviceErrors;clearDeviceErrors;"))
+        << "segment " << i;
+    frame |= out.before_errors;
+  }
+  EXPECT_EQ(kScopePllLockError | kScopePllCalibError | kScopeXoscStartError, frame);
+  EXPECT_EQ(0x0064u, frame) << "bits 6, 5 and 2 of the word, as the data sheet numbers them";
+  EXPECT_EQ(0x0040u, kScopePllLockError);
+  EXPECT_EQ(0x0020u, kScopeXoscStartError);
+  EXPECT_EQ(0x0010u, kScopeImageCalibrationError);
+  EXPECT_EQ(0x0004u, kScopePllCalibError);
+
+  // A plan of one segment arms once and sweeps for ever: it has no standby to read the word in
+  // and is not given one, so its frames carry no `dev`.
+  {
+    ScopeRequest one = request(863.118, 876.118);
+    one.points = 250;
+    one.rbw_khz = 58.6;
+    ScopePlan single;
+    ASSERT_TRUE(planScope(one, single));
+    ASSERT_EQ(1u, single.segments);
+    ScopeSegment only;
+    ASSERT_TRUE(scopeSegment(single, 0, only));
+    FakeArmRadio radio;
+    radio.standby_errors = kScopePllLockError;
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(radio, single, only, out));
+    EXPECT_EQ(0u, out.before_errors);
+    EXPECT_EQ(0u, countOf(std::string(radio.log), "clearDeviceErrors;"))
+        << "a plan of one segment is given no standby it does not have today: " << radio.log;
+    // The same span asked for in two segments does carry it, which is what the words say to do
+    // when the error word is wanted.
+    one.seg_mhz = 7.0;
+    ScopePlan two;
+    ASSERT_TRUE(planScope(one, two));
+    EXPECT_EQ(2u, two.segments);
+    ScopeSegment first;
+    ASSERT_TRUE(scopeSegment(two, 0, first));
+    FakeArmRadio asked;
+    asked.standby_errors = kScopePllLockError;
+    ScopeArmResult told;
+    ASSERT_TRUE(armScopeSegment(asked, two, first, told));
+    EXPECT_EQ(kScopePllLockError, told.before_errors);
+  }
+
+  // A calibration the chip refuses is still its own verdict, because the clear stands before it:
+  // the word the arm reports after the calibration is what that calibration left, and the word
+  // it reports from standby is what the sweep left. Neither hides the other.
+  {
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(plan, 1, seg));
+    FakeArmRadio radio;
+    radio.standby_errors = kScopePllLockError;  // and nothing to do with the calibration
+    radio.refusals = 2;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, out));
+    EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
+    EXPECT_EQ(kScopeImageCalibrationError, out.device_errors & kScopeImageCalibrationError);
+    EXPECT_EQ(kScopePllLockError, out.before_errors);
+  }
+}
+
+TEST(Scope, AFrameCarriesUsAndUsxAfterSpsAndDevBeforeTheLevels) {
+  // Nothing else of a frame moves: the three new members stand after `sps` and before `lv`, and
+  // every other one is where and what it was (docs/noisescope.md section 5).
+  StringSink sink;
+  Lines lines(sink);
+  ScopeFields f;
+  f.meta = someMeta();
+  ScopeRequest r = request(150.0, 250.0);
+  r.points = 250;
+  ASSERT_TRUE(planScope(r, f.plan));
+  ASSERT_EQ(4u, f.plan.segments);
+  std::vector<uint8_t> levels(250, 210);
+  f.levels = levels.data();
+  f.sweeps = 6;
+  f.sps_x10 = 476;
+  f.us = 1193;
+  f.usx = 1207;
+  f.device_errors = kScopePllLockError | kScopePllCalibError;
+  lines.scope(f);
+
+  const std::string line = sink.text();
+  const JsonDocument doc = parseOne(sink);
+  EXPECT_EQ(1193u, doc["us"].as<uint32_t>());
+  EXPECT_EQ(1207u, doc["usx"].as<uint32_t>());
+  EXPECT_STREQ("0044", doc["dev"].as<const char*>())
+      << "four hex digits in a string: 0044 is not a JSON number and 68 is not the word";
+  EXPECT_EQ(476, doc["sps"].as<int>());
+  EXPECT_EQ(6, doc["sweeps"].as<int>());
+  EXPECT_EQ(250, doc["n"].as<int>());
+  // The order on the wire, which is what a reader scanning the line sees.
+  const size_t sps = line.find("\"sps\":");
+  const size_t us = line.find("\"us\":");
+  const size_t usx = line.find("\"usx\":");
+  const size_t dev = line.find("\"dev\":");
+  const size_t lv = line.find("\"lv\":");
+  ASSERT_NE(std::string::npos, sps);
+  ASSERT_NE(std::string::npos, lv);
+  EXPECT_LT(sps, us);
+  EXPECT_LT(us, usx);
+  EXPECT_LT(usx, dev);
+  EXPECT_LT(dev, lv);
+
+  // A plan of one segment: `us` and `usx` as always, and no `dev` at all.
+  {
+    StringSink one_sink;
+    Lines one_lines(one_sink);
+    ScopeFields one;
+    one.meta = someMeta();
+    ScopeRequest single = request(863.118, 876.118);
+    single.points = 250;
+    single.rbw_khz = 58.6;
+    ASSERT_TRUE(planScope(single, one.plan));
+    ASSERT_EQ(1u, one.plan.segments);
+    one.levels = levels.data();
+    one.us = 83000;
+    one.usx = 86000;
+    one.device_errors = kScopePllLockError;  // nothing read it, and nothing says it
+    one_lines.scope(one);
+    const JsonDocument doc_one = parseOne(one_sink);
+    EXPECT_EQ(83000u, doc_one["us"].as<uint32_t>());
+    EXPECT_EQ(86000u, doc_one["usx"].as<uint32_t>());
+    EXPECT_TRUE(doc_one["dev"].isNull()) << one_sink.text();
+  }
+
+  // And the frame is still inside the bound the port's floor is worked out from, with every
+  // number at its widest.
+  {
+    StringSink widest_sink;
+    Lines widest_lines(widest_sink);
+    ScopeFields widest;
+    widest.meta.seq = 0xFFFFFFFFu;
+    widest.meta.ts = 0xFFFFFFFFu;
+    widest.meta.ms = 0xFFFFFFFFu;
+    ScopeRequest r2 = request(kRadioLowMhz, kRadioHighMhz);
+    r2.points = kScopeMaxPoints;
+    r2.seg_mhz = 0.5;
+    ASSERT_TRUE(planScope(r2, widest.plan));
+    EXPECT_GT(widest.plan.segments, 1u);
+    std::vector<uint8_t> all(kScopeMaxPoints, 0xAB);
+    widest.levels = all.data();
+    widest.sweeps = 0xFFFFu;
+    widest.sps_x10 = 0xFFFFu;
+    widest.us = 0xFFFFFFFFu;
+    widest.usx = 0xFFFFFFFFu;
+    widest.device_errors = 0xFFFFu;
+    widest_lines.scope(widest);
+    EXPECT_LE(widest_sink.text().size(), scopeFrameBytes(kScopeMaxPoints))
+        << widest_sink.text().size() << " bytes";
+  }
+}
+
+TEST(Scope, ThePortsFloorIsWorkedOutFromTheFramesNewLength) {
+  // The three members are forty-six bytes of envelope, so a frame is longer and the interval a
+  // slow sink is given follows it: 250 points is 582 bytes and 102 ms on the Walter's 115200
+  // baud, 386 points is 762 bytes and 134 ms. A frame still takes at most one part in
+  // kScopeSinkDutyDivisor of the port's time, which is the rule the floor exists for.
+  EXPECT_EQ(582u, scopeFrameBytes(250));
+  EXPECT_EQ(762u, scopeFrameBytes(386));
+  EXPECT_EQ(102u, scopeIntervalFloorMs(250, 115200));
+  EXPECT_EQ(134u, scopeIntervalFloorMs(386, 115200));
+  for (uint16_t points : {uint16_t(16), uint16_t(250), uint16_t(386), uint16_t(2048)}) {
+    const double frame_ms = double(scopeFrameBytes(points)) * 10.0 * 1000.0 / 115200.0;
+    EXPECT_GE(double(scopeIntervalFloorMs(points, 115200)),
+              frame_ms * double(kScopeSinkDutyDivisor))
+        << points << " points";
   }
 }
 

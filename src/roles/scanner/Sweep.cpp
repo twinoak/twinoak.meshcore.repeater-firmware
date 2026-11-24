@@ -301,6 +301,58 @@ bool scopeAggOf(const char* word, ScopeAgg& out) {
   return false;
 }
 
+const char* scopeRegulatorName(ScopeRegulator reg) {
+  switch (reg) {
+    case kScopeRegulatorLdo: return "ldo";
+    case kScopeRegulatorDcDc: return "dcdc";
+    default: return "";
+  }
+}
+
+const char* scopeGainName(ScopeGain gain) {
+  switch (gain) {
+    case kScopeGainBoost: return "boost";
+    case kScopeGainNoBoost: return "noboost";
+    default: return "";
+  }
+}
+
+bool scopeRegulatorOf(const char* word, ScopeRegulator& out) {
+  if (word == nullptr) return false;
+  if (strcmp(word, "ldo") == 0) {
+    out = kScopeRegulatorLdo;
+    return true;
+  }
+  if (strcmp(word, "dcdc") == 0) {
+    out = kScopeRegulatorDcDc;
+    return true;
+  }
+  return false;
+}
+
+bool scopeGainOf(const char* word, ScopeGain& out) {
+  if (word == nullptr) return false;
+  if (strcmp(word, "boost") == 0) {
+    out = kScopeGainBoost;
+    return true;
+  }
+  if (strcmp(word, "noboost") == 0) {
+    out = kScopeGainNoBoost;
+    return true;
+  }
+  return false;
+}
+
+ScopeRadioSetup scopeRadioSetup(ScopeRegulator reg, ScopeGain gain, bool build_ldo,
+                                bool boost_setting) {
+  ScopeRadioSetup out;
+  // No word is the build's and the setting's, which is what every mode that is not a scope asks
+  // for and what a `scope` with no word of that pair asks for: there is nothing to put back.
+  out.ldo = reg == kScopeRegulatorBuild ? build_ldo : (reg == kScopeRegulatorLdo);
+  out.boost = gain == kScopeGainAsLeft ? boost_setting : (gain == kScopeGainBoost);
+  return out;
+}
+
 const char* scopeArmCallName(ScopeArmCall call) {
   switch (call) {
     case kScopeArmStandby: return "standby";
@@ -366,6 +418,15 @@ bool calibrateScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const Sc
     out.failed = kScopeArmStandby;
     out.code = st;
     return false;
+  }
+  // The chip's own account of the sweep that has just run - the last segment's, for segment 0 -
+  // read here because standby is where the word answers and this is the first thing the arm does
+  // in it, and cleared at once so that the calibration's verdict below is the calibration's own.
+  // Only for a plan of more than one segment: one segment arms once and sweeps for ever, and is
+  // not given a standby it does not have (the frame's `dev`).
+  if (plan.segments > 1) {
+    out.before_errors |= radio.deviceErrors();
+    radio.clearDeviceErrors();
   }
   // The frequency first, calibrated for nothing: RadioLib's own calibration, made before the
   // move and for a range around the new centre, is the one the first board refused.
@@ -444,6 +505,36 @@ bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSeg
   return armScopeSegment(radio, plan, seg, cal, out);
 }
 
+void ScopeSweepTime::reset() {
+  running_ = 0;
+  shortest_ = 0;
+  longest_ = 0;
+  sweeps_ = 0;
+}
+
+void ScopeSweepTime::segment(uint32_t us) { running_ += us; }
+
+void ScopeSweepTime::sweepDone() {
+  if (sweeps_ == 0 || running_ < shortest_) shortest_ = running_;
+  if (sweeps_ == 0 || running_ > longest_) longest_ = running_;
+  if (sweeps_ != 0xFFFFu) sweeps_++;
+  running_ = 0;
+}
+
+bool sweepScopeSegment(ScopeArmRadio& radio, uint8_t* levels, ScopeSweepTime& time,
+                       ScopeArmResult& out) {
+  const uint32_t started_us = radio.nowUs();
+  const int st = radio.sweep(levels);
+  const uint32_t ended_us = radio.nowUs();
+  if (st != 0) {
+    out.failed = kScopeArmSweep;
+    out.code = st;
+    return false;  // a call that refused is not a measurement of one that worked
+  }
+  time.segment(ended_us - started_us);  // unsigned: a clock that wrapped is still the difference
+  return true;
+}
+
 uint32_t scopeBase64Length(uint16_t bytes) { return 4u * ((uint32_t(bytes) + 2u) / 3u); }
 
 uint32_t scopeFrameBytes(uint16_t points) {
@@ -451,7 +542,10 @@ uint32_t scopeFrameBytes(uint16_t points) {
   // widest, the quotes and the newline - and the base64 of one byte a point. Not a guess: the
   // emitted line is held against this by test/test_scanner, for a frame of one point and for one
   // of kScopeMaxPoints.
-  constexpr uint32_t kEnvelope = 200;
+  // 200 before phase 3.16's task 03, and 46 bytes more for `us`, `usx` and `dev`: `,"us":` and
+  // ten digits, `,"usx":` and ten, and `,"dev":"ffff"`. The port's floor below is worked out from
+  // this length, so a frame still takes at most one part in kScopeSinkDutyDivisor of its sink.
+  constexpr uint32_t kEnvelope = 246;
   return kEnvelope + scopeBase64Length(points);
 }
 
@@ -554,6 +648,10 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   out.agg = request.agg;
   out.seg_mhz = seg_mhz;
   out.settle_us = request.settle_us;
+  // Carried and nothing more: neither word changes a point, a segment or a millisecond of the
+  // plan - they are what the chip is begun as for this scope, and the `ack` names them.
+  out.reg = request.reg;
+  out.gain = request.gain;
   const uint32_t floor_ms = scopeIntervalFloorMs(out.points, request.sink_baud);
   out.interval_ms = request.interval_ms > floor_ms ? request.interval_ms : floor_ms;
   // The longest segment, which is the first ones when the points do not divide evenly.
@@ -563,6 +661,13 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
 }
 
 // ------------------------------------------------------------------ what the ack says
+
+// One word of each pair at most. Both words of a pair contradict each other and a word twice
+// says nothing new, so either is a line nobody meant: the words are not positional and a session
+// has forty characters, which is where a typo of this kind comes from.
+const char kScopeWordRefusal[] =
+    "refused: ldo or dcdc, boost or noboost - one word of each pair at most,"
+    " anywhere after the two ends";
 
 const char kScopeRefusal[] =
     "refused: 150 <= f0 < f1 <= 960 MHz, points 16..2048, interval 0..60000 ms,"
@@ -583,9 +688,23 @@ void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes) {
   // so that the line of a `scope` asked for as it was asked for before that task is that line,
   // byte for byte.
   if (written <= 0 || size_t(written) >= bytes) return;
-  if (plan.seg_mhz == kScopeSegmentMhz && plan.settle_us == 0) return;
-  snprintf(out + written, bytes - size_t(written), " segw=%.1fMHz settle=%luus", plan.seg_mhz,
-           (unsigned long)plan.settle_us);
+  size_t at = size_t(written);
+  if (plan.seg_mhz != kScopeSegmentMhz || plan.settle_us != 0) {
+    const int more = snprintf(out + at, bytes - at, " segw=%.1fMHz settle=%luus", plan.seg_mhz,
+                              (unsigned long)plan.settle_us);
+    if (more <= 0 || size_t(more) >= bytes - at) return;
+    at += size_t(more);
+  }
+  // And the two words of phase 3.16's task 03, each named only when its own word was on the
+  // line: a `scope` with none of the four gets the line above and nothing after it.
+  if (plan.reg != kScopeRegulatorBuild) {
+    const int more = snprintf(out + at, bytes - at, " reg=%s", scopeRegulatorName(plan.reg));
+    if (more <= 0 || size_t(more) >= bytes - at) return;
+    at += size_t(more);
+  }
+  if (plan.gain != kScopeGainAsLeft) {
+    snprintf(out + at, bytes - at, " gain=%s", scopeGainName(plan.gain));
+  }
 }
 
 bool scopeSegment(const ScopePlan& plan, uint16_t index, ScopeSegment& out) {

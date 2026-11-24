@@ -187,8 +187,8 @@ host is attached.
   prefixed `# `) and must be ignored by machine parsers.
 * **Walter → device:** plain-text commands, one per line, space-separated
   arguments, `\n` or `\r` terminated. The command word is case-insensitive; an
-  argument is not. At most nine words are read, which is the longest command
-  there is (`scope` with every number).
+  argument is not. At most eleven words are read, which is the longest command
+  there is (`scope` with every number and both of its words).
 * **Every line a scan produces** carries `seq` (monotonic per boot — detect
   gaps and reboots), `ts` (unix epoch, `0` = the clock was never set; re-stamp
   on receipt if 0) and `ms` (millis since boot). `boot` carries `ts`, and
@@ -209,7 +209,7 @@ host is attached.
 | `info` | one `info` line (fw/version/role/board/devid/reset reason/peripherals/radio ROM/home cfg) |
 | `stat` | one `stat` line immediately (the heartbeat also fires every 10 s) |
 | `sweep [f0 f1 [step_khz [dwell_ms [passes]]]]` | RSSI sweep. Defaults: the band's range, 25 kHz, 20 ms, 1 pass. `passes 0` = repeat until `stop` |
-| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 (`0` = no stand at all, today's). `scope off` ends it |
+| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 (`0` = no stand at all, today's). Four words may stand **anywhere after the two ends**, taken out of the line before the numbers are read: `ldo` or `dcdc` is the voltage regulator the radio is begun with **for this scope**, and `boost` or `noboost` the receive gain **for this scope** — neither is the build's own and neither is what `boost on|off` left, so `scope 780 960 0 467 1000 ldo` and `scope 780 960 ldo noboost` are both lines. Both words of a pair on one line are refused in a sentence (§6). `scope off` ends it |
 | `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples; `samples` is clamped to 256…65535 and is what one frequency costs, 8.2 µs each (2 ms at 256, **17 ms at the default**, 0.54 s at 65535). A line's bins add up to its `n` or the line is not sent (below) |
 | `dwell <f_mhz> [secs [win_ms]]` | time-domain statistics on one frequency (defaults 60 s, 1000 ms windows). Uses the home LoRa RX filter |
 | `cad [f_mhz [count]]` | LoRa channel-activity detections out of `count` tries (default the home frequency, 100) |
@@ -291,9 +291,25 @@ line above and in the same shape whichever of the two was given:
  "msg":"n=386 step=466.3212kHz rbw=467.0kHz seg=33 cov=1.001 interval=0ms sweep=19ms segw=5.6MHz settle=500us"}
 ```
 
-A line that names neither gets the first shape, byte for byte — what those two
-numbers do is §6, and which of them a `scope` should take when none is given is
-not settled yet.
+A `scope` asked for with one of the four **words** names it in the same way,
+after the two numbers and only when its own word was on the line — `reg=ldo` or
+`reg=dcdc`, and `gain=boost` or `gain=noboost`:
+
+```
+{"t":"ack","cmd":"scope","ok":true,
+ "msg":"n=250 step=52.0000kHz rbw=58.6kHz seg=1 cov=1.127 interval=0ms sweep=8ms reg=ldo"}
+```
+
+A line that names none of the four and neither number gets the first shape, byte
+for byte — what those two numbers do, and why a scope can be asked for on the
+other regulator and at the lower gain, is §6; which of them a `scope` should take
+when none is given is not settled yet. A line that names both words of a pair is
+refused with a sentence of its own:
+
+```
+{"t":"ack","cmd":"scope","ok":false,
+ "msg":"refused: ldo or dcdc, boost or noboost - one word of each pair at most, anywhere after the two ends"}
+```
 
 Every command is answered with an `ack` line:
 `{"t":"ack","cmd":"sweep","ok":true,"msg":"started"}`. A command arriving
@@ -377,9 +393,33 @@ frame holds of those sweeps: `max` (the strongest level of each point, so a
 short burst shows), `mean` (in the power domain) or `last`. `cov` is the
 receiver bandwidth over the step.
 
+`us` and `usx` are **how long the sweeps of this frame took**, in microseconds:
+the shortest and the longest whole sweep among them, counting **the radio
+program's own calls alone** — the time inside a sweep call, added over the
+sweep's segments, with no arm, no settle and nothing between two sweeps in it.
+With `n` that is the time a point costs, which is the one measurement that
+settles how long an RSSI update really takes on this part, and the gap between
+the two numbers is the spread of it.
+
+`dev` is the SX1262's own `GetDeviceErrors` word — **four hexadecimal digits in
+a string** — OR-ed over this frame's segment arms. The word is read where an arm
+already stands in standby, before anything else is asked of the chip, and
+cleared there, so what a frame carries is what *its own* sweeps left: `0040` is
+a PLL that did not lock, `0020` a crystal oscillator that did not start, `0010`
+an image calibration that failed and `0004` a PLL calibration that failed (the
+bit numbers of the SX1261/2 data sheet). **A `scope` of one segment carries no
+`dev` at all**: it arms once and sweeps for ever, so it has no standby to read
+the word in and is not given one — ask for the same span in two segments
+(`seg_mhz`) when the word is wanted. Every other member is where and what it
+was, and a reader that knows none of the three reads the line as before.
+
 ```json
 {"t":"scope","seq":312,"ts":1754820500,"ms":512000,"f0":863.014000,"step":28.0000,
- "rbw":39.0,"n":250,"cov":1.393,"agg":"max","sweeps":6,"sps":476,"lv":"7Ozs7e3t7u7u…"}
+ "rbw":39.0,"n":250,"cov":1.393,"agg":"max","sweeps":6,"sps":476,"us":10432,"usx":10560,
+ "lv":"7Ozs7e3t7u7u…"}
+{"t":"scope","seq":313,"ts":1754820501,"ms":513000,"f0":779.851000,"step":466.3212,
+ "rbw":467.0,"n":386,"cov":1.001,"agg":"max","sweeps":9,"sps":95,"us":1193,"usx":1207,
+ "dev":"0000","lv":"7Ozs7e3t7u7u…"}
 ```
 
 **Where a frame goes.** Every other line of this firmware goes to the Walter's
@@ -599,6 +639,39 @@ before it is flashed: its descriptor's role byte is 3.
   here (`tasks/phase-3.16/FOLLOWUPS.md`). The `ack` names them when they are
   asked for, and the `sweep` it carries counts every settle, so a wide span
   with a long settle says outright what it will cost.
+
+  **Why a scope can be asked for on the other regulator and at the lower gain.**
+  The segment's width and the settle are cures for a sweep whose *structure* is
+  making the blocks. There is a second candidate that has nothing to do with the
+  sweep: the radio's own supply. The SX1262 can run its receiver off a switching
+  regulator or off a linear one, and this build asks for the switching one
+  (`SX126X_USE_REGULATOR_LDO` is defined nowhere here). In receive that converter
+  is clocked from the synthesizer at a few megahertz, and the divider it uses is
+  worked out only when the frequency is set through the chip's own command — which
+  the sweep program never does, because it writes the frequency registers
+  directly. A converter switching at a few megahertz beside a receiver is a
+  thing that can put a comb of its own into a wide picture, and that comb would
+  sit at fixed distances from a **strong signal**, not from a segment's first
+  point. The two readings of 23 November fit either, so one sweep on each
+  regulator tells them apart, and `ldo` and `dcdc` are how a session asks for
+  that. The gain is the other half of the same question: the receiver has an
+  automatic gain control that no register of the data sheet's lets us hold
+  still, so a sweep past a strong signal passes through gain changes — and a
+  block that falls faster than the signal does at the lower gain is a receiver
+  being driven too hard rather than anything in the sweep. (Both of those are
+  our reading of the SX1261/2 data sheet Rev 2.2 §5.1, §6.1.6 and §4.2; nothing
+  is quoted from it here.)
+
+  The four words hold **for one scope** and for nothing after it. The regulator
+  the build asks for and the gain `boost on|off` left are what the chip is begun
+  with for every other mode, and the plan of the running scope is the only place
+  either word is kept — so a `sweep`, a `hist`, a `dwell` or a `cad` after such a
+  scope begins the chip exactly as it does without one, however the scope ended.
+  They are words and not numbers, and they may stand anywhere after the two ends,
+  because **a NoiseScope session's step is one line of at most 40 characters**
+  (meshmaster.dk's contract and the Walter's): a word that needed the numbers
+  before it could not be typed there at all. One word of each pair at most; both
+  words of a pair, or the same word twice, is refused in a sentence (§5).
 * **Power telemetry:** the B-board INA3221 in every heartbeat, so a scanning
   session doubles as a power-budget check. Missing peripherals (a bench setup)
   are detected and skipped.
@@ -609,7 +682,8 @@ before it is flashed: its descriptor's role byte is 3.
   MeshCore's and this image has none of it. It is the MCU's regulator and not
   the radio's, but it is a difference in the supply the radio sits on — the
   bench is where it is worth a look if two readings disagree
-  (`docs/bench.md` §9).
+  (`docs/bench.md` §9). The **radio's** own regulator is a different thing and a
+  `scope` can be asked for on either of them (above).
 
 ## 7. Interpreting results (quick reference)
 

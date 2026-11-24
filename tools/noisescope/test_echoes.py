@@ -731,6 +731,144 @@ class TheTwoNumbers(unittest.TestCase):
             self.assertLessEqual(plan.segments, echoes.MAX_POINTS, name)
 
 
+
+# ----------------------------------------------------------- phase 3.16's words and new members
+
+def with_new_members(lines, dev="0044", us=1193, usx=1207):
+    """The same capture as a scanner carrying phase 3.16's task 03 would have sent it.
+
+    Every `scope` frame gains `us`, `usx` and - for a plan of more than one segment - `dev`,
+    after `sps` and before `lv`; every `scope` ack gains ` reg=ldo gain=noboost` after what task
+    02 added. Nothing else of either line moves, which is the point of the test below.
+    """
+    out = []
+    for text in lines:
+        if not text.startswith("{"):
+            out.append(text)
+            continue
+        obj = json.loads(text)
+        if obj.get("t") == "scope":
+            grown = {}
+            for key, value in obj.items():
+                if key == "lv":
+                    grown["us"] = us
+                    grown["usx"] = usx
+                    grown["dev"] = dev
+                grown[key] = value
+            out.append(json.dumps(grown))
+        elif obj.get("t") == "ack" and obj.get("cmd") == "scope":
+            obj["msg"] = str(obj.get("msg", "")) + " reg=ldo gain=noboost"
+            out.append(json.dumps(obj))
+        else:
+            out.append(text)
+    return out
+
+
+class TheFourWordsAndTheNewMembers(unittest.TestCase):
+    """What phase 3.16's task 03 adds to a capture, read by a tool that has no use for it yet.
+
+    The four words (`ldo`, `dcdc`, `boost`, `noboost`) are named in the `ack` and the frame says
+    `us`, `usx` and `dev`. What this tool *does* with them is task 04's; what it must do today is
+    read such a capture exactly as it reads one without them.
+    """
+
+    def test_a_capture_with_the_new_members_reads_exactly_as_one_without(self):
+        lines = capture(list(map(plan_of, ALL_FOUR)), rule="mhz", value=5.6)
+        grown = with_new_members(lines)
+        self.assertNotEqual(lines, grown, "the fixture must actually differ")
+
+        plain_readings, plain_verdict, plain_skipped, plain_bad = read(lines)
+        new_readings, new_verdict, new_skipped, new_bad = read(grown)
+        self.assertEqual(plain_skipped, new_skipped)
+        self.assertEqual(plain_bad, new_bad)
+        self.assertEqual(0, new_bad, "a frame with three more members is still a frame")
+        self.assertEqual(plain_verdict, new_verdict, "the unit and the sentence both")
+        self.assertEqual(len(plain_readings), len(new_readings))
+        for before, after in zip(plain_readings, new_readings):
+            self.assertEqual(before.plan.points, after.plan.points)
+            self.assertEqual(before.plan.segments, after.plan.segments)
+            self.assertEqual(len(before.echoes), len(after.echoes))
+            for one, two in zip(before.echoes, after.echoes):
+                self.assertAlmostEqual(one.distance_mhz, two.distance_mhz, places=9)
+                self.assertEqual(one.distance_points, two.distance_points)
+                self.assertEqual(one.segment.first, two.segment.first)
+
+        # And the report, which is what a person reads, is the same text.
+        plain_out = io.StringIO()
+        echoes.print_report("(plain)", plain_readings, plain_skipped, plain_bad, out=plain_out)
+        new_out = io.StringIO()
+        echoes.print_report("(plain)", new_readings, new_skipped, new_bad, out=new_out)
+        self.assertEqual(plain_out.getvalue(), new_out.getvalue())
+
+    def test_the_acks_two_numbers_are_still_read_when_the_words_stand_after_them(self):
+        # The width is the one thing of a plan a frame cannot carry, so the ack is where it comes
+        # from (p3.16-02): the two words are appended after it and must not hide it.
+        plan = echoes.plan_scope(779.618, 959.618, rbw_khz=467.0, seg_mhz=5.6, settle_us=500)
+        self.assertIsNotNone(plan)
+        ack = json.loads(ack_line(plan))
+        ack["msg"] = str(ack["msg"]) + " reg=ldo gain=noboost"
+        self.assertEqual(33, echoes.ack_segments(ack))
+        self.assertAlmostEqual(5.6, echoes.ack_seg_mhz(ack))
+        self.assertEqual(500, echoes.ack_settle_us(ack))
+        # A line that named a word and neither number says neither number, and the tool then
+        # reads the default width, as it does for every capture made before task 02.
+        plain = echoes.plan_scope(779.618, 959.618, rbw_khz=467.0)
+        bare = json.loads(ack_line(plain))
+        bare["msg"] = str(bare["msg"]) + " reg=ldo"
+        self.assertIsNone(echoes.ack_seg_mhz(bare))
+        self.assertIsNone(echoes.ack_settle_us(bare))
+        self.assertEqual(6, echoes.ack_segments(bare))
+
+    def test_a_capture_laid_out_by_the_ack_is_laid_out_the_same_with_the_words_on_it(self):
+        # The narrow span of 23 November is one segment, so its frames carry no `dev` at all -
+        # and a capture of it with `us` and `usx` alone reads as one with neither.
+        plan = plan_of(NARROW)
+        self.assertEqual(1, plan.segments)
+        lines = capture([plan], rule="points", value=60)
+        grown = with_new_members(lines, dev=None)
+        plain_readings, _, _, plain_bad = read(lines)
+        new_readings, _, _, new_bad = read(grown)
+        self.assertEqual(0, plain_bad)
+        self.assertEqual(0, new_bad)
+        self.assertEqual(len(plain_readings[0].echoes), len(new_readings[0].echoes))
+
+    def test_waterfall_plot_reads_a_frames_members_by_name_and_requires_none_of_the_new_ones(self):
+        # waterfall_plot.py cannot be imported here - it needs numpy and matplotlib and this
+        # harness is the standard library only (tools/release/selfcheck.py) - so it is read
+        # instead: every member of a frame it takes, it takes by name out of the parsed object,
+        # and the three new names are not among them. A frame with three more members is
+        # therefore the same picture, and nothing in the file enumerates a frame's members or
+        # compares them against a set, which is the only way a new one could break it.
+        import ast
+
+        path = os.path.join(os.path.dirname(os.path.abspath(echoes.__file__)),
+                            "waterfall_plot.py")
+        with open(path, "r", encoding="utf-8") as handle:
+            source = handle.read()
+        tree = ast.parse(source)
+
+        keys = set()
+        for node in ast.walk(tree):
+            # obj.get("key") and obj.get("key", default)
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "get" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                keys.add(node.args[0].value)
+            # obj["key"]
+            if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                    and isinstance(node.slice.value, str)):
+                keys.add(node.slice.value)
+
+        for needed in ("f0", "step", "n", "lv", "t"):
+            self.assertIn(needed, keys, "it does read the members it needs")
+        for added in ("us", "usx", "dev"):
+            self.assertNotIn(added, keys,
+                             "%s is task 04's to use; today it must be ignored" % added)
+        for enumerating in (".keys()", "set(obj)", "sorted(obj)"):
+            self.assertNotIn(enumerating, source,
+                             "nothing may enumerate a frame's members: %s" % enumerating)
+
 def _rmtree(path):
     import shutil
     shutil.rmtree(path, ignore_errors=True)

@@ -38,6 +38,10 @@ static_assert(int(SX126xSpectrumScanner::MAX_POINTS) == int(kScopePluginMaxPoint
 Lines* g_lines = nullptr;
 bool g_ok = false;
 Mode g_mode = kModeMonitor;
+// The boosted-gain setting, as `boost on|off` left it: the build's to begin with, what `info`
+// and `stat` carry, and what every mode begins the chip with. A `scope` that said `boost` or
+// `noboost` on its line does **not** touch it - that word is in that scope's plan and holds for
+// that scope alone (phase 3.16's task 03).
 bool g_boost = (SX126X_RX_BOOSTED_GAIN != 0);
 uint32_t g_seq = 0;
 
@@ -98,6 +102,8 @@ struct ScopeState {
   ScopeCalibration cal;      // what the chip's image calibration was last made for
   uint32_t beat_ms = 0;      // when the next frame is due
   uint32_t emitted_ms = 0;   // when the last one actually left, which is what `sps` is counted on
+  ScopeSweepTime time;       // how long this frame's plugin calls took: `us` and `usx`
+  unsigned dev = 0;          // and the OR of the chip's error word at this frame's arms: `dev`
   ScopeAccumulator acc;
   uint8_t levels[kScopePluginMaxPoints];  // one segment, as the plugin leaves it
   uint8_t frame[kScopeMaxPoints];         // what take() collapses the sweeps to
@@ -132,37 +138,60 @@ void error(const char* fmt, ...) {
   if (g_lines != nullptr) g_lines->err(buf);
 }
 
+// The build's own regulator, in the one place it is read: SX126X_USE_REGULATOR_LDO is defined
+// nowhere in this repository, so this is false and the chip runs on its DC-DC converter - which
+// in receive is clocked from the synthesizer at about 5 MHz (SX1261/2 data sheet 5.1), and is one
+// of the two readings of the echoes of 23 November. **A `scope` may ask for the other one for
+// itself** (scopeRadioSetup, src/roles/scanner/Sweep.h); every other mode asks for this.
+bool buildUsesLdo() {
+  #ifdef SX126X_USE_REGULATOR_LDO
+  return SX126X_USE_REGULATOR_LDO != 0;
+  #else
+  return false;
+  #endif
+}
+
+// What the chip is begun as for a mode that is not a scope, and for a `scope` that named neither
+// of its two words: the build's regulator and the gain `boost on|off` left. There is no state to
+// put back when a scope that named one ends, because the word lives in that scope's plan alone.
+ScopeRadioSetup modeRadioSetup() {
+  return scopeRadioSetup(kScopeRegulatorBuild, kScopeGainAsLeft, buildUsesLdo(), g_boost);
+}
+
 // The four settings that make a reading comparable with what the repeater hears. The RF switch
 // and the TCXO are arguments of begin()/beginFSK() below; these two are calls of their own, and
 // they are made again after every mode change because beginFSK() and begin() reset the chip's
-// configuration.
-void applyRxPath() {
+// configuration. `boost` is the gain the mode being begun wants - the setting for every mode but
+// a `scope` that asked for its own.
+void applyRxPath(bool boost) {
   g_radio.setCurrentLimit(SX126X_CURRENT_LIMIT);
   g_radio.setDio2AsRfSwitch(SX126X_DIO2_AS_RF_SWITCH);
-  g_radio.setRxBoostedGainMode(g_boost);
+  g_radio.setRxBoostedGainMode(boost);
 }
 
 // The 10 is the transmit power begin() insists on having; nothing ever transmits with it
 // (test/test_rails). The retry without a TCXO voltage is for a module whose crystal is not a
 // TCXO, which answers the SetDIO3AsTCXOCtrl command with an error.
 int beginLora(double f, double bw, uint8_t sf, uint8_t cr) {
+  const ScopeRadioSetup setup = modeRadioSetup();
   int st = g_radio.begin(float(f), float(bw), sf, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 10, 16,
-                         SX126X_DIO3_TCXO_VOLTAGE, false);
+                         SX126X_DIO3_TCXO_VOLTAGE, setup.ldo);
   if (st == RADIOLIB_ERR_SPI_CMD_FAILED || st == RADIOLIB_ERR_SPI_CMD_INVALID) {
     st = g_radio.begin(float(f), float(bw), sf, cr, RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 10, 16,
-                       0.0f, false);
+                       0.0f, setup.ldo);
   }
-  if (st == RADIOLIB_ERR_NONE) applyRxPath();
+  if (st == RADIOLIB_ERR_NONE) applyRxPath(setup.boost);
   return st;
 }
 
 int beginFsk(double f, double rbw_khz) {
+  const ScopeRadioSetup setup = modeRadioSetup();
   int st = g_radio.beginFSK(float(f), 4.8f, 5.0f, float(rbw_khz), 10, 16,
-                            SX126X_DIO3_TCXO_VOLTAGE, false);
+                            SX126X_DIO3_TCXO_VOLTAGE, setup.ldo);
   if (st == RADIOLIB_ERR_SPI_CMD_FAILED || st == RADIOLIB_ERR_SPI_CMD_INVALID) {
-    st = g_radio.beginFSK(float(f), 4.8f, 5.0f, float(rbw_khz), 10, 16, 0.0f, false);
+    st = g_radio.beginFSK(float(f), 4.8f, 5.0f, float(rbw_khz), 10, 16, 0.0f, setup.ldo);
   }
-  if (st == RADIOLIB_ERR_NONE) applyRxPath();
+  if (st == RADIOLIB_ERR_NONE) applyRxPath(setup.boost);
   return st;
 }
 
@@ -398,7 +427,9 @@ unsigned readDeviceErrors() {
   return (unsigned(data[0]) << 8) | unsigned(data[1]);
 }
 
-void clearDeviceErrors() {
+// Named apart from ScopeArmRadio::clearDeviceErrors() below, which is this and nothing else:
+// a member of that name would otherwise hide this one inside the class.
+void clearChipErrors() {
   const uint8_t none[2] = {0, 0};
   g_radio.module()->SPIwriteStream(RADIOLIB_SX126X_CMD_CLEAR_DEVICE_ERRORS, none, 2);
 }
@@ -421,23 +452,21 @@ void clearDeviceErrors() {
 // The chip reset and the plugin uploaded again - what a `scope` starts with, and what a refused
 // calibration is answered with (armScopeSegment). Back in standby, the RX path the repeater's,
 // the device errors cleared: nothing of the last sweep is left in the chip.
-int beginPlugin(double f0_mhz) {
-  #ifdef SX126X_USE_REGULATOR_LDO
-  const bool ldo = (SX126X_USE_REGULATOR_LDO != 0);
-  #else
-  const bool ldo = false;
-  #endif
+int beginPlugin(double f0_mhz, ScopeRegulator reg, ScopeGain gain) {
+  // The one place either of the two can be anything but the build's and the setting's, and it is
+  // for this scope alone: `ldo`/`dcdc` and `boost`/`noboost` on the `scope` line.
+  const ScopeRadioSetup setup = scopeRadioSetup(reg, gain, buildUsesLdo(), g_boost);
   g_scanner.end();
   g_radio.reset();
-  const int st = g_scanner.begin(float(f0_mhz), SX126X_DIO3_TCXO_VOLTAGE, ldo, g_boost);
+  const int st = g_scanner.begin(float(f0_mhz), SX126X_DIO3_TCXO_VOLTAGE, setup.ldo, setup.boost);
   if (st != RADIOLIB_ERR_NONE) return st;
   // The current limit, which the vendored begin() does not set: the RX path of a reading is the
   // repeater's, setting for setting (src/roles/scanner/config.h). The RF switch and the boosted
   // gain it does set, to the same values this would.
-  applyRxPath();
+  applyRxPath(setup.boost);
   // The device errors are sticky until cleared (SX1261/2 datasheet 13.5.5, 13.5.6), and every
   // arm reads IMG_CALIB_ERR as its own calibration's verdict: cleared here, so that it is.
-  clearDeviceErrors();
+  clearChipErrors();
   return RADIOLIB_ERR_NONE;
 }
 
@@ -451,14 +480,24 @@ class ChipArmRadio : public ScopeArmRadio {
     return g_radio.calibrateImageRejection(float(lo_mhz), float(hi_mhz));
   }
   unsigned deviceErrors() override { return readDeviceErrors(); }
+  void clearDeviceErrors() override { clearChipErrors(); }
   int setSweep(double first_mhz, double step_mhz, uint16_t points, double rbw_khz) override {
     return g_scanner.setSweep(float(first_mhz), float(step_mhz), uint8_t(points), float(rbw_khz));
   }
+  // The plugin's own 0x9B command, which blocks for the sweep's duration, and the clock the time
+  // inside it is measured on. The plugin's tag is checked inside sweep(): a chip that was reset
+  // under us - a brownout - has no 0x9B command and must not be sent one.
+  int sweep(uint8_t* levels) override { return g_scanner.sweep(levels); }
+  uint32_t nowUs() override { return micros(); }
   // The receiver left standing where setFrequency() put it, in continuous receive: a delay and
   // nothing else, at most kScopeSettleMaxUs and so at most 20 ms of one pass of loop() - a
   // fraction of the watchdog, and less than the plugin call that follows it is allowed.
   void settle(uint32_t us) override { delayMicroseconds(us); }
-  int reload() override { return beginPlugin(g_scope.plan.f0); }
+  // The plugin uploaded again - with this scope's own regulator and gain, because a reload in
+  // the middle of a scope must not change what is being measured.
+  int reload() override {
+    return beginPlugin(g_scope.plan.f0, g_scope.plan.reg, g_scope.plan.gain);
+  }
 };
 ChipArmRadio g_arm;
 
@@ -489,6 +528,9 @@ void emitScopeFrame(uint32_t now) {
   f.plan = g_scope.plan;
   f.sweeps = g_scope.acc.sweeps();
   f.sps_x10 = scopeSweepsPerSecondX10(f.sweeps, now - g_scope.emitted_ms);
+  f.us = g_scope.time.shortestUs();
+  f.usx = g_scope.time.longestUs();
+  f.device_errors = g_scope.dev;
   f.levels = g_scope.frame;
   g_scope.out->scope(f);
   g_scope.emitted_ms = now;
@@ -501,6 +543,10 @@ void emitScopeFrame(uint32_t now) {
     g_scope.beat_ms = (now - g_scope.beat_ms < 2u * interval) ? g_scope.beat_ms + interval : now;
   }
   g_scope.acc.reset(g_scope.plan.points);
+  // Nothing of either is carried into the next frame: `us`, `usx` and `dev` are this frame's
+  // sweeps and this frame's arms.
+  g_scope.time.reset();
+  g_scope.dev = 0;
 }
 
 void serviceScope() {
@@ -518,6 +564,10 @@ void serviceScope() {
       stop();
       return;
     }
+    // What the chip's error word held when this arm reached standby, which is what the sweep
+    // before it left there: the frame's `dev` is the OR of them (0 for a plan of one segment,
+    // which is never given a standby to read it in).
+    g_scope.dev |= arm.before_errors;
     g_scope.armed = g_scope.segment;
   } else {
     // A one-segment plan keeps its parameters from sweep to sweep, so nothing re-arms it and the
@@ -531,14 +581,17 @@ void serviceScope() {
       return;
     }
   }
-  // Blocking for the segment's duration, and the plugin's tag is checked inside: a chip that was
-  // reset under us - a brownout - has no 0x9B command and must not be sent one.
-  const int st = g_scanner.sweep(g_scope.levels);
-  if (st != RADIOLIB_ERR_NONE) {
-    if (st == RADIOLIB_ERR_CHIP_NOT_FOUND) {
+  // Blocking for the segment's duration, timed by the clock the seam carries and nothing else -
+  // no arm, no settle, nothing between two sweeps - which is what `us` and `usx` are
+  // (sweepScopeSegment, src/roles/scanner/Sweep.cpp). The plugin's tag is checked inside the
+  // call: a chip that was reset under us - a brownout - has no 0x9B command and must not be sent
+  // one.
+  ScopeArmResult swept;
+  if (!sweepScopeSegment(g_arm, g_scope.levels, g_scope.time, swept)) {
+    if (swept.code == RADIOLIB_ERR_CHIP_NOT_FOUND) {
       error("scope: the sweep plugin is gone (the chip was reset); scope ended");
     } else {
-      scopeError("sweep", kScopeArmSweep, st, seg.first_mhz, false);
+      scopeError("sweep", swept.failed, swept.code, seg.first_mhz, false);
     }
     stop();
     return;
@@ -550,6 +603,7 @@ void serviceScope() {
   g_scope.segment = 0;
   if (g_scope.plan.segments > 1) g_scope.armed = 0xFFFF;  // the next sweep re-arms segment 0
   g_scope.acc.sweepDone();
+  g_scope.time.sweepDone();  // a whole sweep, and the only kind `us` and `usx` are of
 
   const uint32_t now = millis();
   if (g_scope.plan.interval_ms != 0 && int32_t(now - g_scope.beat_ms) < 0) return;
@@ -687,7 +741,9 @@ bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
   ScopePlan planned;
   if (!planScope(request, planned)) return false;
 
-  const int st = beginPlugin(planned.f0);
+  // This scope's own regulator and gain, and nothing of it outlives the mode: the words are in
+  // `planned` and the mode after this one begins the chip as it always did.
+  const int st = beginPlugin(planned.f0, planned.reg, planned.gain);
   if (st != RADIOLIB_ERR_NONE) {
     error("scope init failed (%d)", st);
     g_scanner.end();
@@ -702,6 +758,8 @@ bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
   g_scope.armed = 0xFFFF;
   g_scope.cal = ScopeCalibration();  // beginPlugin() reset the chip, and the calibration with it
   g_scope.acc.reset(planned.points);
+  g_scope.time.reset();
+  g_scope.dev = 0;
   const uint32_t now = millis();
   g_scope.beat_ms = now;
   g_scope.emitted_ms = now;
@@ -746,6 +804,10 @@ void stop() {
     g_scanner.end();
     g_radio.reset();  // and the sweep plugin, the same way: a reset of the chip removes it
     g_scope.out = nullptr;
+    // And the two words with it: toHomeRx() below begins the chip with the build's regulator and
+    // the gain `boost on|off` left, because modeRadioSetup() is what it asks for. However a
+    // scope ends - `stop`, `scope off`, another command, an error - the radio is what it was.
+    g_scope.plan = ScopePlan();
   }
   if (g_mode != kModeMonitor) {
     toHomeRx();
@@ -766,6 +828,9 @@ bool setHome(double f_mhz, double bw_khz, uint8_t sf, uint8_t cr) {
 HomeArgs home() { return g_home; }
 
 bool setBoost(bool on) {
+  // The setting and the chip both, as before: `boost on|off` is the operator's word about the
+  // gain and it is obeyed in whatever mode is running. A `scope` that asked for a gain of its own
+  // gets that gain back at its next reload, and the setting is what the mode after it takes.
   g_boost = on;
   return g_radio.setRxBoostedGainMode(on) == RADIOLIB_ERR_NONE;
 }
