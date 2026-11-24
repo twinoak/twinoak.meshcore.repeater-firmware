@@ -281,6 +281,8 @@ void handleCommand(char* line, Source from) {
       request.rbw_khz = args.rbw_khz;
       request.interval_ms = args.interval_ms;
       request.agg = args.agg;
+      request.seg_mhz = args.seg_mhz;
+      request.settle_us = args.settle_us;
       // The sink's own floor: the Walter's UART is 115200 baud and a frame has to fit inside a
       // fraction of the interval, while USB CDC is asked for every sweep there is.
       request.sink_baud = (from == kFromWalter) ? uint32_t(WALTER_BAUD) : 0u;
@@ -288,18 +290,11 @@ void handleCommand(char* line, Source from) {
       const bool ok =
           radio::startScope(request, from == kFromWalter ? g_lines_walter : g_lines_usb, plan);
       char msg[kMaxAckMessageBytes];
-      if (ok) {
-        // What was taken, which is not always what was asked: the points, the step they make,
-        // the bandwidth, how many segments the span was cut into, how much of it a reading
-        // covers and the interval the sink allowed.
-        snprintf(msg, sizeof(msg),
-                 "n=%u step=%.4fkHz rbw=%.1fkHz seg=%u cov=%.3f interval=%lums sweep=%lums",
-                 unsigned(plan.points), plan.step_khz, plan.rbw_khz, unsigned(plan.segments),
-                 plan.cov, (unsigned long)plan.interval_ms, (unsigned long)plan.sweep_ms);
-      }
-      g_lines.ack(name, ok, ok ? msg
-                               : "refused: 150 <= f0 < f1 <= 960 MHz, points 16..2048,"
-                                 " interval 0..60000 ms - or the radio refused the mode");
+      msg[0] = '\0';
+      // What was taken, written where a test can hold it to the byte (scopeAckMessage,
+      // src/roles/scanner/Sweep.cpp).
+      if (ok) scopeAckMessage(plan, msg, sizeof(msg));
+      g_lines.ack(name, ok, ok ? msg : kScopeRefusal);
       return;
     }
 

@@ -1,0 +1,66 @@
+# The two numbers, asked of the board: phase 3.16's task 02, deliverable 6.
+#
+#   python tools/noisescope/hunt.py --list tools/noisescope/lists/p3.16-02.txt \
+#       --label p3.16-02 --carrier 869.618
+#
+# Thirty-two lines, each captured for ten seconds. The bench is the pile's README's *Before the
+# run*: the scanner flashed and nothing else, the tinySA Ultra on the antenna port with a plain
+# carrier on 869.618 MHz at about -30 dBm into the radio, `"rf": "antenna"` in bench.local.json,
+# and no `bench restore` afterwards.
+#
+# Two spans, the two of 23 November (tasks/phase-3.16/README.md): 180 MHz at 467 kHz around the
+# carrier, which is six segments as it is asked today, and 13 MHz at 58.6 kHz, which is one. Each
+# span is asked four ways:
+#
+#   1. as it is asked today, for this run's own reference;
+#   2. with a segment's width of 11, 5.5, 4 and 2 MHz and no settle - do the blocks *after* a
+#      segment's first point go, and at which width?
+#   3. with today's width and a settle of 100, 200, 500, 1 000, 2 000 and 5 000 microseconds -
+#      does the block *at* the first point go, and at which settle?
+#   4. the width and the settle the two captures of 23 November point at - 5.6 MHz, which is
+#      twelve points of the wide span and the interval the blocks were read to repeat at, and
+#      500 us, which is 146 RSSI updates at 467 kHz - and one value either side of each, taken
+#      from the sets above. Whichever pair the table of 2 and 3 really speaks for, run those two
+#      lines again: they are one `scope` line each.
+#
+# `agg last` and `interval 0` throughout, as hunt.py's own list has them: an echo is to be counted
+# in the sweep it was made in, and a max-hold over a hundred sweeps hides how often it is there.
+#
+# Nothing here changes what `scope` does when it is asked as it is asked today: lines 1 and
+# A-today/B-today are that line, and they are in the list to be compared against.
+
+# --- 180 MHz at 467 kHz: six segments as it is asked today -----------------------------------
+a-today        = scope 779.618 959.618 0 467 0 last
+a-seg-11       = scope 779.618 959.618 0 467 0 last 11
+a-seg-5.5      = scope 779.618 959.618 0 467 0 last 5.5
+a-seg-4        = scope 779.618 959.618 0 467 0 last 4
+a-seg-2        = scope 779.618 959.618 0 467 0 last 2
+a-settle-100   = scope 779.618 959.618 0 467 0 last 32 100
+a-settle-200   = scope 779.618 959.618 0 467 0 last 32 200
+a-settle-500   = scope 779.618 959.618 0 467 0 last 32 500
+a-settle-1000  = scope 779.618 959.618 0 467 0 last 32 1000
+a-settle-2000  = scope 779.618 959.618 0 467 0 last 32 2000
+a-settle-5000  = scope 779.618 959.618 0 467 0 last 32 5000
+a-both         = scope 779.618 959.618 0 467 0 last 5.6 500
+a-both-wider   = scope 779.618 959.618 0 467 0 last 11 500
+a-both-narrower = scope 779.618 959.618 0 467 0 last 4 500
+a-both-shorter = scope 779.618 959.618 0 467 0 last 5.6 200
+a-both-longer  = scope 779.618 959.618 0 467 0 last 5.6 1000
+
+# --- 13 MHz at 58.6 kHz: one segment as it is asked today ------------------------------------
+b-today        = scope 863.118 876.118 250 58.6 0 last
+b-seg-11       = scope 863.118 876.118 250 58.6 0 last 11
+b-seg-5.5      = scope 863.118 876.118 250 58.6 0 last 5.5
+b-seg-4        = scope 863.118 876.118 250 58.6 0 last 4
+b-seg-2        = scope 863.118 876.118 250 58.6 0 last 2
+b-settle-100   = scope 863.118 876.118 250 58.6 0 last 32 100
+b-settle-200   = scope 863.118 876.118 250 58.6 0 last 32 200
+b-settle-500   = scope 863.118 876.118 250 58.6 0 last 32 500
+b-settle-1000  = scope 863.118 876.118 250 58.6 0 last 32 1000
+b-settle-2000  = scope 863.118 876.118 250 58.6 0 last 32 2000
+b-settle-5000  = scope 863.118 876.118 250 58.6 0 last 32 5000
+b-both         = scope 863.118 876.118 250 58.6 0 last 5.6 500
+b-both-wider   = scope 863.118 876.118 250 58.6 0 last 11 500
+b-both-narrower = scope 863.118 876.118 250 58.6 0 last 4 500
+b-both-shorter = scope 863.118 876.118 250 58.6 0 last 5.6 200
+b-both-longer  = scope 863.118 876.118 250 58.6 0 last 5.6 1000

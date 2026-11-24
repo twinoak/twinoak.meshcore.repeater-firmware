@@ -36,6 +36,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import echoes  # noqa: E402
+import hunt  # noqa: E402  (its `read_list`, for this pile's own list of lines)
 
 
 # ----------------------------------------------------------------------------- a capture, made
@@ -69,11 +70,14 @@ def frame_line(plan, dbm, seq=1, sps=476, agg="last", sweeps=1):
 
 
 def ack_line(plan):
-    return json.dumps({
-        "t": "ack", "cmd": "scope", "ok": True,
-        "msg": ("n=%d step=%.4fkHz rbw=%.1fkHz seg=%d cov=%.3f interval=0ms sweep=%dms"
-                % (plan.points, plan.step_khz, plan.rbw_khz, plan.segments, plan.cov, 1)),
-    })
+    """`scopeAckMessage()` (src/roles/scanner/Sweep.cpp): the two numbers of phase 3.16's task 02
+    are named only when one of them is not the default, so an ack of a line asked for as it was
+    asked for before that task is the line it always was."""
+    msg = ("n=%d step=%.4fkHz rbw=%.1fkHz seg=%d cov=%.3f interval=0ms sweep=%dms"
+           % (plan.points, plan.step_khz, plan.rbw_khz, plan.segments, plan.cov, 1))
+    if plan.seg_mhz != echoes.SEGMENT_MHZ or plan.settle_us != 0:
+        msg += " segw=%.1fMHz settle=%dus" % (plan.seg_mhz, plan.settle_us)
+    return json.dumps({"t": "ack", "cmd": "scope", "ok": True, "msg": msg})
 
 
 def plant(plan, rule, value, carrier_mhz=None, no_reading=()):
@@ -222,7 +226,8 @@ class ThePlanTable(unittest.TestCase):
         # The wide scope of 23 November: six segments, 386 points, and the segment starts the
         # pile's README worked out by hand (779.9, 810.2, 840.5, 870.3, 900.2, 930.0 MHz).
         wide = [one for one in table["plans"] if "23 November" in one["name"]
-                and one["request"]["points"] == 0 and one["request"]["rbw_khz"] == 467.0]
+                and one["request"]["points"] == 0 and one["request"]["rbw_khz"] == 467.0
+                and not one["request"].get("seg_mhz", 0.0)]
         self.assertEqual(1, len(wide))
         plan, segments = wide[0]["plan"], wide[0]["segments"]
         self.assertEqual(386, plan["points"])
@@ -590,6 +595,140 @@ class TheCaptureOf23November(unittest.TestCase):
                           % (expected, distances))
         self.assertTrue(reading.interval["points"], reading.summary())
         self.assertAlmostEqual(12.0, reading.interval["points"][0], delta=0.5)
+
+
+# ----------------------------------------------------------------------------- the two numbers
+
+class TheTwoNumbers(unittest.TestCase):
+    """A segment's width and a settle (phase 3.16's task 02).
+
+    The width is the one thing of a plan a frame cannot say - `f0`, `step`, `n` and `rbw` are all
+    a frame carries - so a capture of a `scope` asked for with one has to be read **with its
+    ack**, and getting it wrong puts every echo in the wrong segment. These are that.
+    """
+
+    WIDE = dict(f0=779.618, f1=959.618, points=0, rbw_khz=467.0)
+
+    def _plan(self, seg_mhz=0.0, settle_us=0, **spec):
+        full = dict(self.WIDE)
+        full.update(spec)
+        plan = echoes.plan_scope(full["f0"], full["f1"], points=full["points"],
+                                 rbw_khz=full["rbw_khz"], seg_mhz=seg_mhz, settle_us=settle_us)
+        self.assertIsNotNone(plan, (full, seg_mhz, settle_us))
+        return plan
+
+    def test_a_width_cuts_the_plan_as_the_firmwares_own_test_says_it_does(self):
+        """The widths of deliverable 5, over both spans of 23 November."""
+        wants = [
+            (0.0, 6, 65), (32.0, 6, 65), (11.0, 17, 23), (5.6, 33, 12), (5.5, 36, 11),
+            (2.0, 97, 4),
+        ]
+        for seg_mhz, segments, longest in wants:
+            plan = self._plan(seg_mhz=seg_mhz)
+            self.assertEqual(segments, plan.segments, seg_mhz)
+            self.assertEqual(32.0 if seg_mhz == 0.0 else seg_mhz, plan.seg_mhz)
+            segs = echoes.segments_of(plan)
+            self.assertEqual(plan.points, sum(one.points for one in segs), seg_mhz)
+            self.assertEqual(longest, max(one.points for one in segs), seg_mhz)
+            for one in segs:
+                self.assertLessEqual(one.cal_hi_mhz - one.cal_lo_mhz, plan.seg_mhz + 1e-9)
+        narrow = dict(f0=863.118, f1=876.118, points=250, rbw_khz=58.6)
+        for seg_mhz, segments in ((0.0, 1), (32.0, 1), (11.0, 2), (5.5, 3), (2.0, 7)):
+            plan = self._plan(seg_mhz=seg_mhz, **narrow)
+            self.assertEqual(segments, plan.segments, seg_mhz)
+
+    def test_a_width_below_one_step_or_above_32_and_a_settle_too_long_are_refused(self):
+        """planScope()'s own bounds: the tool must not read a plan the firmware would refuse."""
+        self.assertIsNotNone(echoes.plan_scope(779.618, 959.618, 0, 467.0, seg_mhz=0.5))
+        for bad in (0.4, 32.1, -1.0):
+            self.assertIsNone(echoes.plan_scope(779.618, 959.618, 0, 467.0, seg_mhz=bad), bad)
+        # A tenth of a MHz is taken, as the firmware takes it.
+        self.assertEqual(5.6, echoes.plan_scope(779.618, 959.618, 0, 467.0, seg_mhz=5.64).seg_mhz)
+        self.assertIsNotNone(echoes.plan_scope(779.618, 959.618, 0, 467.0,
+                                               settle_us=echoes.SETTLE_MAX_US))
+        self.assertIsNone(echoes.plan_scope(779.618, 959.618, 0, 467.0,
+                                           settle_us=echoes.SETTLE_MAX_US + 1))
+
+    def test_the_ack_is_what_says_which_width_a_capture_was_taken_with(self):
+        """`segw=` and `settle=` of the ack, and 32 MHz when the line names neither."""
+        plan = self._plan(seg_mhz=5.6, settle_us=500)
+        ack = json.loads(ack_line(plan))
+        self.assertEqual(5.6, echoes.ack_seg_mhz(ack))
+        self.assertEqual(500, echoes.ack_settle_us(ack))
+        self.assertEqual(33, echoes.ack_segments(ack))
+        today = json.loads(ack_line(self._plan()))
+        self.assertIsNone(echoes.ack_seg_mhz(today), "a line asked for as it always was")
+        self.assertIsNone(echoes.ack_settle_us(today))
+        self.assertEqual(6, echoes.ack_segments(today))
+
+    def test_a_capture_of_a_narrow_width_is_read_with_its_own_segments(self):
+        """The whole point: seventeen segments of 23 points, not six of 65.
+
+        11 MHz and not the 5.6 MHz the pile's README points at, because a planted capture needs
+        three blocks in a segment to say anything and a twelve-point segment does not hold three;
+        the firmware's own test is where every width is checked.
+        """
+        plan = self._plan(seg_mhz=11.0, settle_us=500)
+        self.assertEqual(17, plan.segments)
+        lines = capture([plan], rule="points", value=6)
+        readings, (unit, _line), _skipped, bad = read(lines)
+        self.assertEqual(0, bad)
+        self.assertEqual(1, len(readings))
+        reading = readings[0]
+        self.assertEqual(17, reading.plan.segments)
+        self.assertEqual(11.0, reading.plan.seg_mhz)
+        self.assertEqual(500, reading.plan.settle_us)
+        # A block every six points from each segment's first, and a segment is 22 or 23 points
+        # here: so every echo is 0, 6, 12 or 18 points into its own segment and none is further.
+        self.assertTrue(reading.echoes)
+        for one in reading.echoes:
+            self.assertIn(one.distance_points, (0, 6, 12, 18), one.as_dict(None))
+        self.assertIn(6.0, reading.interval["points"], "the interval is six points of this plan")
+        self.assertIsNone(unit, "one scope still cannot say which of the three units it keeps")
+
+    def test_the_same_capture_read_without_its_ack_is_read_wrong_and_that_is_the_reason(self):
+        """Why the ack is read at all: the segments are the one thing a frame cannot say."""
+        plan = self._plan(seg_mhz=11.0)
+        lines = [one for one in capture([plan], rule="points", value=6)
+                 if '"t": "ack"' not in one and '"t":"ack"' not in one]
+        readings, _verdict, _skipped, _bad = read(lines)
+        self.assertEqual(1, len(readings))
+        self.assertEqual(6, readings[0].plan.segments,
+                         "with no ack a capture is read as a `scope` asked for without a width")
+        far = [one.distance_points for one in readings[0].echoes if one.distance_points >= 23]
+        self.assertTrue(far, "and the distances then run the length of a 65-point segment")
+
+    def test_a_settle_changes_no_distance_inside_a_segment(self):
+        """It is time spent before a segment's first reading, so no echo of one moves."""
+        planted = {}
+        for settle in (0, 500, echoes.SETTLE_MAX_US):
+            plan = self._plan(seg_mhz=11.0, settle_us=settle)
+            readings, _verdict, _skipped, _bad = read(capture([plan], rule="points", value=6))
+            self.assertEqual(1, len(readings))
+            planted[settle] = sorted(one.distance_points for one in readings[0].echoes)
+            self.assertEqual(settle, readings[0].plan.settle_us)
+        self.assertEqual(planted[0], planted[500])
+        self.assertEqual(planted[0], planted[echoes.SETTLE_MAX_US])
+
+    def test_every_scope_line_of_this_pile_s_list_is_one_this_firmware_runs(self):
+        """tools/noisescope/lists/p3.16-02.txt, read by hunt.py's own reader."""
+        path = os.path.join(os.path.dirname(os.path.abspath(echoes.__file__)), "lists",
+                            "p3.16-02.txt")
+        self.assertTrue(os.path.isfile(path), path)
+        rows = hunt.read_list(path)
+        self.assertEqual(32, len(rows), "two spans, sixteen lines each")
+        for name, line, _about in rows:
+            words = line.split()
+            self.assertEqual("scope", words[0], name)
+            self.assertLessEqual(len(words), 9, "%s: nine words is the longest line there is" % name)
+            self.assertEqual("last", words[6], "%s: a frame is one sweep" % name)
+            self.assertEqual("0", words[5], "%s: a frame per sweep" % name)
+            plan = echoes.plan_scope(float(words[1]), float(words[2]), points=int(words[3]),
+                                     rbw_khz=float(words[4]),
+                                     seg_mhz=(float(words[7]) if len(words) > 7 else 0.0),
+                                     settle_us=(int(words[8]) if len(words) > 8 else 0))
+            self.assertIsNotNone(plan, "%s: %s is not a plan" % (name, line))
+            self.assertLessEqual(plan.segments, echoes.MAX_POINTS, name)
 
 
 def _rmtree(path):

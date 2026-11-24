@@ -27,9 +27,9 @@ namespace scanner {
 // docs/noisescope.md and short enough that two of them are nothing beside the sweep buffers.
 constexpr size_t kMaxLineBytes = 160;
 
-// At most this many words are looked at; `scope f0 f1 points rbw interval agg` is the longest
-// command and has seven.
-constexpr int kMaxTokens = 8;
+// At most this many words are looked at; `scope f0 f1 points rbw interval agg seg_mhz settle_us`
+// is the longest command and has nine (phase 3.16's task 02 added the last two).
+constexpr int kMaxTokens = 9;
 
 // A `time` before this is not a time: it is a host that sent a counter, a zero or a parse
 // accident (November 2023).
@@ -117,6 +117,8 @@ struct ScopeArgs {
   double rbw_khz = 0.0;      // 0 = the plan's default
   uint32_t interval_ms = 0;  // 0 = a frame per sweep
   ScopeAgg agg = kScopeAggMax;
+  double seg_mhz = 0.0;      // 0 = kScopeSegmentMhz, the widest a segment may be
+  uint32_t settle_us = 0;    // 0 = today's arm, no stand on the segment's first point
 };
 bool parseScope(const Tokens& tokens, ScopeArgs& out);
 
