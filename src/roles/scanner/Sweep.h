@@ -285,7 +285,19 @@ constexpr uint16_t kScopePluginMaxPoints = 250;
 // calibration (RadioLib 7.8.0, SX126x::calibrateImage). The fork caps a sweep at 32 MHz for
 // that reason and this starts there; the bench lowers it if a ghost shows
 // (docs/bench.md section 9).
+//
+// It is both **the default and the widest a segment may be**: `scope`'s sixth number asks for a
+// narrower one, because the blocks a wide scope shows repeat about every 5.6 MHz from wherever a
+// segment began and the synthesizer dragged that far is the guess at what makes them
+// (tasks/phase-3.16/README.md). What a `scope` with no such number takes does not move: that is
+// decided after the bench's tables, not here (tasks/phase-3.16/FOLLOWUPS.md).
 constexpr double kScopeSegmentMhz = 32.0;
+
+// The longest settle `scope`'s seventh number may ask for: how long the receiver stands on the
+// segment's first point, in continuous receive, before the sweep that counts. 20 ms is far more
+// than anything the plugin's own two extra updates allow (6.9 us at 467 kHz) and still a fraction
+// of the 8 s watchdog, with every segment a separate pass of loop() besides.
+constexpr uint32_t kScopeSettleMaxUs = 20000;
 
 // The radio's frequency unit is 32 MHz / 2^25, about 0.95 Hz; the fork asks for at least 100 Hz
 // a point and so does this.
@@ -376,10 +388,11 @@ enum ScopeArmCall : uint8_t {
   kScopeArmSetSweep = 4,        // SX126xSpectrumScanner::setSweep(...)
   kScopeArmSweep = 5,           // SX126xSpectrumScanner::sweep(), the sweep itself
   kScopeArmReload = 6,          // the chip reset and the plugin uploaded again (below)
+  kScopeArmSettle = 7,          // the retune onto the segment's first point before the settle
 };
 
 // The word the `err` line carries for each: "standby", "setFrequency", "calibrateImage",
-// "setSweep", "sweep", "reload"; "" for none.
+// "setSweep", "sweep", "reload", "settle"; "" for none.
 const char* scopeArmCallName(ScopeArmCall call);
 
 // What `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]` asked for; 0 is "the default"
@@ -394,6 +407,12 @@ struct ScopeRequest {
   uint32_t interval_ms = 0;
   ScopeAgg agg = kScopeAggMax;
   uint32_t sink_baud = 0;
+  // The widest a segment may be, in MHz: 0 is kScopeSegmentMhz, today's. Taken to a tenth of a
+  // MHz, and refused below one step or above kScopeSegmentMhz.
+  double seg_mhz = 0.0;
+  // How long the receiver stands on a segment's first point before the sweep that counts: 0 is
+  // today's arm, which stands there for the plugin's own two extra updates and no longer.
+  uint32_t settle_us = 0;
 };
 
 // A scope, planned. `points` is 0 for a request this firmware does not run.
@@ -409,12 +428,16 @@ struct ScopePlan {
   uint32_t interval_ms = 0;  // what was taken, the sink's floor included
   ScopeAgg agg = kScopeAggMax;
   uint32_t segment_ms = 0;   // the longest one plugin call holds the chip
-  uint32_t sweep_ms = 0;     // and the whole span, every segment of it
+  uint32_t sweep_ms = 0;     // and the whole span, every segment of it, settles included
+  double seg_mhz = kScopeSegmentMhz;  // the widest a segment of this plan may be, as taken
+  uint32_t settle_us = 0;             // and the settle before each segment's first reading
 };
 
 // False - and `out` untouched - when the request is not a scope: the ends crossed or outside the
 // radio's range, a point count given and outside kScopeMinPoints..kScopeMaxPoints, a step below
-// kScopeMinStepKhz, a negative bandwidth, or an interval above kScopeIntervalMaxMs.
+// kScopeMinStepKhz, a negative bandwidth, an interval above kScopeIntervalMaxMs, a segment width
+// given and above kScopeSegmentMhz or narrower than one step, or a settle above
+// kScopeSettleMaxUs.
 bool planScope(const ScopeRequest& request, ScopePlan& out);
 
 // Segment `index` of a plan (0 .. plan.segments - 1). False for an index the plan does not have.
@@ -438,6 +461,10 @@ struct ScopeArmRadio {
   // The chip's GetDeviceErrors word, read in standby (where it answers).
   virtual unsigned deviceErrors() = 0;
   virtual int setSweep(double first_mhz, double step_mhz, uint16_t points, double rbw_khz) = 0;
+  // The receiver left standing where it is, in continuous receive, for `us` microseconds. The
+  // chip half is a delay and nothing else; the default is to stand there for no time at all, so
+  // that a radio written before this task - every fake of test/test_scanner - is still one.
+  virtual void settle(uint32_t us) { (void)us; }
   // A hardware reset of the chip and the plugin uploaded again, as the scope's start does it:
   // back in standby with its device errors cleared and nothing of the last sweep left. The one
   // thing that was found to clear a refused calibration (tasks/phase-3.5/reports/02.md).
@@ -469,9 +496,57 @@ struct ScopeArmResult {
 // nothing.
 float scopeSegmentCentreMhz(const ScopePlan& plan, const ScopeSegment& seg);
 
+// The range the chip's image calibration was last made for, carried from one arm of a sweep to
+// the next so that a segment already inside it is armed without a second one. Invalid - and so
+// never inside anything - after a reset of the chip, which is what clears a calibration.
+struct ScopeCalibration {
+  bool valid = false;
+  double lo_mhz = 0.0;
+  double hi_mhz = 0.0;
+};
+
+// How far outside a calibrated range a segment may still be called inside it: a kilohertz, which
+// is the rounding of the arithmetic above and nothing a calibration can tell apart (RadioLib
+// asks the chip for the band in units of 4 MHz, SX126x::calibrateImageRejection).
+constexpr double kScopeCalibrationSlackMhz = 0.001;
+
+// What one arm's calibration covers. **Today's rule is one calibration a segment, for the
+// segment's own range**, and a plan whose segments are as wide as kScopeSegmentMhz allows gets
+// exactly that - which is every plan a `scope` with no width asked for makes. A plan cut
+// narrower would otherwise pay a calibration for every one of thirty-three segments, so its
+// calibration is made for **kScopeSegmentMhz at a time** - the width a calibration was always
+// made for - from its own first point upwards, and never past the plan's last point.
+void scopeCalibrationRange(const ScopePlan& plan, const ScopeSegment& seg, double& lo_mhz,
+                           double& hi_mhz);
+
+// The receiver put **on the segment's first point** and left standing there, in continuous
+// receive, for the plan's settle - the last thing an arm does, and the only thing done between
+// two sweeps of a segment that is already armed (src/roles/scanner/Radio.cpp, serviceScope).
+//
+// Why a retune and not a sweep of one point: the plugin's setSweep() is what loads the sweep that
+// counts, and it standbys the chip and puts the receiver at the **segment's centre** before the
+// plugin's own jump to point 0 (vendor/sx126x_spectrum/SX126xSpectrumScanner.h, setSweep ~L130).
+// So nothing done before setSweep() can leave the receiver on the first point, and the only move
+// left afterwards is the one the plugin itself makes all sweep long: the frequency written with
+// the receiver in continuous receive and no calibration (spectrum.asm, `retune`: REG_FREQ
+// [0x6B..0x6E], "checked on hardware against SetRfFrequency"). ScopeArmRadio::setFrequency() is
+// that write, so the plugin's own retune into point 0 is then a move of zero and its two extra
+// updates are spent on a synthesizer that has already settled.
+//
+// Nothing at all when the plan asked for no settle: a `scope` without the two numbers makes
+// exactly the calls it made before this task.
+bool settleScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                        ScopeArmResult& out);
+
 // Arms `seg`: standby, the centre frequency, the image calibration for the segment's own range,
-// the chip's device errors read, the plugin's parameters - in that order and no other. True when
-// armed; false with `out` naming the call that returned the code.
+// the chip's device errors read, the plugin's parameters, the settle - in that order and no
+// other. True when armed; false with `out` naming the call that returned the code.
+//
+// `cal` is what the chip was last calibrated for, read and written: a segment that lies inside
+// it is armed with neither a calibration nor the question to the chip that goes with one
+// (scopeCalibrationRange above), and a reload invalidates it because the reset did. The overload
+// without it calibrates every segment, which is what this function did before phase 3.16's task
+// 02 and what test/test_scanner holds it to.
 //
 // A calibration the chip refuses is retried **once, after a reload**. On the first RAK4630 the
 // SX1262 refuses an image calibration that reaches more than about 20 MHz above where a plugin
@@ -483,6 +558,8 @@ float scopeSegmentCentreMhz(const ScopePlan& plan, const ScopeSegment& seg);
 // the next ones with it: one reload per pass over 150-960 MHz, at the second segment. The
 // refusal is the chip's, so the answer is the chip's own verdict and not a table of
 // frequencies: refused once, reload and ask again; refused twice, an `err` that says so.
+bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                     ScopeCalibration& cal, ScopeArmResult& out);
 bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
                      ScopeArmResult& out);
 
@@ -501,7 +578,19 @@ uint32_t scopeIntervalFloorMs(uint16_t points, uint32_t baud);
 // The first is what must stay inside RadioLib's 1000 ms wait for BUSY (Module.h:224) and the
 // second inside the 8 s watchdog, which test/test_scanner holds them to.
 uint32_t scopeSegmentMs(uint16_t points, double rbw_khz);
-uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz);
+uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz,
+                      uint32_t settle_us = 0);
+
+// What the `ack` of a `scope` that started carries: what was *taken*, which is not always what
+// was asked (docs/noisescope.md section 5). Here and not where the ack is sent, so that a test
+// can hold it to the byte - and the bytes of a `scope` asked for with neither a segment width nor
+// a settle are the ones this line had before phase 3.16's task 02: the two numbers are named only
+// when one of them is not the default.
+void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes);
+
+// And the sentence a request this firmware does not run is refused with, which names every bound
+// planScope() has.
+extern const char kScopeRefusal[];
 
 // Sweeps per second times ten, as the frame's `sps` carries it: 0 when no time has passed.
 uint16_t scopeSweepsPerSecondX10(uint32_t sweeps, uint32_t elapsed_ms);

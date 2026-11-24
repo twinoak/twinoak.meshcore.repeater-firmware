@@ -184,7 +184,7 @@ TEST(Commands, TheCommandWordIsCaseInsensitiveAndAnArgumentIsNot) {
   EXPECT_EQ(kVerbSweep, verbOf(tokens.at[0]));
 }
 
-TEST(Commands, RepeatedSeparatorsAreOneAndNineWordsAreEight) {
+TEST(Commands, RepeatedSeparatorsAreOneAndTenWordsAreNine) {
   Line line("  dwell \t\t 869.618   300  ");
   const Tokens tokens = tokensOf(line);
   ASSERT_EQ(3, tokens.count);
@@ -1212,6 +1212,8 @@ TEST(Scope, ThePlanTableIsPlanScopes) {
     ScopeRequest r = request(req["f0"].as<double>(), req["f1"].as<double>());
     r.points = req["points"] | 0u;
     r.rbw_khz = rbwAsTheTableNamesIt(req["rbw_khz"] | 0.0);
+    r.seg_mhz = req["seg_mhz"] | 0.0;
+    r.settle_us = req["settle_us"] | 0u;
     ScopePlan plan;
     ASSERT_TRUE(planScope(r, plan)) << "this firmware does not run that request";
 
@@ -1221,7 +1223,8 @@ TEST(Scope, ThePlanTableIsPlanScopes) {
     EXPECT_EQ(want["segments"].as<uint16_t>(), plan.segments);
     for (const auto& pair : {std::make_pair("step_khz", plan.step_khz),
                              std::make_pair("rbw_khz", plan.rbw_khz),
-                             std::make_pair("first_mhz", plan.first_mhz)}) {
+                             std::make_pair("first_mhz", plan.first_mhz),
+                             std::make_pair("seg_mhz", plan.seg_mhz)}) {
       const double expected = want[pair.first].as<double>();
       EXPECT_NEAR(expected, pair.second, planTableTolerance(expected)) << pair.first;
     }
@@ -1531,6 +1534,9 @@ struct FakeArmRadio : ScopeArmRadio {
     note("reload;");
     return reload_code;
   }
+  // Phase 3.16's task 02: nothing in this file asks for a settle except the tests that are about
+  // one, so every expectation above is what it was.
+  void settle(uint32_t us) override { note("settle(%u);", unsigned(us)); }
   int setSweep(double first, double step, uint16_t points, double rbw) override {
     note("setSweep(%.3f,%.3f,%u,%.1f);", first, step, unsigned(points), rbw);
     return sweep_code;
@@ -1752,6 +1758,472 @@ TEST(Scope, EverySegmentOfTheWholeRangeIsCalibratedForWhereItsSweepRuns) {
       const double last_mhz = before.first_mhz + double(before.points - 1) * plan.step_khz / 1000.0;
       EXPECT_NEAR(last_mhz + plan.step_khz / 1000.0, seg.first_mhz, 1e-6) << "segment " << i;
     }
+  }
+}
+
+// ----------------------------------------------------------------- phase 3.16's two numbers
+
+TEST(Scope, TheTwoNumbersAreReadAfterTheAggregateAndTheLineBeforeThemIsWhatItWas) {
+  // The line with six numbers is the line of docs/noisescope.md section 5 before phase 3.16's
+  // task 02: the two new ones are absent and the plan takes its own defaults for them.
+  Line six("scope 150 960 2048 467 500 mean");
+  ScopeArgs args;
+  ASSERT_TRUE(parseScope(tokensOf(six), args));
+  EXPECT_EQ(kScopeAggMean, args.agg);
+  EXPECT_DOUBLE_EQ(0.0, args.seg_mhz) << "absent is 'the default', which is kScopeSegmentMhz";
+  EXPECT_EQ(0u, args.settle_us) << "and no settle, which is today's arm";
+
+  Line eight("scope 779.618 959.618 0 467 0 last 5.6 500");
+  ASSERT_TRUE(parseScope(tokensOf(eight), args));
+  EXPECT_DOUBLE_EQ(779.618, args.f0);
+  EXPECT_DOUBLE_EQ(959.618, args.f1);
+  EXPECT_EQ(0u, args.points);
+  EXPECT_DOUBLE_EQ(467.0, args.rbw_khz);
+  EXPECT_EQ(0u, args.interval_ms);
+  EXPECT_EQ(kScopeAggLast, args.agg);
+  EXPECT_DOUBLE_EQ(5.6, args.seg_mhz);
+  EXPECT_EQ(500u, args.settle_us);
+
+  // A width with no settle after it is the seventh number and nothing else.
+  Line seven("scope 779.618 959.618 0 467 0 last 11");
+  ASSERT_TRUE(parseScope(tokensOf(seven), args));
+  EXPECT_DOUBLE_EQ(11.0, args.seg_mhz);
+  EXPECT_EQ(0u, args.settle_us);
+
+  // Nine words is the longest line this firmware has, and the tokenizer reads all nine.
+  Line line("scope 779.618 959.618 0 467 0 last 5.6 500");
+  EXPECT_EQ(9, tokensOf(line).count);
+  EXPECT_NE(nullptr, strstr(usageOf(kVerbScope), "seg_mhz"));
+  EXPECT_NE(nullptr, strstr(usageOf(kVerbScope), "settle_us"));
+}
+
+TEST(Scope, ASegmentWidthCutsThePlanAndEveryPointIsStillMeasuredExactlyOnce) {
+  // The two spans of 23 November (tasks/phase-3.16/README.md) at the widths deliverable 5 asks
+  // for. 32 is today's and must change nothing; the rest are what the bench is asked to compare.
+  struct Want {
+    double f0, f1;
+    uint32_t points;
+    double rbw_khz;
+    double seg_mhz;
+    uint16_t segments;
+    uint16_t longest;  // points in the longest segment
+  };
+  const Want wants[] = {
+      // 180 MHz at 467 kHz: 386 points, a step of 466.321 kHz.
+      {779.618, 959.618, 0, 467.0, 0.0, 6, 65},
+      {779.618, 959.618, 0, 467.0, 32.0, 6, 65},
+      {779.618, 959.618, 0, 467.0, 11.0, 17, 23},
+      {779.618, 959.618, 0, 467.0, 5.6, 33, 12},
+      {779.618, 959.618, 0, 467.0, 5.5, 36, 11},
+      {779.618, 959.618, 0, 467.0, 2.0, 97, 4},
+      // 13 MHz at 58.6 kHz: 250 points, a step of 52 kHz, one segment until a width is asked for.
+      {863.118, 876.118, 250, 58.6, 0.0, 1, 250},
+      {863.118, 876.118, 250, 58.6, 32.0, 1, 250},
+      {863.118, 876.118, 250, 58.6, 11.0, 2, 125},
+      {863.118, 876.118, 250, 58.6, 5.5, 3, 84},
+      {863.118, 876.118, 250, 58.6, 2.0, 7, 36},
+  };
+  for (const Want& want : wants) {
+    SCOPED_TRACE(testing::Message() << want.f1 - want.f0 << " MHz at " << want.rbw_khz
+                                    << " kHz, segments of " << want.seg_mhz << " MHz");
+    ScopeRequest r = request(want.f0, want.f1);
+    r.points = want.points;
+    r.rbw_khz = want.rbw_khz;
+    r.seg_mhz = want.seg_mhz;
+    ScopePlan plan;
+    ASSERT_TRUE(planScope(r, plan));
+    EXPECT_EQ(want.segments, plan.segments);
+    EXPECT_DOUBLE_EQ(want.seg_mhz == 0.0 ? kScopeSegmentMhz : want.seg_mhz, plan.seg_mhz)
+        << "the plan says the width it took, and 0 is kScopeSegmentMhz";
+    EXPECT_LE(plan.segments, kScopeMaxSegments);
+
+    const std::vector<ScopeSegment> segs = segmentsOf(plan);
+    ASSERT_EQ(size_t(plan.segments), segs.size());
+    uint32_t total = 0;
+    uint16_t longest = 0;
+    for (size_t i = 0; i < segs.size(); i++) {
+      EXPECT_GE(segs[i].points, 1) << "segment " << i;
+      EXPECT_LE(segs[i].points, kScopePluginMaxPoints) << "segment " << i;
+      // What a segment measures is at most the width that was asked for - that is the whole
+      // point of the number - and never more than kScopeSegmentMhz.
+      EXPECT_LE(segs[i].cal_hi_mhz - segs[i].cal_lo_mhz, plan.seg_mhz + 1e-9) << "segment " << i;
+      EXPECT_EQ(total, segs[i].first) << "segment " << i << " begins where the last one ended";
+      total += segs[i].points;
+      if (segs[i].points > longest) longest = segs[i].points;
+    }
+    EXPECT_EQ(uint32_t(plan.points), total) << "every point of the frame in exactly one segment";
+    EXPECT_EQ(want.longest, longest);
+  }
+}
+
+TEST(Scope, AWidthBelowOneStepOrAboveThirtyTwoAndASettleTooLongAreRefused) {
+  ScopePlan plan;
+  // 180 MHz at 467 kHz: 386 points, a step of 0.46632 MHz. A tenth of a MHz is taken, so 0.5 is
+  // the narrowest segment this span has and 0.4 is narrower than one step.
+  ScopeRequest r = request(779.618, 959.618);
+  r.rbw_khz = 467.0;
+  r.seg_mhz = 0.5;
+  ASSERT_TRUE(planScope(r, plan)) << "one step, rounded up to a tenth, is a segment of one point";
+  EXPECT_EQ(386u, plan.segments) << "a point a segment";
+  EXPECT_DOUBLE_EQ(0.5, plan.seg_mhz);
+
+  r.seg_mhz = 0.4;
+  EXPECT_FALSE(planScope(r, plan)) << "narrower than one step is not a segment";
+  r.seg_mhz = 32.1;
+  EXPECT_FALSE(planScope(r, plan)) << "wider than what one calibration covers";
+  r.seg_mhz = -1.0;
+  EXPECT_FALSE(planScope(r, plan));
+
+  // A tenth of a MHz is taken: 5.64 is 5.6 and 5.67 is 5.7, and both are plans.
+  r.seg_mhz = 5.64;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_DOUBLE_EQ(5.6, plan.seg_mhz);
+  EXPECT_EQ(33u, plan.segments);
+  r.seg_mhz = 5.67;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_DOUBLE_EQ(5.7, plan.seg_mhz);
+
+  // And the settle, which has one bound and no step.
+  r.seg_mhz = 0.0;
+  r.settle_us = kScopeSettleMaxUs;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_EQ(kScopeSettleMaxUs, plan.settle_us);
+  r.settle_us = kScopeSettleMaxUs + 1;
+  EXPECT_FALSE(planScope(r, plan)) << "longer than kScopeSettleMaxUs is refused";
+
+  // The sentence the refusal is said in names both bounds, and fits in an ack's message.
+  EXPECT_LT(strlen(kScopeRefusal), kMaxAckMessageBytes);
+  EXPECT_NE(nullptr, strstr(kScopeRefusal, "seg_mhz"));
+  EXPECT_NE(nullptr, strstr(kScopeRefusal, "settle_us 0..20000"));
+}
+
+TEST(Scope, ThePlannedTimeIncludesEveryArmAndEverySettle) {
+  // 33 segments at 467 kHz, which is the wide span of 23 November cut by 5.6 MHz: 386 points at
+  // one RSSI update each, kScopeSegmentUpdates an arm, and the settle each of those 33 arms
+  // stands on its segment's first point for.
+  ScopeRequest r = request(779.618, 959.618);
+  r.rbw_khz = 467.0;
+  r.seg_mhz = 5.6;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  ASSERT_EQ(386u, plan.points);
+  ASSERT_EQ(33u, plan.segments);
+
+  // (386 + 33 x 8) x 1.6 / 467 ms = 2.23 ms, and nothing else without a settle.
+  EXPECT_EQ(3u, plan.sweep_ms);
+  EXPECT_EQ(scopeSweepMs(386, 33, 467.0), plan.sweep_ms);
+  EXPECT_EQ(scopeSweepMs(386, 33, 467.0, 0), plan.sweep_ms) << "no settle is today's number";
+
+  r.settle_us = 500;
+  ASSERT_TRUE(planScope(r, plan));
+  // 2.23 ms + 33 x 0.5 ms = 18.73 ms, which is eight times the sweep itself.
+  EXPECT_EQ(19u, plan.sweep_ms);
+  EXPECT_EQ(scopeSweepMs(386, 33, 467.0, 500), plan.sweep_ms);
+  r.settle_us = kScopeSettleMaxUs;
+  ASSERT_TRUE(planScope(r, plan));
+  EXPECT_EQ(663u, plan.sweep_ms) << "33 x 20 ms and the sweep's own 2.23";
+
+  // The longest one plugin call holds the chip does not move: the settle is before the call, not
+  // inside it, so RadioLib's 1000 ms wait for BUSY is unaffected.
+  EXPECT_EQ(scopeSegmentMs(12, 467.0), plan.segment_ms);
+
+  // And the port's own floor follows the frame and not the sweep, so a settle does not move it -
+  // what moves with the sweep is the interval a reader of the `ack` plans on.
+  ScopeRequest uart = request(863.0, 870.0);
+  uart.points = 2048;
+  uart.sink_baud = 115200;
+  ScopePlan without;
+  ASSERT_TRUE(planScope(uart, without));
+  uart.settle_us = 1000;
+  uart.seg_mhz = 2.0;
+  ScopePlan with;
+  ASSERT_TRUE(planScope(uart, with));
+  EXPECT_EQ(without.interval_ms, with.interval_ms)
+      << "a frame of 2048 points takes the same time on the wire either way";
+  EXPECT_GT(with.sweep_ms, without.sweep_ms);
+  EXPECT_EQ(scopeSweepMs(with.points, with.segments, with.rbw_khz, 1000), with.sweep_ms);
+}
+
+TEST(Scope, TheAckSaysWhatWasTakenAndNamesTheTwoNumbersOnlyWhenOneIsNotTheDefault) {
+  char msg[kMaxAckMessageBytes];
+
+  // docs/noisescope.md section 5's own example, to the byte: this is the line a `scope` asked for
+  // as it was asked for before phase 3.16's task 02 answers. (The `sweep` of that example on the
+  // page read 86 ms, which is 250 points at 4.8 kHz and not at this plan's 39.0; it is corrected
+  // there to what this line says.)
+  ScopeRequest r = request(863.0, 870.0);
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms", msg);
+
+  // 32 MHz and no settle asked for outright is the same line: what was taken is what was taken.
+  r.seg_mhz = kScopeSegmentMhz;
+  r.settle_us = 0;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms", msg);
+
+  // And with them, the same line and the two numbers after it.
+  r = request(779.618, 959.618);
+  r.rbw_khz = 467.0;
+  r.seg_mhz = 5.6;
+  r.settle_us = 500;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=386 step=466.3212kHz rbw=467.0kHz seg=33 cov=1.001 interval=0ms sweep=19ms"
+               " segw=5.6MHz settle=500us", msg);
+  EXPECT_LT(strlen(msg), kMaxAckMessageBytes);
+
+  // A settle alone names both, so that the line has one shape.
+  r.seg_mhz = 0.0;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_NE(nullptr, strstr(msg, "segw=32.0MHz settle=500us"));
+
+  // The widest ack there is still fits in the message an `ack` line may carry.
+  ScopeRequest widest = request(kRadioLowMhz, kRadioHighMhz);
+  widest.points = kScopeMaxPoints;
+  widest.rbw_khz = 4.8;
+  widest.seg_mhz = 0.5;
+  widest.settle_us = kScopeSettleMaxUs;
+  widest.interval_ms = kScopeIntervalMaxMs;
+  widest.sink_baud = 115200;
+  ASSERT_TRUE(planScope(widest, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_LT(strlen(msg), kMaxAckMessageBytes) << msg;
+}
+
+TEST(Scope, ASettleStandsTheReceiverOnTheSegmentsFirstPointAfterTheSweepIsLoaded) {
+  // The order, and why it is this one: setSweep() is what loads the sweep that counts and it puts
+  // the receiver at the segment's *centre* (the vendored setSweep, ~L130-162), so the only move
+  // left is the one the plugin itself makes every point - the frequency written with the receiver
+  // in continuous receive and nothing calibrated. So: the arm as it always was, and then the
+  // first point and the stand on it.
+  ScopeRequest r = request(779.618, 959.618);
+  r.rbw_khz = 467.0;
+  r.seg_mhz = 5.6;
+  r.settle_us = 500;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 0, seg));
+
+  double lo = 0.0;
+  double hi = 0.0;
+  scopeCalibrationRange(plan, seg, lo, hi);
+
+  FakeArmRadio radio;
+  ScopeArmResult out;
+  EXPECT_TRUE(armScopeSegment(radio, plan, seg, out));
+  char expected[256];
+  snprintf(expected, sizeof(expected),
+           "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "setSweep(%.3f,%.3f,%u,%.1f);setFrequency(%.3f);settle(500);",
+           double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
+           plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz, seg.first_mhz);
+  EXPECT_STREQ(expected, radio.log);
+
+  // The same plan with no settle makes exactly the calls it made before this task.
+  r.settle_us = 0;
+  ASSERT_TRUE(planScope(r, plan));
+  ASSERT_TRUE(scopeSegment(plan, 0, seg));
+  FakeArmRadio quiet;
+  EXPECT_TRUE(armScopeSegment(quiet, plan, seg, out));
+  snprintf(expected, sizeof(expected),
+           "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "setSweep(%.3f,%.3f,%u,%.1f);",
+           double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
+           plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+  EXPECT_STREQ(expected, quiet.log);
+
+  // And between two sweeps of a segment that is already armed - a one-segment plan never re-arms,
+  // and comes to every sweep but the first from the last point of the one before it.
+  {
+    ScopeRequest one = request(863.118, 876.118);
+    one.points = 250;
+    one.rbw_khz = 58.6;
+    one.settle_us = 2000;
+    ScopePlan single;
+    ASSERT_TRUE(planScope(one, single));
+    ASSERT_EQ(1u, single.segments);
+    ScopeSegment only;
+    ASSERT_TRUE(scopeSegment(single, 0, only));
+    FakeArmRadio between;
+    ScopeArmResult settled;
+    EXPECT_TRUE(settleScopeSegment(between, single, only, settled));
+    EXPECT_EQ(kScopeArmNone, settled.failed);
+    char want[128];
+    snprintf(want, sizeof(want), "setFrequency(%.3f);settle(2000);", only.first_mhz);
+    EXPECT_STREQ(want, between.log) << "the first point and the stand on it, and nothing else";
+
+    // No settle asked for is no call at all.
+    single.settle_us = 0;
+    FakeArmRadio none;
+    EXPECT_TRUE(settleScopeSegment(none, single, only, settled));
+    EXPECT_STREQ("", none.log);
+  }
+
+  // A retune the chip refuses is its own call in the `err` line, named after the thing it was
+  // for: the sweep is loaded and the segment is not swept through an unsettled synthesizer.
+  {
+    ScopePlan again;
+    r.settle_us = 100;
+    ASSERT_TRUE(planScope(r, again));
+    ScopeSegment first;
+    ASSERT_TRUE(scopeSegment(again, 0, first));
+    FakeArmRadio refused;
+    refused.frequency_code = -705;
+    ScopeArmResult failed;
+    EXPECT_FALSE(armScopeSegment(refused, again, first, failed));
+    // The *first* setFrequency is the centre's, so that is where it surfaces in a whole arm; the
+    // settle's own code is kScopeArmSettle, which settleScopeSegment answers with directly.
+    EXPECT_EQ(kScopeArmSetFrequency, failed.failed);
+    FakeArmRadio late;
+    late.frequency_code = -705;
+    ScopeArmResult settle_failed;
+    EXPECT_FALSE(settleScopeSegment(late, again, first, settle_failed));
+    EXPECT_EQ(kScopeArmSettle, settle_failed.failed);
+    EXPECT_EQ(-705, settle_failed.code);
+    EXPECT_STREQ("settle", scopeArmCallName(kScopeArmSettle));
+  }
+}
+
+TEST(Scope, ASegmentInsideACalibratedRangeIsArmedWithoutACalibration) {
+  // Deliverable 4 of tasks/phase-3.16/02-a-segment-the-synthesizer-can-hold.md: a sweep of
+  // thirty-three segments must not pay thirty-three calibrations. The calibration is made for
+  // kScopeSegmentMhz at a time - what it was always made for - and the segments that fall inside
+  // it are armed with neither a calibration nor the question to the chip that goes with one.
+  ScopeRequest r = request(779.618, 959.618);
+  r.rbw_khz = 467.0;
+  r.seg_mhz = 5.6;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  ASSERT_EQ(33u, plan.segments);
+
+  ScopeCalibration cal;
+  unsigned calibrations = 0;
+  double covered_to = 0.0;
+  for (uint16_t i = 0; i < plan.segments; i++) {
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(plan, i, seg));
+    FakeArmRadio one;
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(one, plan, seg, cal, out)) << "segment " << i;
+    const bool calibrated = strstr(one.log, "calibrateImage") != nullptr;
+    double lo = 0.0;
+    double hi = 0.0;
+    scopeCalibrationRange(plan, seg, lo, hi);
+    if (calibrated) {
+      calibrations++;
+      // Every calibration is for kScopeSegmentMhz at a time, from this segment's own first point
+      // up - the width the chip was always asked for, so the thresholds of section 8 do not move.
+      EXPECT_NEAR(seg.cal_lo_mhz, lo, 1e-9) << "segment " << i;
+      EXPECT_LE(hi - lo, kScopeSegmentMhz + 1e-9) << "segment " << i;
+      EXPECT_GE(hi, seg.cal_hi_mhz - 1e-9) << "segment " << i;
+      covered_to = hi;
+      char expected[256];
+      snprintf(expected, sizeof(expected),
+               "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+               "setSweep(%.3f,%.3f,%u,%.1f);",
+               double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
+               plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+      EXPECT_STREQ(expected, one.log) << "segment " << i;
+    } else {
+      // Standby and the centre frequency still, because setSweep()'s own setFrequency() has to be
+      // a move of zero - and then the plugin's parameters, and nothing of the chip asked.
+      char expected[256];
+      snprintf(expected, sizeof(expected),
+               "standby;setFrequency(%.3f);setSweep(%.3f,%.3f,%u,%.1f);",
+               double(scopeSegmentCentreMhz(plan, seg)), seg.first_mhz, plan.step_khz / 1000.0,
+               unsigned(seg.points), plan.rbw_khz);
+      EXPECT_STREQ(expected, one.log) << "segment " << i;
+      EXPECT_LE(seg.cal_hi_mhz, covered_to + kScopeCalibrationSlackMhz) << "segment " << i;
+    }
+  }
+  // 180 MHz in 32 MHz at a time: seven calibrations for thirty-three segments, not thirty-three.
+  EXPECT_EQ(7u, calibrations);
+
+  // And the default - every plan a `scope` with no width asked for makes - calibrates every
+  // segment for its own range, exactly as it did before this task.
+  ScopeRequest wide = request(kRadioLowMhz, kRadioHighMhz);
+  wide.points = 2048;
+  ScopePlan today;
+  ASSERT_TRUE(planScope(wide, today));
+  ASSERT_EQ(26u, today.segments);
+  ScopeCalibration none;
+  unsigned armed = 0;
+  for (uint16_t i = 0; i < today.segments; i++) {
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(today, i, seg));
+    FakeArmRadio one;
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(one, today, seg, none, out)) << "segment " << i;
+    EXPECT_NE(nullptr, strstr(one.log, "calibrateImage")) << "segment " << i;
+    double lo = 0.0;
+    double hi = 0.0;
+    scopeCalibrationRange(today, seg, lo, hi);
+    EXPECT_DOUBLE_EQ(seg.cal_lo_mhz, lo) << "segment " << i;
+    EXPECT_DOUBLE_EQ(seg.cal_hi_mhz, hi) << "segment " << i;
+    armed++;
+  }
+  EXPECT_EQ(26u, armed);
+}
+
+TEST(Scope, ACalibrationTheChipRefusesIsStillReloadedAndAskedForWhenARangeIsCarried) {
+  // Section 8's answer does not move for a plan cut narrower: refused once, reload, the same arm
+  // again - and the range the reload cleared is not remembered as calibrated.
+  ScopeRequest r = request(kRadioLowMhz, 250.0);
+  r.points = 250;
+  r.seg_mhz = 5.0;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(r, plan));
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 0, seg));
+  double lo = 0.0;
+  double hi = 0.0;
+  scopeCalibrationRange(plan, seg, lo, hi);
+
+  char arm[200];
+  snprintf(arm, sizeof(arm), "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;",
+           double(scopeSegmentCentreMhz(plan, seg)), lo, hi);
+  char sweep[96];
+  snprintf(sweep, sizeof(sweep), "setSweep(%.3f,%.3f,%u,%.1f);", seg.first_mhz,
+           plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+  {
+    FakeArmRadio radio;
+    radio.refusals = 1;
+    ScopeCalibration cal;
+    ScopeArmResult out;
+    EXPECT_TRUE(armScopeSegment(radio, plan, seg, cal, out));
+    EXPECT_TRUE(out.reloaded);
+    char expected[512];
+    snprintf(expected, sizeof(expected), "%sreload;%s%s", arm, arm, sweep);
+    EXPECT_STREQ(expected, radio.log);
+    EXPECT_TRUE(cal.valid) << "the arm the chip accepted is the one that is remembered";
+  }
+  {
+    // Refused twice: the err, and nothing remembered as calibrated.
+    FakeArmRadio radio;
+    radio.refusals = 2;
+    ScopeCalibration cal;
+    cal.valid = true;  // calibrated for somewhere else entirely, so this segment is not inside
+    cal.lo_mhz = 500.0;
+    cal.hi_mhz = 510.0;
+    ScopeArmResult out;
+    EXPECT_FALSE(armScopeSegment(radio, plan, seg, cal, out));
+    EXPECT_EQ(kScopeArmCalibrateImage, out.failed);
+    EXPECT_FALSE(cal.valid);
+  }
+  {
+    // A segment inside a range the chip was never calibrated for is calibrated: an invalid range
+    // is inside nothing.
+    FakeArmRadio radio;
+    ScopeCalibration cal;
+    ScopeArmResult out;
+    EXPECT_TRUE(armScopeSegment(radio, plan, seg, cal, out));
+    EXPECT_NE(nullptr, strstr(radio.log, "calibrateImage"));
+    EXPECT_TRUE(cal.valid);
   }
 }
 

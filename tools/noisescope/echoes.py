@@ -73,6 +73,11 @@ SEGMENT_MHZ = 32.0
 MIN_STEP_KHZ = 0.1
 RBW_MAX_KHZ = 467.0
 INTERVAL_MAX_MS = 60000
+# The widest a segment may be is also the default, and `scope`'s sixth number asks for a narrower
+# one; the seventh asks for a settle on the segment's first point (kScopeSettleMaxUs, phase 3.16's
+# task 02). A settle changes nothing inside a segment, so it changes no distance this tool reads -
+# it is carried because the ack names it and a reader of a table wants to know which line it was.
+SETTLE_MAX_US = 20000
 # An RSSI register update takes about 1.6 ms / RBW in kHz, and a point is one update
 # (kScopeUpdateMsKhz, and the plugin's own comment in vendor/sx126x_spectrum/spectrum.asm).
 UPDATE_MS_KHZ = 1.6
@@ -102,7 +107,8 @@ def point_us(rbw_khz):
 class Plan(object):
     """`ScopePlan`: what the firmware would run for a request. Fields are that struct's."""
 
-    def __init__(self, f0, f1, first_mhz, step_khz, rbw_khz, points, segments):
+    def __init__(self, f0, f1, first_mhz, step_khz, rbw_khz, points, segments,
+                 seg_mhz=SEGMENT_MHZ, settle_us=0):
         self.f0 = f0
         self.f1 = f1
         self.first_mhz = first_mhz
@@ -110,6 +116,8 @@ class Plan(object):
         self.rbw_khz = rbw_khz
         self.points = points
         self.segments = segments
+        self.seg_mhz = seg_mhz
+        self.settle_us = settle_us
 
     @property
     def step_mhz(self):
@@ -130,7 +138,8 @@ class Plan(object):
     def as_dict(self):
         return {"f0": self.f0, "f1": self.f1, "first_mhz": self.first_mhz,
                 "step_khz": self.step_khz, "rbw_khz": self.rbw_khz, "points": self.points,
-                "segments": self.segments, "cov": self.cov, "point_us": self.point_us}
+                "segments": self.segments, "cov": self.cov, "point_us": self.point_us,
+                "seg_mhz": self.seg_mhz, "settle_us": self.settle_us}
 
 
 class Segment(object):
@@ -154,7 +163,7 @@ class Segment(object):
                 "cal_hi_mhz": self.cal_hi_mhz}
 
 
-def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0):
+def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0, seg_mhz=0.0, settle_us=0):
     """`planScope()`, line for line. None for a request this firmware does not run."""
     if f1 <= f0 or not (RADIO_LOW_MHZ <= f0 <= RADIO_HIGH_MHZ):
         return None
@@ -163,6 +172,10 @@ def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0):
     if rbw_khz < 0.0:
         return None
     if interval_ms > INTERVAL_MAX_MS:
+        return None
+    if settle_us > SETTLE_MAX_US or settle_us < 0:
+        return None
+    if seg_mhz < 0.0:
         return None
     if points != 0 and not MIN_POINTS <= points <= MAX_POINTS:
         return None
@@ -185,19 +198,25 @@ def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0):
     if rbw <= 0.0:
         rbw = pick_rbw_khz(step_khz)
 
-    # A segment is at most PLUGIN_MAX_POINTS points and measures at most SEGMENT_MHZ: its first
-    # point's centre to its last one's, plus half a receiver bandwidth at each end. One point
-    # always fits, however wide a step is.
+    # A segment is at most PLUGIN_MAX_POINTS points and measures at most the width asked for -
+    # SEGMENT_MHZ when none was: its first point's centre to its last one's, plus half a receiver
+    # bandwidth at each end. One point always fits, however wide a step is.
     step_mhz = step_khz / 1000.0
     rbw_mhz = rbw / 1000.0
-    per_segment = math.floor((SEGMENT_MHZ - rbw_mhz) / step_mhz) + 1.0
+    width = SEGMENT_MHZ
+    if seg_mhz > 0.0:
+        width = math.floor(seg_mhz * 10.0 + 0.5) / 10.0   # a tenth of a MHz is taken
+        if width > SEGMENT_MHZ or width < step_mhz - 1e-9:
+            return None
+    per_segment = math.floor((width - rbw_mhz) / step_mhz) + 1.0
     per_segment = min(per_segment, float(PLUGIN_MAX_POINTS))
     per_segment = max(per_segment, 1.0)
     max_points = int(per_segment)
     segments = (points + max_points - 1) // max_points
 
     return Plan(f0=f0, f1=f1, first_mhz=f0 + step_mhz / 2.0, step_khz=step_khz, rbw_khz=rbw,
-                points=int(points), segments=int(segments))
+                points=int(points), segments=int(segments), seg_mhz=width,
+                settle_us=int(settle_us))
 
 
 def scope_segment(plan, index):
@@ -220,18 +239,24 @@ def segments_of(plan):
     return [scope_segment(plan, i) for i in range(plan.segments)]
 
 
-def plan_of_frame(f0_point_mhz, step_khz, points, rbw_khz):
+def plan_of_frame(f0_point_mhz, step_khz, points, rbw_khz, seg_mhz=0.0, settle_us=0):
     """The plan a `scope` frame came from.
 
     A frame carries the **first point's centre** and the step, not the span that was asked for
     (docs/noisescope.md section 5), so the span is read back from them and the point count and
     bandwidth are handed to `planScope()` as the command's own. With the point count given the
     step is span / points again, so the plan that comes back is the plan the frame came from.
+
+    A frame does **not** carry the segment width or the settle: those are the `ack`'s
+    (`segw=`, `settle=`), which is why a capture whose `scope` was asked for with them has to be
+    read with its ack - `read_capture()` does that, and a capture with no ack in it is read as a
+    `scope` asked for with neither, which is what every line typed before phase 3.16's task 02 is.
     """
     step_mhz = step_khz / 1000.0
     f0 = f0_point_mhz - step_mhz / 2.0
     f1 = f0 + points * step_mhz
-    return plan_scope(f0, f1, points=points, rbw_khz=rbw_khz)
+    return plan_scope(f0, f1, points=points, rbw_khz=rbw_khz, seg_mhz=seg_mhz,
+                      settle_us=settle_us)
 
 
 # ----------------------------------------------------------------------------- the levels
@@ -283,6 +308,8 @@ class Scope(object):
         self.plan = None
         self.segments = []
         self.ack_segments = None  # `seg` of the ack, when there was one
+        self.ack_seg_mhz = None   # and `segw`/`settle`, which no frame carries
+        self.ack_settle_us = None
 
     @property
     def sps(self):
@@ -300,12 +327,34 @@ class Scope(object):
 
 def ack_segments(ack):
     """`seg=<n>` of a `scope` ack's `msg`, or None."""
+    return _ack_number(ack, "seg=", int)
+
+
+def ack_seg_mhz(ack):
+    """`segw=<n>MHz` of a `scope` ack's `msg`, or None when the line asked for no width.
+
+    The ack names the two numbers of phase 3.16's task 02 only when one of them is not the
+    default (`scopeAckMessage()`, src/roles/scanner/Sweep.cpp), so None here means 32 MHz - what
+    a `scope` asked for without them takes, and what every capture made before that task is.
+    """
+    return _ack_number(ack, "segw=", float, "MHz")
+
+
+def ack_settle_us(ack):
+    """`settle=<n>us` of a `scope` ack's `msg`, or None."""
+    return _ack_number(ack, "settle=", int, "us")
+
+
+def _ack_number(ack, prefix, cast, suffix=""):
     if not ack:
         return None
     for word in str(ack.get("msg", "")).split():
-        if word.startswith("seg="):
+        if word.startswith(prefix):
+            text = word[len(prefix):]
+            if suffix and text.endswith(suffix):
+                text = text[:-len(suffix)]
             try:
-                return int(word[4:])
+                return cast(text)
             except ValueError:
                 return None
     return None
@@ -364,8 +413,14 @@ def read_capture(path_or_lines):
         if current is None or current.config != config:
             current = Scope(pending_ack, config)
             current.ack_segments = ack_segments(pending_ack)
+            current.ack_seg_mhz = ack_seg_mhz(pending_ack)
+            current.ack_settle_us = ack_settle_us(pending_ack)
             pending_ack = None
-            current.plan = plan_of_frame(*config)
+            # The width is the ack's or it is the default: it is the one thing of the plan a
+            # frame cannot say, and laying the segments out wrong puts every echo in the wrong
+            # one (phase 3.16's task 02).
+            current.plan = plan_of_frame(*config, seg_mhz=(current.ack_seg_mhz or 0.0),
+                                         settle_us=(current.ack_settle_us or 0))
             if current.plan is None:
                 bad_frames += 1
                 current = None
@@ -799,7 +854,8 @@ def check_plans(path=PLAN_TABLE, out=sys.stdout):
         name = entry["name"]
         req = entry["request"]
         plan = plan_scope(req["f0"], req["f1"], points=req.get("points", 0),
-                          rbw_khz=req.get("rbw_khz", 0.0))
+                          rbw_khz=req.get("rbw_khz", 0.0), seg_mhz=req.get("seg_mhz", 0.0),
+                          settle_us=req.get("settle_us", 0))
         want = entry["plan"]
         if plan is None:
             out.write("FAIL %s: this firmware does not run that request\n" % name)
@@ -807,7 +863,7 @@ def check_plans(path=PLAN_TABLE, out=sys.stdout):
             continue
         problems = []
         for key, tol in (("points", 0), ("segments", 0), ("step_khz", 1e-9),
-                         ("rbw_khz", 1e-9), ("first_mhz", 1e-9)):
+                         ("rbw_khz", 1e-9), ("first_mhz", 1e-9), ("seg_mhz", 1e-9)):
             got = getattr(plan, key)
             if abs(got - want[key]) > tol:
                 problems.append("%s %r, not %r" % (key, got, want[key]))

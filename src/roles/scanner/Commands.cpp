@@ -94,7 +94,8 @@ const char* nameOf(Verb verb) {
 
 const char* usageOf(Verb verb) {
   switch (verb) {
-    case kVerbScope: return "usage: scope <f0> <f1> [points [rbw_khz [interval_ms [max|mean|last]]]] | scope off";
+    case kVerbScope: return "usage: scope <f0> <f1> [points [rbw_khz [interval_ms [max|mean|last"
+                            " [seg_mhz [settle_us]]]]]] | scope off";
     case kVerbDwell: return "usage: dwell <f_mhz> [secs [win_ms]]";
     case kVerbHome: return "usage: home <f_mhz> [bw_khz sf cr]";
     case kVerbBoost: return "usage: boost on|off";
@@ -141,6 +142,11 @@ bool parseScope(const Tokens& tokens, ScopeArgs& out) {
   if (tokens.count >= 5) parsed.rbw_khz = asDouble(arg(tokens, 4), 0.0);
   if (tokens.count >= 6) parsed.interval_ms = asU32(arg(tokens, 5), 0);
   if (tokens.count >= 7 && !scopeAggOf(arg(tokens, 6), parsed.agg)) return false;
+  // The two numbers of phase 3.16's task 02, after the aggregate so that every line typed before
+  // it reads the same: the widest a segment may be, and how long the receiver stands on a
+  // segment's first point before the reading that counts. planScope() bounds both.
+  if (tokens.count >= 8) parsed.seg_mhz = asDouble(arg(tokens, 7), 0.0);
+  if (tokens.count >= 9) parsed.settle_us = asU32(arg(tokens, 8), 0);
   out = parsed;
   return true;
 }

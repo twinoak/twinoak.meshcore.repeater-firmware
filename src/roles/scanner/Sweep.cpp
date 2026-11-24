@@ -309,6 +309,7 @@ const char* scopeArmCallName(ScopeArmCall call) {
     case kScopeArmSetSweep: return "setSweep";
     case kScopeArmSweep: return "sweep";
     case kScopeArmReload: return "reload";
+    case kScopeArmSettle: return "settle";
     default: return "";
   }
 }
@@ -317,12 +318,49 @@ float scopeSegmentCentreMhz(const ScopePlan& plan, const ScopeSegment& seg) {
   return float(seg.first_mhz) + float(plan.step_khz / 1000.0) * float(seg.points) / 2.0f;
 }
 
+void scopeCalibrationRange(const ScopePlan& plan, const ScopeSegment& seg, double& lo_mhz,
+                           double& hi_mhz) {
+  lo_mhz = seg.cal_lo_mhz;
+  hi_mhz = seg.cal_hi_mhz;
+  // A plan whose segments are already as wide as kScopeSegmentMhz allows - which is every plan a
+  // `scope` with no width asked for makes - calibrates for the segment and nothing more. That is
+  // what this did before phase 3.16's task 02 and what the arm's tests hold it to.
+  if (plan.seg_mhz >= kScopeSegmentMhz) return;
+  const double step_mhz = plan.step_khz / 1000.0;
+  const double rbw_mhz = plan.rbw_khz / 1000.0;
+  if (step_mhz <= 0.0 || plan.points == 0) return;
+  // The points of kScopeSegmentMhz, counted exactly as planScope() counts them for a segment of
+  // that width: the first point's centre to the last one's, plus half a bandwidth at each end.
+  double fits = floor((kScopeSegmentMhz - rbw_mhz) / step_mhz) + 1.0;
+  if (fits < 1.0) fits = 1.0;
+  uint32_t points = fits > double(kScopeMaxPoints) ? uint32_t(kScopeMaxPoints) : uint32_t(fits);
+  const uint32_t left = uint32_t(plan.points) - seg.first;  // never past the plan's last point
+  if (points > left) points = left;
+  if (points < seg.points) points = seg.points;  // and never narrower than the segment itself
+  hi_mhz = seg.first_mhz + double(points - 1u) * step_mhz + rbw_mhz / 2.0;
+}
+
+bool settleScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                        ScopeArmResult& out) {
+  if (plan.settle_us == 0) return true;
+  // The one move the plugin itself makes with the receiver in continuous receive: the frequency
+  // written, nothing calibrated (the header says why this and not a sweep of one point).
+  const int st = radio.setFrequency(seg.first_mhz);
+  if (st != 0) {
+    out.failed = kScopeArmSettle;
+    out.code = st;
+    return false;
+  }
+  radio.settle(plan.settle_us);
+  return true;
+}
+
 namespace {
 
 // Standby, the frequency, the calibration, the chip's verdict: the part of an arm that a
 // reload may be followed by once more.
 bool calibrateScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
-                           ScopeArmResult& out) {
+                           ScopeCalibration& cal, ScopeArmResult& out) {
   int st = radio.standby();
   if (st != 0) {
     out.failed = kScopeArmStandby;
@@ -337,29 +375,44 @@ bool calibrateScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const Sc
     out.code = st;
     return false;
   }
-  // Then our range - what the segment measures - and the chip asked whether it took, because
-  // the driver cannot see this command's status (the header says why).
-  st = radio.calibrateImage(seg.cal_lo_mhz, seg.cal_hi_mhz);
+  // Then our range - what the segment measures, or the kScopeSegmentMhz this one begins a
+  // calibration for - and the chip asked whether it took, because the driver cannot see this
+  // command's status (the header says why). A segment that lies inside the range the chip is
+  // already calibrated for is armed without either: a sweep of thirty-three segments must not
+  // pay thirty-three calibrations.
+  if (cal.valid && seg.cal_lo_mhz >= cal.lo_mhz - kScopeCalibrationSlackMhz &&
+      seg.cal_hi_mhz <= cal.hi_mhz + kScopeCalibrationSlackMhz) {
+    return true;  // every frequency this segment measures is inside what the chip is set for
+  }
+  double lo_mhz = 0.0;
+  double hi_mhz = 0.0;
+  scopeCalibrationRange(plan, seg, lo_mhz, hi_mhz);
+  st = radio.calibrateImage(lo_mhz, hi_mhz);
   if (st != 0) {
+    cal = ScopeCalibration();
     out.failed = kScopeArmCalibrateImage;
     out.code = st;
     return false;
   }
   out.device_errors = radio.deviceErrors();
   if ((out.device_errors & kScopeImageCalibrationError) != 0) {
+    cal = ScopeCalibration();
     out.failed = kScopeArmCalibrateImage;
     out.code = kScopeArmCalibrationFailed;
     return false;
   }
+  cal.valid = true;
+  cal.lo_mhz = lo_mhz;
+  cal.hi_mhz = hi_mhz;
   return true;
 }
 
 }  // namespace
 
 bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
-                     ScopeArmResult& out) {
+                     ScopeCalibration& cal, ScopeArmResult& out) {
   out = ScopeArmResult();
-  if (!calibrateScopeSegment(radio, plan, seg, out)) {
+  if (!calibrateScopeSegment(radio, plan, seg, cal, out)) {
     if (out.failed != kScopeArmCalibrateImage) return false;
     // The chip refused the calibration: the one thing known to clear that is a reload, and the
     // same arm is then asked for once more. Refused again, the `err` says which call and that
@@ -371,9 +424,10 @@ bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSeg
       out.code = st;
       return false;
     }
+    cal = ScopeCalibration();  // the reset took the calibration with it
     out.failed = kScopeArmNone;  // the refusal is history if the chip accepts the arm now
     out.code = 0;
-    if (!calibrateScopeSegment(radio, plan, seg, out)) return false;
+    if (!calibrateScopeSegment(radio, plan, seg, cal, out)) return false;
   }
   const int st = radio.setSweep(seg.first_mhz, plan.step_khz / 1000.0, seg.points, plan.rbw_khz);
   if (st != 0) {
@@ -381,7 +435,13 @@ bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSeg
     out.code = st;
     return false;
   }
-  return true;
+  return settleScopeSegment(radio, plan, seg, out);
+}
+
+bool armScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
+                     ScopeArmResult& out) {
+  ScopeCalibration cal;  // nothing is calibrated yet, so every segment calibrates for itself
+  return armScopeSegment(radio, plan, seg, cal, out);
 }
 
 uint32_t scopeBase64Length(uint16_t bytes) { return 4u * ((uint32_t(bytes) + 2u) / 3u); }
@@ -410,10 +470,15 @@ uint32_t scopeSegmentMs(uint16_t points, double rbw_khz) {
   return uint32_t(ceil(updates * kScopeUpdateMsKhz / rbw_khz));
 }
 
-uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz) {
+uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz, uint32_t settle_us) {
   if (rbw_khz <= 0.0) return 0;
   const double updates = double(points) + double(segments) * double(kScopeSegmentUpdates);
-  return uint32_t(ceil(updates * kScopeUpdateMsKhz / rbw_khz));
+  // Every point's own update, kScopeSegmentUpdates an arm, and the settle each of those arms
+  // stands on its segment's first point for - so that the `ack`'s `sweep` and the interval a
+  // sink's floor is computed beside stay true when a settle was asked for.
+  const double ms = updates * kScopeUpdateMsKhz / rbw_khz +
+                    double(segments) * double(settle_us) / 1000.0;
+  return uint32_t(ceil(ms));
 }
 
 uint16_t scopeSweepsPerSecondX10(uint32_t sweeps, uint32_t elapsed_ms) {
@@ -428,6 +493,8 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   }
   if (request.rbw_khz < 0.0) return false;
   if (request.interval_ms > kScopeIntervalMaxMs) return false;
+  if (request.settle_us > kScopeSettleMaxUs) return false;
+  if (request.seg_mhz < 0.0) return false;
   if (request.points != 0 &&
       (request.points < kScopeMinPoints || request.points > kScopeMaxPoints)) {
     return false;
@@ -455,13 +522,22 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   if (step_khz < kScopeMinStepKhz) return false;
   if (rbw_khz <= 0.0) rbw_khz = pickRbwKhz(step_khz);
 
-  // A segment is at most kScopePluginMaxPoints points, and what it measures is at most
-  // kScopeSegmentMhz wide: its first point's centre to its last one's, plus half a receiver
-  // bandwidth at each end. One point always fits, however wide a step is - it is one frequency
-  // through one filter - which is what keeps this from ever asking for a segment of none.
+  // A segment is at most kScopePluginMaxPoints points, and what it measures is at most the width
+  // asked for - kScopeSegmentMhz when none was: its first point's centre to its last one's, plus
+  // half a receiver bandwidth at each end. One point always fits, however wide a step is - it is
+  // one frequency through one filter - which is what keeps this from ever asking for a segment of
+  // none.
   const double step_mhz = step_khz / 1000.0;
   const double rbw_mhz = rbw_khz / 1000.0;
-  double per_segment = floor((kScopeSegmentMhz - rbw_mhz) / step_mhz) + 1.0;
+  // The width asked for, taken to a tenth of a MHz: from one step - a segment narrower than that
+  // is not a segment - up to kScopeSegmentMhz, which is the widest a calibration covers.
+  double seg_mhz = kScopeSegmentMhz;
+  if (request.seg_mhz > 0.0) {
+    seg_mhz = floor(request.seg_mhz * 10.0 + 0.5) / 10.0;
+    if (seg_mhz > kScopeSegmentMhz) return false;
+    if (seg_mhz < step_mhz - 1e-9) return false;
+  }
+  double per_segment = floor((seg_mhz - rbw_mhz) / step_mhz) + 1.0;
   if (per_segment > double(kScopePluginMaxPoints)) per_segment = double(kScopePluginMaxPoints);
   if (per_segment < 1.0) per_segment = 1.0;
   const uint32_t max_points = uint32_t(per_segment);
@@ -476,12 +552,40 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   out.points = uint16_t(points);
   out.segments = uint16_t(segments);
   out.agg = request.agg;
+  out.seg_mhz = seg_mhz;
+  out.settle_us = request.settle_us;
   const uint32_t floor_ms = scopeIntervalFloorMs(out.points, request.sink_baud);
   out.interval_ms = request.interval_ms > floor_ms ? request.interval_ms : floor_ms;
   // The longest segment, which is the first ones when the points do not divide evenly.
   out.segment_ms = scopeSegmentMs(uint16_t((points + segments - 1u) / segments), rbw_khz);
-  out.sweep_ms = scopeSweepMs(out.points, out.segments, rbw_khz);
+  out.sweep_ms = scopeSweepMs(out.points, out.segments, rbw_khz, out.settle_us);
   return true;
+}
+
+// ------------------------------------------------------------------ what the ack says
+
+const char kScopeRefusal[] =
+    "refused: 150 <= f0 < f1 <= 960 MHz, points 16..2048, interval 0..60000 ms,"
+    " seg_mhz one step..32, settle_us 0..20000 - or the radio refused the mode";
+
+void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes) {
+  if (out == nullptr || bytes == 0) return;
+  // What was taken, which is not always what was asked: the points, the step they make, the
+  // bandwidth, how many segments the span was cut into, how much of it a reading covers and the
+  // interval the sink allowed.
+  const int written = snprintf(out, bytes,
+                               "n=%u step=%.4fkHz rbw=%.1fkHz seg=%u cov=%.3f interval=%lums"
+                               " sweep=%lums",
+                               unsigned(plan.points), plan.step_khz, plan.rbw_khz,
+                               unsigned(plan.segments), plan.cov,
+                               (unsigned long)plan.interval_ms, (unsigned long)plan.sweep_ms);
+  // And the two numbers of phase 3.16's task 02, named only when one of them is not the default -
+  // so that the line of a `scope` asked for as it was asked for before that task is that line,
+  // byte for byte.
+  if (written <= 0 || size_t(written) >= bytes) return;
+  if (plan.seg_mhz == kScopeSegmentMhz && plan.settle_us == 0) return;
+  snprintf(out + written, bytes - size_t(written), " segw=%.1fMHz settle=%luus", plan.seg_mhz,
+           (unsigned long)plan.settle_us);
 }
 
 bool scopeSegment(const ScopePlan& plan, uint16_t index, ScopeSegment& out) {

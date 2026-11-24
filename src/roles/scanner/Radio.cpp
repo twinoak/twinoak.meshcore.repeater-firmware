@@ -95,6 +95,7 @@ struct ScopeState {
   Lines* out = nullptr;      // the port the command came in on, and the only one frames go to
   uint16_t segment = 0;      // the one to run next
   uint16_t armed = 0xFFFF;   // the one the plugin's parameters are loaded for (0xFFFF = none)
+  ScopeCalibration cal;      // what the chip's image calibration was last made for
   uint32_t beat_ms = 0;      // when the next frame is due
   uint32_t emitted_ms = 0;   // when the last one actually left, which is what `sps` is counted on
   ScopeAccumulator acc;
@@ -453,6 +454,10 @@ class ChipArmRadio : public ScopeArmRadio {
   int setSweep(double first_mhz, double step_mhz, uint16_t points, double rbw_khz) override {
     return g_scanner.setSweep(float(first_mhz), float(step_mhz), uint8_t(points), float(rbw_khz));
   }
+  // The receiver left standing where setFrequency() put it, in continuous receive: a delay and
+  // nothing else, at most kScopeSettleMaxUs and so at most 20 ms of one pass of loop() - a
+  // fraction of the watchdog, and less than the plugin call that follows it is allowed.
+  void settle(uint32_t us) override { delayMicroseconds(us); }
   int reload() override { return beginPlugin(g_scope.plan.f0); }
 };
 ChipArmRadio g_arm;
@@ -508,12 +513,23 @@ void serviceScope() {
   }
   if (g_scope.armed != g_scope.segment) {
     ScopeArmResult arm;
-    if (!armScopeSegment(g_arm, g_scope.plan, seg, arm)) {
+    if (!armScopeSegment(g_arm, g_scope.plan, seg, g_scope.cal, arm)) {
       scopeError("setup", arm.failed, arm.code, seg.first_mhz, arm.reloaded);
       stop();
       return;
     }
     g_scope.armed = g_scope.segment;
+  } else {
+    // A one-segment plan keeps its parameters from sweep to sweep, so nothing re-arms it and the
+    // settle would be paid once and never again - while the receiver comes to every sweep but
+    // the first from the *last* point of the one before it, a whole span away. So a segment that
+    // is already armed stands on its first point too, before every sweep.
+    ScopeArmResult settled;
+    if (!settleScopeSegment(g_arm, g_scope.plan, seg, settled)) {
+      scopeError("setup", settled.failed, settled.code, seg.first_mhz, false);
+      stop();
+      return;
+    }
   }
   // Blocking for the segment's duration, and the plugin's tag is checked inside: a chip that was
   // reset under us - a brownout - has no 0x9B command and must not be sent one.
@@ -684,6 +700,7 @@ bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
   g_scope.out = &out;
   g_scope.segment = 0;
   g_scope.armed = 0xFFFF;
+  g_scope.cal = ScopeCalibration();  // beginPlugin() reset the chip, and the calibration with it
   g_scope.acc.reset(planned.points);
   const uint32_t now = millis();
   g_scope.beat_ms = now;

@@ -290,8 +290,10 @@ void Lines::err(const char* message, const char* call, int code) {
 void Lines::help(const char* version) {
   text("# NoiseScope %s - commands (NDJSON out, '#' lines are chatter)\n", version);
   raw("#   sweep [f0 f1 [step_khz [dwell_ms [passes]]]]   RSSI sweep; passes 0 = until stop\n"
-      "#   scope <f0> <f1> [points [rbw_khz [int_ms [agg]]]]  in-radio sweep, streamed to this\n"
-      "#                                                  port; agg max|mean|last; scope off\n"
+      "#   scope <f0> <f1> [points [rbw_khz [int_ms [agg [seg_mhz [settle_us]]]]]]\n"
+      "#                                                  in-radio sweep, streamed to this port;\n"
+      "#                                                  agg max|mean|last; seg_mhz <= 32 MHz,\n"
+      "#                                                  settle_us <= 20000; scope off\n"
       "#   hist  [f0 f1 [step_khz [samples [passes]]]]    spectral-scan histograms (33 x 4dB bins)\n"
       "#   dwell <f_mhz> [secs [win_ms]]                  time-domain stats on one frequency\n"
       "#   cad   [f_mhz [count]]                          LoRa preamble detection ratio\n"

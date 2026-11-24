@@ -1182,7 +1182,7 @@ decides whether any of the rest can be walked at all.
   of the matching network across the whole tuning range, and every later
   reading is worth more with it to subtract (`--baseline`). Keep the file with
   the site's notes. Peaks seen on the dummy load → ______. (bench, 2026-10-22, 479f482)
-- [ ] **p3.1-01, p3.16-01** **The image check**, which is what the segments exist for.
+- [ ] **p3.1-01, p3.16-01, p3.16-02** **The image check**, which is what the segments exist for.
   The tinySA Ultra as a generator at a known frequency, through an attenuator
   into the RAK, and a `scope` of a wide span around it: there should be **one
   peak where the generator is**, and nothing at the image (or no more than the
@@ -1210,6 +1210,19 @@ decides whether any of the rest can be walked at all.
   of them again, and `--json` gives the same as data. **Lower nothing on the
   strength of it**: which width and settle `scope` takes is a later task's, from
   the tables (`tasks/phase-3.16/README.md`, *Afterwards*).
+  `p3.16-02` then gave `scope` those two numbers — a segment's width and a
+  settle on each segment's first point (`docs/noisescope.md` §6) — and
+  **measured neither**, for the same reason on the same day. The second command
+  is the whole comparison, thirty-two lines over the two spans of 23 November
+  (the line as it is asked today, segment widths of 11, 5.5, 4 and 2 MHz,
+  settles of 100 to 5 000 µs, and the pair 5.6 MHz / 500 µs with one value
+  either side of each):
+  `python tools/noisescope/hunt.py --list tools/noisescope/lists/p3.16-02.txt
+  --label p3.16-02 --carrier 869.618`. Echoes left at each width → ______, at
+  each settle → ______, and what the best pair costs in `sps` against today's
+  → ______. Run it after the thirteen lines above, with the same generator and
+  the same `"rf": "antenna"`; the captures go in
+  `tools/noisescope/captures/p3.16-02/`.
 - [ ] **p3.1-01** **The site through the cavity filter.** `scope 791 960` with
   the baseline subtracted: LTE800 downlink (791–821) and GSM900 downlink
   (925–960) as they actually reach the radio. Strongest carrier → ______ at

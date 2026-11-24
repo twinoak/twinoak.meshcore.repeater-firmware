@@ -170,6 +170,7 @@ By hand, over any console:
 scope 863 870                  # the band, 250 points, a frame per sweep
 scope 150 960 2048             # everything the radio tunes, in 26 segments
 scope 869.4 869.8 512 19.5 200 mean
+scope 779.618 959.618 0 467 0 last 5.6 500   # 33 segments, 500 us on each one's first point
 stop                           # or `scope off`
 ```
 
@@ -186,7 +187,8 @@ host is attached.
   prefixed `# `) and must be ignored by machine parsers.
 * **Walter → device:** plain-text commands, one per line, space-separated
   arguments, `\n` or `\r` terminated. The command word is case-insensitive; an
-  argument is not. At most eight words are read.
+  argument is not. At most nine words are read, which is the longest command
+  there is (`scope` with every number).
 * **Every line a scan produces** carries `seq` (monotonic per boot — detect
   gaps and reboots), `ts` (unix epoch, `0` = the clock was never set; re-stamp
   on receipt if 0) and `ms` (millis since boot). `boot` carries `ts`, and
@@ -207,7 +209,7 @@ host is attached.
 | `info` | one `info` line (fw/version/role/board/devid/reset reason/peripherals/radio ROM/home cfg) |
 | `stat` | one `stat` line immediately (the heartbeat also fires every 10 s) |
 | `sweep [f0 f1 [step_khz [dwell_ms [passes]]]]` | RSSI sweep. Defaults: the band's range, 25 kHz, 20 ms, 1 pass. `passes 0` = repeat until `stop` |
-| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`. `scope off` ends it |
+| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 (`0` = no stand at all, today's). `scope off` ends it |
 | `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples; `samples` is clamped to 256…65535 and is what one frequency costs, 8.2 µs each (2 ms at 256, **17 ms at the default**, 0.54 s at 65535). A line's bins add up to its `n` or the line is not sent (below) |
 | `dwell <f_mhz> [secs [win_ms]]` | time-domain statistics on one frequency (defaults 60 s, 1000 ms windows). Uses the home LoRa RX filter |
 | `cad [f_mhz [count]]` | LoRa channel-activity detections out of `count` tries (default the home frequency, 100) |
@@ -272,12 +274,26 @@ A `scope` ack carries what was *taken*, which is not always what was asked:
 
 ```
 {"t":"ack","cmd":"scope","ok":true,
- "msg":"n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=86ms"}
+ "msg":"n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"}
 ```
 
 `seg` is how many plugin calls one sweep of the span is (§6), `cov` is the
 receiver bandwidth over the step — below 1 and a narrow carrier can fall
-between two points — and `interval` is what the port allowed (below).
+between two points — `interval` is what the port allowed (below) and `sweep` is
+how long one sweep of every segment is planned to take, every arm and every
+settle included.
+
+A `scope` asked for with a **segment width** or a **settle** says so, after the
+line above and in the same shape whichever of the two was given:
+
+```
+{"t":"ack","cmd":"scope","ok":true,
+ "msg":"n=386 step=466.3212kHz rbw=467.0kHz seg=33 cov=1.001 interval=0ms sweep=19ms segw=5.6MHz settle=500us"}
+```
+
+A line that names neither gets the first shape, byte for byte — what those two
+numbers do is §6, and which of them a `scope` should take when none is given is
+not settled yet.
 
 Every command is answered with an `ack` line:
 `{"t":"ack","cmd":"sweep","ok":true,"msg":"started"}`. A command arriving
@@ -410,7 +426,8 @@ broadband noise.
 `ack` / `err` — command responses and asynchronous errors (`err` carries
 `msg`). An `err` from a `scope` whose segment would not arm, or whose sweep
 failed, also carries **`call`** — which of the radio calls returned the code:
-`standby`, `setFrequency`, `calibrateImage`, `setSweep`, `sweep` or `reload`
+`standby`, `setFrequency`, `calibrateImage`, `setSweep`, `sweep`, `reload` or
+`settle` (the retune onto a segment's first point, §6)
 — and **`code`**, RadioLib's status (`-707` is `RADIOLIB_ERR_SPI_CMD_FAILED`,
 the chip's *failure to execute*). Both are additive: a reader that knows only
 `msg` reads the same line as before. The `msg` ends with the SX1262's own
@@ -546,6 +563,42 @@ before it is flashed: its descriptor's role byte is 3.
   refuses is asked for once more after the chip is reset and the plugin
   uploaded again (`armScopeSegment`, host-tested; §8 says what the first
   board taught about it).
+
+  **What a segment's width and a settle are for.** A wide `scope` with a strong
+  signal in it shows blocks that are not there, and they sit at a segment's
+  **first point** and again about every **5.6 MHz** after it (§7). Each has an
+  obvious cure, and `seg_mhz` and `settle_us` are those two cures made
+  something a person can ask for:
+
+  * **`seg_mhz`** is the widest a segment may be. The blocks after the first
+    point repeat at a distance in megahertz, from wherever a segment began, and
+    the synthesizer dragged that far is the guess at what makes them — so a
+    segment no wider than that distance has no room for one. `scope 779.618
+    959.618 0 467 0 last 5.6` is the 180 MHz of 23 November in 33 segments of
+    twelve points instead of six of 65. It costs arms: a sweep of 33 segments
+    pays 33 of them, and they are not free — but it does **not** pay 33 image
+    calibrations. One calibration covers 32 MHz, which is what it always
+    covered, and a segment that falls inside the range the last one was made
+    for is armed without one (`scopeCalibrationRange`, host-tested): 33
+    segments of the wide span are seven calibrations.
+  * **`settle_us`** is how long the receiver stands on the segment's **first
+    point**, in continuous receive, before the reading that counts. The plugin
+    puts the receiver in receive at the segment's *centre* and then jumps half a
+    segment — up to 16 MHz — to point 0 and reads after two extra RSSI updates,
+    which is 6.9 µs at 467 kHz; `settle_us` is that allowance made a time
+    instead of a count. It is done the one way the plugin itself is seen to do
+    it: the frequency written with the receiver already in continuous receive
+    and nothing calibrated, so the plugin's own retune into point 0 is then a
+    move of zero (`settleScopeSegment`). A one-segment `scope` stands there
+    before **every** sweep, because it never re-arms and otherwise comes to each
+    sweep from the last point of the one before it.
+
+  Both are on the `scope` line so that a session on a unit can type them as
+  well as the bench. **Neither moves what a `scope` with no such number does**:
+  which pair becomes the default is decided from the bench's tables and not
+  here (`tasks/phase-3.16/FOLLOWUPS.md`). The `ack` names them when they are
+  asked for, and the `sweep` it carries counts every settle, so a wide span
+  with a long settle says outright what it will cost.
 * **Power telemetry:** the B-board INA3221 in every heartbeat, so a scanning
   session doubles as a power-budget check. Missing peripherals (a bench setup)
   are detected and skipped.
@@ -614,6 +667,25 @@ before it is flashed: its descriptor's role byte is 3.
   step or bandwidth to say which of them the echoes keep.
   `python tools/noisescope/hunt.py` is that pair of captures and more, run on a
   bench board with a generator on its antenna port (`docs/bench.md` §9).
+
+  **What to type for a wide span, until the bench has said.** A `scope` takes a
+  **segment width** and a **settle** (§5, §6), and neither has a measured value
+  yet — no board was on the bench when they were built. So the honest answer
+  today is the two candidates the captures of 23 November point at, typed beside
+  the line without them and read with `echoes.py`:
+
+  ```
+  scope 779.618 959.618 0 467 0 last              # as it is asked today: six segments
+  scope 779.618 959.618 0 467 0 last 5.6 500      # 33 segments, and 500 us on each one's first point
+  ```
+
+  5.6 MHz because that is the interval the blocks were read to repeat at, and
+  twelve points of this span; 500 µs because it is 146 RSSI updates at 467 kHz,
+  where the plugin allows two. If the blocks go, they were the instrument; if
+  they do not, nothing has been lost but sweeps a second, and the `ack`'s
+  `sweep` says how many before the first frame arrives.
+  `tools/noisescope/lists/p3.16-02.txt` is the whole comparison — four widths,
+  six settles, both spans — as one `hunt.py` run.
 
 ## 8. The fast sweep, as built
 
