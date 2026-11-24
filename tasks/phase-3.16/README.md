@@ -65,25 +65,138 @@ The tasks use the bench board (`bench.local.json`, the RAK4630 on USB) if it is 
 4. Optional: the lines of `/noisescope/3` (*Download the lines*) saved as
    `tools/noisescope/captures/bellevue-2026-11-23.ndjson`. Task 01 holds its tool to them.
 
+## The garden instead of the bench (24 November, evening)
+
+Thomas would rather not take the unit down, and he does not have to. **The echoes have only
+ever been seen on the unit at Bellevue**, with its antenna, its cavity filter and the
+neighbour 200 m away; the bench has never shown one. A NoiseScope session from meshmaster.dk
+types `scope` lines and brings every line back, so the unit is where they are measured.
+Tasks 03 and 04 are written for that and need no board. (The bench of *Before the run* never
+needed the unit: any RAK4630 on USB does. It stays for what the garden cannot give.)
+
+**What the garden cannot give:** a signal of a known level in every frame, the dummy load,
+an attenuator. The neighbour's traffic lights the echoes in some frames and not in others
+(ten of sixty in session 3), so a step is long and each frame is the strongest reading of a
+second.
+
+**What a session costs:** Bellevue off the mesh for about 27 minutes (two flashes, nine
+minutes of steps, the proof), about 0.3 MB of the SIM's month, and a new scanner image is
+one fetch of 127 kB. Since Walter 0.1.11 the first try of the scanner flash has failed in
+every session (four of four); the second try, which 0.1.12 has, carried two of three. A
+session that is refused measures nothing and costs the wait.
+
+**What is on the unit** (read 24 November, 21:35 CET): Walter 0.1.12, the radio's golden
+image and its scanner both 0.1.7. meshmaster.dk has pile 4.48 since 20:50 CET, so a refused
+session is kept and holds no other result back.
+
+**A step's line is at most 40 characters** and a program at most six steps and 384 bytes
+(meshmaster.dk's contract and the Walter's). So the lists use whole MHz, leave out `max`
+where no number follows it, and 03's words may stand anywhere.
+
+### Session A: does an echo follow the segments or the signal? (needs nothing new)
+
+It runs on the scanner that is on the unit. Six steps of 90 seconds:
+
+```
+90 scope 780 960 0 467 1000
+90 scope 773 953 0 467 1000
+90 scope 777.2 957.2 0 467 1000
+90 scope 850 890 0 467 1000
+90 scope 862 875 250 58.6 1000
+90 scope 865 878 250 58.6 1000
+```
+
+Steps 1 to 3 are the wide span begun 0, 7 and 2.8 MHz lower: echoes that follow the segments
+move down by 7 and by 2.8 MHz, echoes that follow the signal stay where they are. Step 4 is
+40 MHz around the signal in two segments. Steps 5 and 6 are the 13 MHz capture begun at 862
+and at 865 MHz: an echo that follows the segment is at 873.2 and then at 876.2 MHz, one that
+follows the signal is near 874.4 MHz in both. This is the question the two readings differ
+on, and it is answered before any firmware is built.
+
+### Sessions B, C and D (need a release with 02 and 03, and *Fetch a scanner image*)
+
+85 seconds a step. Task 04 turns them into files and checks them against the rules.
+
+**B, the regulator, the gain and the time a point costs:**
+
+```
+85 scope 780 960 0 467 1000
+85 scope 780 960 0 467 1000 ldo
+85 scope 780 960 0 467 1000 noboost
+85 scope 863 876 250 58.6 1000
+85 scope 863 876 250 58.6 1000 ldo
+85 scope 869 870.2 250 4.8 1000
+```
+
+Echoes that are gone on the LDO are the DC-DC converter's. Echoes that fall by more than the
+signal does at the lower gain are the receiver being driven too hard. The last step is 250
+points at 4.8 kHz in one segment: its `us` reads about 83 ms if an update is 1.6 ms / RBW
+and about 48 ms if it is 0.94.
+
+**C, a segment's width** (60 MHz around the signal, where the strongest echo was, 887.1 MHz):
+
+```
+85 scope 840 900 0 467 1000
+85 scope 840 900 0 467 1000 max 11
+85 scope 840 900 0 467 1000 max 5.6
+85 scope 840 900 0 467 1000 max 4
+85 scope 863 876 250 58.6 1000
+85 scope 863 876 250 58.6 1000 max 5.6
+```
+
+**D, the settle on a segment's first point:**
+
+```
+85 scope 840 900 0 467 1000
+85 scope 840 900 0 467 1000 max 32 100
+85 scope 840 900 0 467 1000 max 32 500
+85 scope 840 900 0 467 1000 max 32 2000
+85 scope 863 876 250 58.6 1000
+85 scope 863 876 250 58.6 1000 max 32 1000
+```
+
+Every session begins with the span asked as today, because the traffic of one hour is not
+the traffic of the next. `dev` is in every frame of more than one segment.
+
+**Chosen by me, his to change before the run:**
+
+- **The words are on the `scope` line**, taken out wherever they stand: a session cannot say
+  `boost off`, and 40 characters leave no room for a word that needs numbers before it.
+- **`dev` is read where the arm already stands in standby**, and a span of one segment is
+  not given a standby to read it in: nothing of what is measured moves.
+- **The neighbour is the signal.** A steadier one would make every step sharper: the tinySA
+  as a generator with a short antenna a few metres from the unit, on 869.618 MHz, for the
+  nine minutes of steps. It also sits on the mesh's channel for those minutes. Not needed for
+  session A.
+- **Four sessions, not one long one:** six steps and 600 seconds are the contract's, in two
+  other repositories.
+
 ## Order and dependencies
 
 | # | Task | Depends on | What it leaves behind |
 |---|---|---|---|
 | 01 | [the-echoes-are-measured](01-the-echoes-are-measured.md) | — | `echoes.py`: every echo of a capture with its distance from its segment's first point in MHz, points and microseconds, and which of the three repeats; the plugin read; `hunt.py` and the bench's answers to where, what they follow and how long |
 | 02 | [a-segment-the-synthesizer-can-hold](02-a-segment-the-synthesizer-can-hold.md) | 01 | `scope` takes a segment's width and a settle; no calibration for a range already calibrated; the bench's table of what each width and settle leaves and costs; the default as it was |
+| 03 | [a-scope-that-accounts-for-itself](03-a-scope-that-accounts-for-itself.md) | 02 | `scope` takes `ldo`/`dcdc` and `boost`/`noboost` for one scope; every frame says how long its sweeps took (`us`, `usx`) and, with more than one segment, what the chip's error word held (`dev`); a scope asked as today measures as today |
+| 04 | [the-garden-is-the-bench](04-the-garden-is-the-bench.md) | 03 | `hunt.py --sessions`: a list as session programs meshmaster.dk will take; the four garden lists; `echoes.py --steps`: one table across a session's scopes and what each pair of them says |
 
 ```powershell
-.\tasks\run-all.ps1 -Phase '3.16'
+.\tasks\run-all.ps1 -Phase '3.16' -From 03
 ```
 
-01 alone is `-To 01`.
+01 and 02 have run (24 November, with no board on the bench). 03 and 04 need no board.
 
 ## Models
 
-- **Opus**: 01, 02.
+- **Opus**: 01, 02, 03, 04.
 
 ## Afterwards (Thomas)
 
+- **The garden** (03 and 04): session A whenever he likes, it needs nothing new. After 03
+  has merged: release, import, *Fetch a scanner image* on the unit, then sessions B, C and D,
+  one at a time. Each download saved into `tools/noisescope/captures/garden/` under its own
+  name; I run `echoes.py --steps` over it and say what it shows. 04 changes nothing a unit
+  runs, so the release need not wait for it.
 - **The board:** generator off, the dummy load back, `"rf": "dummy-load"` back, and
   `python tools/bench/bench.py restore` if a repeater was on it before.
 - **The tables decide.** I read both reports and say which two numbers they speak for and
