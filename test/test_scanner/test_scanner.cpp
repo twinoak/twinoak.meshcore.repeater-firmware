@@ -1232,7 +1232,9 @@ TEST(Scope, ThePlanTableIsPlanScopes) {
     r.points = req["points"] | 0u;
     r.rbw_khz = rbwAsTheTableNamesIt(req["rbw_khz"] | 0.0);
     r.seg_mhz = req["seg_mhz"] | 0.0;
-    r.settle_us = req["settle_us"] | 0u;
+    // A row with no `settle_us` is a line with no ninth number, which is the default; a row that
+    // names 0 is a line that asked for none (phase 3.17's task 01).
+    r.settle_us = req["settle_us"] | kScopeSettleAbsentUs;
     ScopePlan plan;
     ASSERT_TRUE(planScope(r, plan)) << "this firmware does not run that request";
 
@@ -1240,6 +1242,7 @@ TEST(Scope, ThePlanTableIsPlanScopes) {
     ASSERT_FALSE(want.isNull()) << "no `plan`";
     EXPECT_EQ(want["points"].as<uint16_t>(), plan.points);
     EXPECT_EQ(want["segments"].as<uint16_t>(), plan.segments);
+    EXPECT_EQ(want["settle_us"].as<uint32_t>(), plan.settle_us) << "settle_us";
     for (const auto& pair : {std::make_pair("step_khz", plan.step_khz),
                              std::make_pair("rbw_khz", plan.rbw_khz),
                              std::make_pair("first_mhz", plan.first_mhz),
@@ -1578,8 +1581,9 @@ struct FakeArmRadio : ScopeArmRadio {
     note("reload;");
     return reload_code;
   }
-  // Phase 3.16's task 02: nothing in this file asks for a settle except the tests that are about
-  // one, so every expectation above is what it was.
+  // Phase 3.16's task 02. Since phase 3.17's task 01 **every** plan has a settle unless its line
+  // asked for none, so every arm's log ends with the first point and this call; appendSettle()
+  // below is the one place that tail is written.
   void settle(uint32_t us) override { note("settle(%u);", unsigned(us)); }
   int setSweep(double first, double step, uint16_t points, double rbw) override {
     note("setSweep(%.3f,%.3f,%u,%.1f);", first, step, unsigned(points), rbw);
@@ -1601,6 +1605,17 @@ static ScopePlan planOf(double f0, double f1, uint32_t points) {
   ScopePlan plan;
   EXPECT_TRUE(planScope(r, plan));
   return plan;
+}
+
+// The tail of **every** arm since phase 3.17's task 01: the receiver put on the segment's first
+// point and stood there for the plan's settle, which for a `scope` that named none is
+// kScopeSettleDefaultUs. Appended to an expected log rather than written into each of them, so
+// that there is one place saying what an arm now ends with.
+static void appendSettle(char* out, size_t bytes, const ScopePlan& plan, const ScopeSegment& seg) {
+  const size_t at = strlen(out);
+  ASSERT_LT(at, bytes);
+  snprintf(out + at, bytes - at, "setFrequency(%.3f);settle(%lu);", seg.first_mhz,
+           (unsigned long)plan.settle_us);
 }
 
 TEST(Scope, ASegmentIsArmedInTheOneOrderTheBoardAcceptsWithTheErrorWordReadAndClearedFirst) {
@@ -1630,11 +1645,14 @@ TEST(Scope, ASegmentIsArmedInTheOneOrderTheBoardAcceptsWithTheErrorWordReadAndCl
   // its own.
   EXPECT_EQ(kScopePllLockError, out.before_errors);
   EXPECT_EQ(0u, out.device_errors) << "the calibration's verdict, after the clear";
-  char expected[200];
+  char expected[320];
   snprintf(expected, sizeof(expected),
            "%ssetFrequency(213.000);calibrateImage(%.3f,%.3f);deviceErrors;"
            "setSweep(200.600,0.400,62,467.0);",
            kArmStandby, seg.cal_lo_mhz, seg.cal_hi_mhz);
+  // And the settle, which this plan named no number for and so is kScopeSettleDefaultUs.
+  ASSERT_EQ(kScopeSettleDefaultUs, plan.settle_us);
+  appendSettle(expected, sizeof(expected), plan, seg);
   EXPECT_STREQ(expected, radio.log);
   EXPECT_FALSE(out.reloaded);
 
@@ -1749,6 +1767,7 @@ TEST(Scope, ACalibrationTheChipRefusesIsAskedForOnceMoreAfterAReload) {
     EXPECT_EQ(0u, out.device_errors & kScopeImageCalibrationError);
     char expected[700];
     snprintf(expected, sizeof(expected), "%sreload;%s%s", arm, arm, sweep);
+    appendSettle(expected, sizeof(expected), plan, seg);
     EXPECT_STREQ(expected, radio.log);
   }
   {
@@ -1802,13 +1821,14 @@ TEST(Scope, EverySegmentOfTheWholeRangeIsCalibratedForWhereItsSweepRuns) {
     FakeArmRadio radio;
     ScopeArmResult out;
     ASSERT_TRUE(armScopeSegment(radio, plan, seg, out)) << "segment " << i;
-    char expected[256];
+    char expected[320];
     snprintf(expected, sizeof(expected),
              "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
              "setSweep(%.3f,%.3f,%u,%.1f);",
              kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz,
              seg.cal_hi_mhz, seg.first_mhz, plan.step_khz / 1000.0, unsigned(seg.points),
              plan.rbw_khz);
+    appendSettle(expected, sizeof(expected), plan, seg);
     EXPECT_STREQ(expected, radio.log) << "segment " << i;
     EXPECT_LT(seg.cal_lo_mhz, seg.first_mhz) << "segment " << i;
     if (i > 0) {
@@ -1830,7 +1850,8 @@ TEST(Scope, TheTwoNumbersAreReadAfterTheAggregateAndTheLineBeforeThemIsWhatItWas
   ASSERT_TRUE(parseScope(tokensOf(six), args));
   EXPECT_EQ(kScopeAggMean, args.agg);
   EXPECT_DOUBLE_EQ(0.0, args.seg_mhz) << "absent is 'the default', which is kScopeSegmentMhz";
-  EXPECT_EQ(0u, args.settle_us) << "and no settle, which is today's arm";
+  EXPECT_EQ(kScopeSettleAbsentUs, args.settle_us)
+      << "and absent is 'the default', which is kScopeSettleDefaultUs since p3.17-01";
 
   Line eight("scope 779.618 959.618 0 467 0 last 5.6 500");
   ASSERT_TRUE(parseScope(tokensOf(eight), args));
@@ -1847,7 +1868,7 @@ TEST(Scope, TheTwoNumbersAreReadAfterTheAggregateAndTheLineBeforeThemIsWhatItWas
   Line seven("scope 779.618 959.618 0 467 0 last 11");
   ASSERT_TRUE(parseScope(tokensOf(seven), args));
   EXPECT_DOUBLE_EQ(11.0, args.seg_mhz);
-  EXPECT_EQ(0u, args.settle_us);
+  EXPECT_EQ(kScopeSettleAbsentUs, args.settle_us);
 
   // Nine words is the longest line this firmware has, and the tokenizer reads all nine.
   Line line("scope 779.618 959.618 0 467 0 last 5.6 500");
@@ -1968,15 +1989,22 @@ TEST(Scope, ThePlannedTimeIncludesEveryArmAndEverySettle) {
   ASSERT_EQ(386u, plan.points);
   ASSERT_EQ(33u, plan.segments);
 
-  // (386 + 33 x 8) x 1.6 / 467 ms = 2.23 ms, and nothing else without a settle.
+  // The line named no settle, so it is planned with kScopeSettleDefaultUs:
+  // (386 + 33 x 8) x 1.6 / 467 ms = 2.23 ms of sweep, and 33 x 0.5 ms of standing on top of it.
+  ASSERT_EQ(kScopeSettleDefaultUs, plan.settle_us);
+  EXPECT_EQ(19u, plan.sweep_ms);
+  EXPECT_EQ(scopeSweepMs(386, 33, 467.0, kScopeSettleDefaultUs), plan.sweep_ms);
+
+  // And `0` on the line is the number `main` gave this plan: the sweep's own 2.23 ms and nothing.
+  r.settle_us = 0;
+  ASSERT_TRUE(planScope(r, plan));
   EXPECT_EQ(3u, plan.sweep_ms);
   EXPECT_EQ(scopeSweepMs(386, 33, 467.0), plan.sweep_ms);
   EXPECT_EQ(scopeSweepMs(386, 33, 467.0, 0), plan.sweep_ms) << "no settle is today's number";
 
   r.settle_us = 500;
   ASSERT_TRUE(planScope(r, plan));
-  // 2.23 ms + 33 x 0.5 ms = 18.73 ms, which is eight times the sweep itself.
-  EXPECT_EQ(19u, plan.sweep_ms);
+  EXPECT_EQ(19u, plan.sweep_ms) << "500 typed out is the default typed out";
   EXPECT_EQ(scopeSweepMs(386, 33, 467.0, 500), plan.sweep_ms);
   r.settle_us = kScopeSettleMaxUs;
   ASSERT_TRUE(planScope(r, plan));
@@ -1986,11 +2014,29 @@ TEST(Scope, ThePlannedTimeIncludesEveryArmAndEverySettle) {
   // inside it, so RadioLib's 1000 ms wait for BUSY is unaffected.
   EXPECT_EQ(scopeSegmentMs(12, 467.0), plan.segment_ms);
 
+  // The default over the six segments of the wide span as a session asks it
+  // (`scope 779.618 959.618 0 467`), which is the number of deliverable 3: 386 points and six
+  // arms is (386 + 48) x 1.6 / 467 = 1.49 ms, so 2 ms with no settle and 5 ms with the default's
+  // six halves of a millisecond on top.
+  ScopeRequest six = request(779.618, 959.618);
+  six.rbw_khz = 467.0;
+  ScopePlan wide;
+  ASSERT_TRUE(planScope(six, wide));
+  ASSERT_EQ(386u, wide.points);
+  ASSERT_EQ(6u, wide.segments);
+  EXPECT_EQ(5u, wide.sweep_ms);
+  EXPECT_EQ(scopeSweepMs(386, 6, 467.0, kScopeSettleDefaultUs), wide.sweep_ms);
+  six.settle_us = 0;
+  ASSERT_TRUE(planScope(six, wide));
+  EXPECT_EQ(2u, wide.sweep_ms) << "the number main gave the same line";
+  EXPECT_EQ(scopeSweepMs(386, 6, 467.0, 0), wide.sweep_ms);
+
   // And the port's own floor follows the frame and not the sweep, so a settle does not move it -
   // what moves with the sweep is the interval a reader of the `ack` plans on.
   ScopeRequest uart = request(863.0, 870.0);
   uart.points = 2048;
   uart.sink_baud = 115200;
+  uart.settle_us = 0;
   ScopePlan without;
   ASSERT_TRUE(planScope(uart, without));
   uart.settle_us = 1000;
@@ -2003,27 +2049,36 @@ TEST(Scope, ThePlannedTimeIncludesEveryArmAndEverySettle) {
   EXPECT_EQ(scopeSweepMs(with.points, with.segments, with.rbw_khz, 1000), with.sweep_ms);
 }
 
-TEST(Scope, TheAckSaysWhatWasTakenAndNamesTheTwoNumbersOnlyWhenOneIsNotTheDefault) {
+TEST(Scope, TheAckNamesTheSettleOnEveryScopeAndTheWidthOnlyWhenItIsNotTheDefault) {
   char msg[kMaxAckMessageBytes];
 
-  // docs/noisescope.md section 5's own example, to the byte: this is the line a `scope` asked for
-  // as it was asked for before phase 3.16's task 02 answers. (The `sweep` of that example on the
-  // page read 86 ms, which is 250 points at 4.8 kHz and not at this plan's 39.0; it is corrected
-  // there to what this line says.)
+  // docs/noisescope.md section 5's own example, to the byte: `scope 863 870`, which names no
+  // settle and so stands kScopeSettleDefaultUs on its one first point. `sweep` is
+  // (250 + 8) x 1.6 / 39.0 = 10.58 ms of sweep plus the one segment's half a millisecond, so 12
+  // where main said 11, and the `ack` says which settle made it.
   ScopeRequest r = request(863.0, 870.0);
   ScopePlan plan;
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
-  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms", msg);
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=12ms"
+               " settle=500us", msg);
 
-  // 32 MHz and no settle asked for outright is the same line: what was taken is what was taken.
+  // 32 MHz typed out is still no `segw=`: what was taken is what was taken.
   r.seg_mhz = kScopeSegmentMhz;
+  ASSERT_TRUE(planScope(r, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=12ms"
+               " settle=500us", msg);
+
+  // And the same line asked for with `max 32 0` - the sweep that stands on nothing, which is what
+  // every line typed before this task did - says `settle=0us` and gives main's own 11 ms.
   r.settle_us = 0;
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
-  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms", msg);
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"
+               " settle=0us", msg);
 
-  // And with them, the same line and the two numbers after it.
+  // And with a width, the width after the line and the settle after that.
   r = request(779.618, 959.618);
   r.rbw_khz = 467.0;
   r.seg_mhz = 5.6;
@@ -2034,11 +2089,12 @@ TEST(Scope, TheAckSaysWhatWasTakenAndNamesTheTwoNumbersOnlyWhenOneIsNotTheDefaul
                " segw=5.6MHz settle=500us", msg);
   EXPECT_LT(strlen(msg), kMaxAckMessageBytes);
 
-  // A settle alone names both, so that the line has one shape.
+  // A settle with no width names the settle and nothing of the width.
   r.seg_mhz = 0.0;
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
-  EXPECT_NE(nullptr, strstr(msg, "segw=32.0MHz settle=500us"));
+  EXPECT_EQ(nullptr, strstr(msg, "segw=")) << msg;
+  EXPECT_NE(nullptr, strstr(msg, " settle=500us"));
 
   // The widest ack there is still fits in the message an `ack` line may carry.
   ScopeRequest widest = request(kRadioLowMhz, kRadioHighMhz);
@@ -2148,6 +2204,141 @@ TEST(Scope, ASettleStandsTheReceiverOnTheSegmentsFirstPointAfterTheSweepIsLoaded
   }
 }
 
+// ------------------------------------------------------- phase 3.17's default, and asking for none
+
+TEST(Scope, NoNinthNumberIsTheDefaultAndAZeroIsNoneAtAll) {
+  // Deliverable 1 of tasks/phase-3.17/01-a-settle-by-default.md: the parser can tell *absent*
+  // from `0`, and kScopeSettleAbsentUs is the one place that is said. Every line below is typed
+  // through parseScope() and then planned, because the resolution is planScope()'s.
+  struct Case {
+    const char* line;
+    uint32_t settle_us;  // what the plan takes
+  };
+  const Case cases[] = {
+      {"scope 840 900 0 467 1000", kScopeSettleDefaultUs},
+      {"scope 863 870", kScopeSettleDefaultUs},
+      {"scope 840 900 0 467 1000 max 32", kScopeSettleDefaultUs},
+      {"scope 840 900 0 467 1000 max 11", kScopeSettleDefaultUs},
+      {"scope 840 900 0 467 1000 ldo noboost", kScopeSettleDefaultUs},
+      {"scope 840 900 0 467 1000 max 11 0 ldo", 0},
+      {"scope 840 900 0 467 1000 max 32 0", 0},
+      {"scope 840 900 0 467 1000 max 32 100", 100},
+      {"scope 840 900 0 467 1000 max 32 2000", 2000},
+      {"scope 840 900 0 467 1000 max 32 20000", kScopeSettleMaxUs},
+  };
+  size_t checked = 0;
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.line);
+    Line line(c.line);
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(line), args));
+    ScopeRequest r;
+    r.f0 = args.f0;
+    r.f1 = args.f1;
+    r.points = args.points;
+    r.rbw_khz = args.rbw_khz;
+    r.interval_ms = args.interval_ms;
+    r.agg = args.agg;
+    r.seg_mhz = args.seg_mhz;
+    r.settle_us = args.settle_us;
+    ScopePlan plan;
+    ASSERT_TRUE(planScope(r, plan));
+    EXPECT_EQ(c.settle_us, plan.settle_us);
+    // The parser keeps the two apart: absent is the sentinel and never a number of microseconds.
+    if (c.settle_us == kScopeSettleDefaultUs) {
+      EXPECT_TRUE(args.settle_us == kScopeSettleAbsentUs ||
+                  args.settle_us == kScopeSettleDefaultUs)
+          << "the default is either absent or typed out";
+    } else {
+      EXPECT_EQ(c.settle_us, args.settle_us);
+    }
+    checked++;
+  }
+  EXPECT_EQ(sizeof(cases) / sizeof(cases[0]), checked);
+
+  // A line asking for 20 001 is still refused, and the bound is the number that was taken and not
+  // the sentinel - which is why planScope() resolves before it bounds.
+  Line too_long("scope 840 900 0 467 1000 max 32 20001");
+  ScopeArgs args;
+  ASSERT_TRUE(parseScope(tokensOf(too_long), args));
+  EXPECT_EQ(20001u, args.settle_us);
+  ScopeRequest over = request(840.0, 900.0);
+  over.settle_us = args.settle_us;
+  ScopePlan refused;
+  EXPECT_FALSE(planScope(over, refused));
+  EXPECT_GT(kScopeSettleAbsentUs, kScopeSettleMaxUs)
+      << "absent must be outside the bound, or a request could be planned as one";
+}
+
+TEST(Scope, AScopeThatNamesNoSettleStandsTheDefaultOnEverySegmentsFirstPoint) {
+  // Deliverable 2: more than one segment, the stand is the last thing of each arm; one segment,
+  // it is made before every sweep, because such a plan never re-arms.
+  const ScopePlan plan = planOf(150.0, 250.0, 250);
+  ASSERT_EQ(kScopeSettleDefaultUs, plan.settle_us);
+  ASSERT_EQ(4u, plan.segments);
+  for (uint16_t index = 0; index < plan.segments; index++) {
+    SCOPED_TRACE(index);
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(plan, index, seg));
+    FakeArmRadio radio;
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(radio, plan, seg, out));
+    // The sweep loaded, and then the first point and the stand on it - the last two calls of the
+    // arm, whichever segment it is.
+    char tail[128];
+    snprintf(tail, sizeof(tail), "setSweep(%.3f,%.3f,%u,%.1f);setFrequency(%.3f);settle(500);",
+             seg.first_mhz, plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz,
+             seg.first_mhz);
+    const char* at = strstr(radio.log, tail);
+    ASSERT_NE(nullptr, at) << radio.log;
+    EXPECT_STREQ(tail, at) << "the arm ends there";
+  }
+
+  // And a reload in the middle of an arm changes nothing about the end of it.
+  {
+    const ScopePlan whole = planOf(150.0, 960.0, 2048);
+    ASSERT_EQ(kScopeSettleDefaultUs, whole.settle_us);
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(whole, 1, seg));
+    FakeArmRadio radio;
+    radio.refusals = 1;
+    ScopeArmResult out;
+    ASSERT_TRUE(armScopeSegment(radio, whole, seg, out));
+    EXPECT_TRUE(out.reloaded);
+    char tail[128];
+    snprintf(tail, sizeof(tail), "setFrequency(%.3f);settle(500);", seg.first_mhz);
+    const char* at = strstr(radio.log, tail);
+    ASSERT_NE(nullptr, at) << radio.log;
+    EXPECT_STREQ(tail, at);
+  }
+
+  // One segment: `scope 863 876 250 58.6`, the garden's narrow step. Nothing re-arms it, so the
+  // stand is what src/roles/scanner/Radio.cpp makes between two sweeps - and by default it is
+  // made, where before this task that line stood on nothing at all.
+  ScopeRequest one = request(863.0, 876.0);
+  one.points = 250;
+  one.rbw_khz = 58.6;
+  ScopePlan single;
+  ASSERT_TRUE(planScope(one, single));
+  ASSERT_EQ(1u, single.segments);
+  ASSERT_EQ(kScopeSettleDefaultUs, single.settle_us);
+  ScopeSegment only;
+  ASSERT_TRUE(scopeSegment(single, 0, only));
+  FakeArmRadio between;
+  ScopeArmResult settled;
+  EXPECT_TRUE(settleScopeSegment(between, single, only, settled));
+  EXPECT_EQ(kScopeArmNone, settled.failed);
+  char want[128];
+  snprintf(want, sizeof(want), "setFrequency(%.3f);settle(500);", only.first_mhz);
+  EXPECT_STREQ(want, between.log) << "the first point and the stand on it, and nothing else";
+
+  // And `max 32 0` on that line is no call at all, which is what it did on main.
+  single.settle_us = 0;
+  FakeArmRadio none;
+  EXPECT_TRUE(settleScopeSegment(none, single, only, settled));
+  EXPECT_STREQ("", none.log);
+}
+
 TEST(Scope, ASegmentInsideACalibratedRangeIsArmedWithoutACalibration) {
   // Deliverable 4 of tasks/phase-3.16/02-a-segment-the-synthesizer-can-hold.md: a sweep of
   // thirty-three segments must not pay thirty-three calibrations. The calibration is made for
@@ -2181,21 +2372,23 @@ TEST(Scope, ASegmentInsideACalibratedRangeIsArmedWithoutACalibration) {
       EXPECT_LE(hi - lo, kScopeSegmentMhz + 1e-9) << "segment " << i;
       EXPECT_GE(hi, seg.cal_hi_mhz - 1e-9) << "segment " << i;
       covered_to = hi;
-      char expected[320];
+      char expected[400];
       snprintf(expected, sizeof(expected),
                "%ssetFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
                "setSweep(%.3f,%.3f,%u,%.1f);",
                kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), lo, hi, seg.first_mhz,
                plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+      appendSettle(expected, sizeof(expected), plan, seg);
       EXPECT_STREQ(expected, one.log) << "segment " << i;
     } else {
       // Standby and the centre frequency still, because setSweep()'s own setFrequency() has to be
       // a move of zero - and then the plugin's parameters, and nothing of the chip asked.
-      char expected[320];
+      char expected[400];
       snprintf(expected, sizeof(expected),
                "%ssetFrequency(%.3f);setSweep(%.3f,%.3f,%u,%.1f);",
                kArmStandby, double(scopeSegmentCentreMhz(plan, seg)), seg.first_mhz,
                plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+      appendSettle(expected, sizeof(expected), plan, seg);
       EXPECT_STREQ(expected, one.log) << "segment " << i;
       EXPECT_LE(seg.cal_hi_mhz, covered_to + kScopeCalibrationSlackMhz) << "segment " << i;
     }
@@ -2258,6 +2451,7 @@ TEST(Scope, ACalibrationTheChipRefusesIsStillReloadedAndAskedForWhenARangeIsCarr
     EXPECT_TRUE(out.reloaded);
     char expected[700];
     snprintf(expected, sizeof(expected), "%sreload;%s%s", arm, arm, sweep);
+    appendSettle(expected, sizeof(expected), plan, seg);
     EXPECT_STREQ(expected, radio.log);
     EXPECT_TRUE(cal.valid) << "the arm the chip accepted is the one that is remembered";
   }
@@ -2339,7 +2533,7 @@ TEST(Scope, TheFourWordsAreTakenWhereverTheyStandAndWhatIsLeftIsReadAsItAlwaysWa
     EXPECT_EQ(1000u, args.interval_ms);
     EXPECT_EQ(kScopeAggMax, args.agg) << "no aggregate was given and the word is not one";
     EXPECT_DOUBLE_EQ(0.0, args.seg_mhz);
-    EXPECT_EQ(0u, args.settle_us);
+    EXPECT_EQ(kScopeSettleAbsentUs, args.settle_us);
   }
   {
     // The same numbers with the word in the aggregate's own place, and in the point count's.
@@ -2415,19 +2609,24 @@ TEST(Scope, TenLinesOfTodaysParseToWhatTheyParsedToOnMain) {
     double seg_mhz;
     uint32_t settle_us;
   };
+  // `settle_us` of a line with no ninth number is kScopeSettleAbsentUs and not 0: what `main`
+  // made of such a line was *the default*, and phase 3.17's task 01 moved the default and not the
+  // reading. The one line below that types a ninth number reads the number, as it always did.
+  const uint32_t absent = kScopeSettleAbsentUs;
   const Case cases[] = {
-      {"scope 863 870", 863.0, 870.0, 0, 0.0, 0, kScopeAggMax, 0.0, 0},
-      {"scope 150 960 2048", 150.0, 960.0, 2048, 0.0, 0, kScopeAggMax, 0.0, 0},
-      {"scope 863 870 250 39", 863.0, 870.0, 250, 39.0, 0, kScopeAggMax, 0.0, 0},
-      {"scope 863 870 250 39 500", 863.0, 870.0, 250, 39.0, 500, kScopeAggMax, 0.0, 0},
-      {"scope 863 870 250 39 500 mean", 863.0, 870.0, 250, 39.0, 500, kScopeAggMean, 0.0, 0},
-      {"scope 863 870 250 39 500 last", 863.0, 870.0, 250, 39.0, 500, kScopeAggLast, 0.0, 0},
-      {"scope 150 960 2048 467 0 max 5.6", 150.0, 960.0, 2048, 467.0, 0, kScopeAggMax, 5.6, 0},
+      {"scope 863 870", 863.0, 870.0, 0, 0.0, 0, kScopeAggMax, 0.0, absent},
+      {"scope 150 960 2048", 150.0, 960.0, 2048, 0.0, 0, kScopeAggMax, 0.0, absent},
+      {"scope 863 870 250 39", 863.0, 870.0, 250, 39.0, 0, kScopeAggMax, 0.0, absent},
+      {"scope 863 870 250 39 500", 863.0, 870.0, 250, 39.0, 500, kScopeAggMax, 0.0, absent},
+      {"scope 863 870 250 39 500 mean", 863.0, 870.0, 250, 39.0, 500, kScopeAggMean, 0.0, absent},
+      {"scope 863 870 250 39 500 last", 863.0, 870.0, 250, 39.0, 500, kScopeAggLast, 0.0, absent},
+      {"scope 150 960 2048 467 0 max 5.6", 150.0, 960.0, 2048, 467.0, 0, kScopeAggMax, 5.6,
+       absent},
       {"scope 150 960 2048 467 0 max 32 500", 150.0, 960.0, 2048, 467.0, 0, kScopeAggMax, 32.0,
        500},
       {"scope 779.618 959.618 0 467 1000", 779.618, 959.618, 0, 467.0, 1000, kScopeAggMax, 0.0,
-       0},
-      {"scope 869 870.2 250 4.8 1000", 869.0, 870.2, 250, 4.8, 1000, kScopeAggMax, 0.0, 0},
+       absent},
+      {"scope 869 870.2 250 4.8 1000", 869.0, 870.2, 250, 4.8, 1000, kScopeAggMax, 0.0, absent},
   };
   size_t checked = 0;
   for (const Case& c : cases) {
@@ -2533,23 +2732,25 @@ TEST(Scope, TheAckNamesTheRegulatorAndTheGainOnlyWhenItsOwnWordWasOnTheLine) {
   ScopeRequest r = request(863.0, 870.0);
   ScopePlan plan;
 
-  // No word: the line of docs/noisescope.md section 5, byte for byte, as before this task.
+  // No word: the line of docs/noisescope.md section 5, byte for byte, with the settle this task
+  // put on every `ack` and nothing else after it.
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
-  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms", msg);
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=12ms"
+               " settle=500us", msg);
 
   // The regulator alone, and then the gain alone: each named only when its own word was given.
   r.reg = kScopeRegulatorLdo;
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
-  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"
-               " reg=ldo", msg);
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=12ms"
+               " settle=500us reg=ldo", msg);
   r.reg = kScopeRegulatorBuild;
   r.gain = kScopeGainNoBoost;
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
-  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"
-               " gain=noboost", msg);
+  EXPECT_STREQ("n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=12ms"
+               " settle=500us gain=noboost", msg);
 
   // Both, and after what task 02 added - the width and the settle first, then the two words.
   r = request(779.618, 959.618);
@@ -2563,7 +2764,7 @@ TEST(Scope, TheAckNamesTheRegulatorAndTheGainOnlyWhenItsOwnWordWasOnTheLine) {
   EXPECT_STREQ("n=386 step=466.3212kHz rbw=467.0kHz seg=33 cov=1.001 interval=0ms sweep=19ms"
                " segw=5.6MHz settle=500us reg=dcdc gain=boost", msg);
 
-  // A word with no width and no settle: the first line, and the words after it.
+  // A word with no width: no `segw=`, the settle, and then the words.
   r.seg_mhz = 0.0;
   r.settle_us = 0;
   r.gain = kScopeGainNoBoost;
@@ -2571,7 +2772,7 @@ TEST(Scope, TheAckNamesTheRegulatorAndTheGainOnlyWhenItsOwnWordWasOnTheLine) {
   ASSERT_TRUE(planScope(r, plan));
   scopeAckMessage(plan, msg, sizeof(msg));
   EXPECT_EQ(nullptr, std::strstr(msg, "segw=")) << msg;
-  EXPECT_NE(nullptr, std::strstr(msg, " reg=ldo gain=noboost")) << msg;
+  EXPECT_NE(nullptr, std::strstr(msg, " settle=0us reg=ldo gain=noboost")) << msg;
 
   // The widest `ack` there is still fits in the message an `ack` line may carry.
   ScopeRequest widest = request(kRadioLowMhz, kRadioHighMhz);

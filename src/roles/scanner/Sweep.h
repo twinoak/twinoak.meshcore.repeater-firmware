@@ -299,6 +299,26 @@ constexpr double kScopeSegmentMhz = 32.0;
 // of the 8 s watchdog, with every segment a separate pass of loop() besides.
 constexpr uint32_t kScopeSettleMaxUs = 20000;
 
+// **And what a `scope` that names no settle gets.** Measured on the unit at Bellevue over four
+// NoiseScope sessions, one unit (tasks/phase-3.16/FOLLOWUPS.md, *What the garden said: sessions 6
+// to 9*): with no settle the first six points of each segment of `scope 840 900 0 467 1000` read
+// -64.5, -74.5, -74.5, -78.5, -88.5 and -91.5 dBm in the frames holding the neighbour's carrier
+// at -33 dBm, and -98.5 where the floor is -104.5 in the frames without it; with `max 32 500`
+// they read the floor in both, and `max 32 2000` is no better. The block follows the segments at
+// every bandwidth from 467 down to 39 kHz, so it is not a frequency and it is not the site. What
+// it costs is sweeps: 29.1 a second with none, 28.0 with 500 us, 25.8 with 2 000, for two
+// segments at 467 kHz - which is why the number is 500 and not the larger one that also cures it.
+constexpr uint32_t kScopeSettleDefaultUs = 500;
+
+// **How a line says "no settle at all"**, and how absent is told from it - the one place either
+// is decided. `0` on the line is a settle asked for and is none, as it was before phase 3.17's
+// task 01; *no ninth number* is this value, which is what ScopeArgs and ScopeRequest carry until
+// something writes a number there and the one value planScope() turns into
+// kScopeSettleDefaultUs. It is deliberately above kScopeSettleMaxUs, so a request that reached
+// planScope() without being resolved cannot be mistaken for a legal settle - it is resolved
+// first and bounded after.
+constexpr uint32_t kScopeSettleAbsentUs = 0xFFFFFFFFu;
+
 // The radio's frequency unit is 32 MHz / 2^25, about 0.95 Hz; the fork asks for at least 100 Hz
 // a point and so does this.
 constexpr double kScopeMinStepKhz = 0.1;
@@ -460,9 +480,11 @@ struct ScopeRequest {
   // The widest a segment may be, in MHz: 0 is kScopeSegmentMhz, today's. Taken to a tenth of a
   // MHz, and refused below one step or above kScopeSegmentMhz.
   double seg_mhz = 0.0;
-  // How long the receiver stands on a segment's first point before the sweep that counts: 0 is
-  // today's arm, which stands there for the plugin's own two extra updates and no longer.
-  uint32_t settle_us = 0;
+  // How long the receiver stands on a segment's first point before the sweep that counts.
+  // kScopeSettleAbsentUs - this field left alone - is kScopeSettleDefaultUs, what a `scope` that
+  // names no settle gets; 0 is none at all, the arm as it was before phase 3.17's task 01, and
+  // only a `0` on the line asks for it.
+  uint32_t settle_us = kScopeSettleAbsentUs;
   // The regulator and the receive gain for this scope alone (phase 3.16's task 03). The words
   // `ldo`/`dcdc` and `boost`/`noboost` on the `scope` line, taken out of it wherever they stand;
   // the defaults are no word, which is the build's regulator and what `boost on|off` left.
@@ -485,7 +507,9 @@ struct ScopePlan {
   uint32_t segment_ms = 0;   // the longest one plugin call holds the chip
   uint32_t sweep_ms = 0;     // and the whole span, every segment of it, settles included
   double seg_mhz = kScopeSegmentMhz;  // the widest a segment of this plan may be, as taken
-  uint32_t settle_us = 0;             // and the settle before each segment's first reading
+  // And the settle before each segment's first reading, as taken: a real number of microseconds
+  // always - never kScopeSettleAbsentUs - because planScope() resolved it.
+  uint32_t settle_us = kScopeSettleDefaultUs;
   // What this scope asked the chip to be begun as, and nothing beyond this scope: the plan is
   // the only place either word is kept, so the mode after it begins the chip as it always did.
   ScopeRegulator reg = kScopeRegulatorBuild;
@@ -497,6 +521,10 @@ struct ScopePlan {
 // kScopeMinStepKhz, a negative bandwidth, an interval above kScopeIntervalMaxMs, a segment width
 // given and above kScopeSegmentMhz or narrower than one step, or a settle above
 // kScopeSettleMaxUs.
+//
+// **The settle is resolved here and nowhere else:** a request that carries kScopeSettleAbsentUs -
+// a `scope` line with no ninth number - is planned with kScopeSettleDefaultUs, and the bound is
+// then applied to the number that was taken.
 bool planScope(const ScopeRequest& request, ScopePlan& out);
 
 // Segment `index` of a plan (0 .. plan.segments - 1). False for an index the plan does not have.
@@ -608,8 +636,9 @@ void scopeCalibrationRange(const ScopePlan& plan, const ScopeSegment& seg, doubl
 // that write, so the plugin's own retune into point 0 is then a move of zero and its two extra
 // updates are spent on a synthesizer that has already settled.
 //
-// Nothing at all when the plan asked for no settle: a `scope` without the two numbers makes
-// exactly the calls it made before this task.
+// Nothing at all when the plan's settle is 0, which since phase 3.17's task 01 is a `0` typed on
+// the line and nothing else: that line makes exactly the calls a `scope` made before phase
+// 3.16's task 02.
 bool settleScopeSegment(ScopeArmRadio& radio, const ScopePlan& plan, const ScopeSegment& seg,
                         ScopeArmResult& out);
 
@@ -723,13 +752,15 @@ uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz,
 
 // What the `ack` of a `scope` that started carries: what was *taken*, which is not always what
 // was asked (docs/noisescope.md section 5). Here and not where the ack is sent, so that a test
-// can hold it to the byte - and the bytes of a `scope` asked for with neither a segment width nor
-// a settle are the ones this line had before phase 3.16's task 02: the two numbers are named only
-// when one of them is not the default.
+// can hold it to the byte.
+//
+// `segw=` is named only when the width is not kScopeSegmentMhz, as phase 3.16's task 02 left it.
+// **`settle=` is named on every `scope`**, because since phase 3.17's task 01 every `scope` has
+// one and a capture has to say whether its segments' first points stood: `settle=500us` for the
+// default and `settle=0us` for a line that asked for none.
 //
 // Phase 3.16's task 03 adds `reg=` and `gain=` after them, each named only when its own word was
-// on the line - so a `scope` asked for with none of the four words gets the line it got before
-// either task, byte for byte.
+// on the line.
 void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes);
 
 // And the sentence a request this firmware does not run is refused with, which names every bound

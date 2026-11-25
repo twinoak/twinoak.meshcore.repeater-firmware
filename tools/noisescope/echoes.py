@@ -100,6 +100,13 @@ INTERVAL_MAX_MS = 60000
 # task 02). A settle changes nothing inside a segment, so it changes no distance this tool reads -
 # it is carried because the ack names it and a reader of a table wants to know which line it was.
 SETTLE_MAX_US = 20000
+# And what a `scope` that names no settle gets (kScopeSettleDefaultUs, phase 3.17's task 01):
+# 500 microseconds, which is what four NoiseScope sessions on the unit at Bellevue measured the
+# block at a segment's first point away (tasks/phase-3.16/FOLLOWUPS.md, *What the garden said*).
+SETTLE_DEFAULT_US = 500
+# "No ninth number on the line", which `plan_scope()` turns into SETTLE_DEFAULT_US - `0` typed
+# there is none at all. kScopeSettleAbsentUs, and above SETTLE_MAX_US for the same reason.
+SETTLE_ABSENT_US = 0xFFFFFFFF
 # An RSSI register update takes about 1.6 ms / RBW in kHz, and a point is one update
 # (kScopeUpdateMsKhz, and the plugin's own comment in vendor/sx126x_spectrum/spectrum.asm).
 UPDATE_MS_KHZ = 1.6
@@ -222,8 +229,13 @@ class Segment(object):
                 "cal_hi_mhz": self.cal_hi_mhz}
 
 
-def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0, seg_mhz=0.0, settle_us=0):
-    """`planScope()`, line for line. None for a request this firmware does not run."""
+def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0, seg_mhz=0.0,
+               settle_us=SETTLE_ABSENT_US):
+    """`planScope()`, line for line. None for a request this firmware does not run.
+
+    `settle_us` is resolved here as the firmware resolves it: SETTLE_ABSENT_US - a line with no
+    ninth number - is SETTLE_DEFAULT_US, and only a `0` is none at all.
+    """
     if f1 <= f0 or not (RADIO_LOW_MHZ <= f0 <= RADIO_HIGH_MHZ):
         return None
     if not RADIO_LOW_MHZ <= f1 <= RADIO_HIGH_MHZ:
@@ -232,6 +244,8 @@ def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0, seg_mhz=0.0, settle
         return None
     if interval_ms > INTERVAL_MAX_MS:
         return None
+    if settle_us == SETTLE_ABSENT_US:
+        settle_us = SETTLE_DEFAULT_US
     if settle_us > SETTLE_MAX_US or settle_us < 0:
         return None
     if seg_mhz < 0.0:
@@ -299,6 +313,9 @@ def segments_of(plan):
 
 
 def plan_of_frame(f0_point_mhz, step_khz, points, rbw_khz, seg_mhz=0.0, settle_us=0):
+    # `settle_us` defaults to 0 and not to SETTLE_ABSENT_US on purpose: a frame carries no settle,
+    # and a capture with no `ack` to read one out of is a capture from a firmware that had no
+    # default - every line typed before phase 3.17's task 01 stood for no time at all.
     """The plan a `scope` frame came from.
 
     A frame carries the **first point's centre** and the step, not the span that was asked for
@@ -363,7 +380,7 @@ class ScopeRequest(object):
     """
 
     def __init__(self, f0, f1, points=0, rbw_khz=0.0, interval_ms=0, agg="max", seg_mhz=0.0,
-                 settle_us=0, regulator=None, gain=None):
+                 settle_us=SETTLE_ABSENT_US, regulator=None, gain=None):
         self.f0 = f0
         self.f1 = f1
         self.points = points
@@ -424,7 +441,7 @@ def parse_scope(line):
         interval_ms=(_as_u32(rest[4]) if len(rest) >= 5 else 0),
         agg=agg,
         seg_mhz=(_as_double(rest[6]) if len(rest) >= 7 else 0.0),
-        settle_us=(_as_u32(rest[7]) if len(rest) >= 8 else 0),
+        settle_us=(_as_u32(rest[7]) if len(rest) >= 8 else SETTLE_ABSENT_US),
         regulator=regulator, gain=gain)
 
 
@@ -1208,7 +1225,7 @@ def check_plans(path=PLAN_TABLE, out=sys.stdout):
         req = entry["request"]
         plan = plan_scope(req["f0"], req["f1"], points=req.get("points", 0),
                           rbw_khz=req.get("rbw_khz", 0.0), seg_mhz=req.get("seg_mhz", 0.0),
-                          settle_us=req.get("settle_us", 0))
+                          settle_us=req.get("settle_us", SETTLE_ABSENT_US))
         want = entry["plan"]
         if plan is None:
             out.write("FAIL %s: this firmware does not run that request\n" % name)
@@ -1216,7 +1233,8 @@ def check_plans(path=PLAN_TABLE, out=sys.stdout):
             continue
         problems = []
         for key, tol in (("points", 0), ("segments", 0), ("step_khz", 1e-9),
-                         ("rbw_khz", 1e-9), ("first_mhz", 1e-9), ("seg_mhz", 1e-9)):
+                         ("rbw_khz", 1e-9), ("first_mhz", 1e-9), ("seg_mhz", 1e-9),
+                         ("settle_us", 0)):
             got = getattr(plan, key)
             if abs(got - want[key]) > tol:
                 problems.append("%s %r, not %r" % (key, got, want[key]))
@@ -1652,8 +1670,9 @@ def _rule_said(row):
 def _asked_as(row):
     said = "%.3f to %.3f MHz, %d points, rbw %.1f kHz, %d segment(s)" % (
         row["f0"], row["f1"], row["points"], row["rbw_khz"], row["segments"])
-    if row["seg_mhz"] != SEGMENT_MHZ or row["settle_us"]:
-        said += ", segw %.1f MHz, settle %d us" % (row["seg_mhz"], row["settle_us"])
+    if row["seg_mhz"] != SEGMENT_MHZ:
+        said += ", segw %.1f MHz" % row["seg_mhz"]
+    said += ", settle %d us" % row["settle_us"]
     for name, value in (("reg", row["regulator"]), ("gain", row["gain"])):
         if value is not None:
             said += ", %s %s" % (name, value)

@@ -70,13 +70,25 @@ def frame_line(plan, dbm, seq=1, sps=476, agg="last", sweeps=1):
 
 
 def ack_line(plan):
-    """`scopeAckMessage()` (src/roles/scanner/Sweep.cpp): the two numbers of phase 3.16's task 02
-    are named only when one of them is not the default, so an ack of a line asked for as it was
-    asked for before that task is the line it always was."""
+    """`scopeAckMessage()` (src/roles/scanner/Sweep.cpp): `segw=` only when the width is not the
+    default, and `settle=` on **every** `scope` since phase 3.17's task 01 - every one of them has
+    a settle now, and a capture has to say which."""
     msg = ("n=%d step=%.4fkHz rbw=%.1fkHz seg=%d cov=%.3f interval=0ms sweep=%dms"
            % (plan.points, plan.step_khz, plan.rbw_khz, plan.segments, plan.cov, 1))
-    if plan.seg_mhz != echoes.SEGMENT_MHZ or plan.settle_us != 0:
-        msg += " segw=%.1fMHz settle=%dus" % (plan.seg_mhz, plan.settle_us)
+    if plan.seg_mhz != echoes.SEGMENT_MHZ:
+        msg += " segw=%.1fMHz" % plan.seg_mhz
+    msg += " settle=%dus" % plan.settle_us
+    return json.dumps({"t": "ack", "cmd": "scope", "ok": True, "msg": msg})
+
+
+def old_ack_line(plan):
+    """The ack of a firmware from before phase 3.17's task 01: no `settle=` at all.
+
+    A capture downloaded from a unit running 0.1.8 or earlier is read every day, so the reader has
+    to keep taking an ack that names no settle - and that is a `scope` that stood on nothing.
+    """
+    msg = ("n=%d step=%.4fkHz rbw=%.1fkHz seg=%d cov=%.3f interval=0ms sweep=%dms"
+           % (plan.points, plan.step_khz, plan.rbw_khz, plan.segments, plan.cov, 1))
     return json.dumps({"t": "ack", "cmd": "scope", "ok": True, "msg": msg})
 
 
@@ -189,7 +201,7 @@ def plan_of(spec):
     optional, so that a spec written before it is a spec still."""
     plan = echoes.plan_scope(spec["f0"], spec["f1"], points=spec["points"],
                              rbw_khz=spec["rbw_khz"], seg_mhz=spec.get("seg_mhz", 0.0),
-                             settle_us=spec.get("settle_us", 0))
+                             settle_us=spec.get("settle_us", echoes.SETTLE_ABSENT_US))
     assert plan is not None, spec
     return plan
 
@@ -612,7 +624,7 @@ class TheTwoNumbers(unittest.TestCase):
 
     WIDE = dict(f0=779.618, f1=959.618, points=0, rbw_khz=467.0)
 
-    def _plan(self, seg_mhz=0.0, settle_us=0, **spec):
+    def _plan(self, seg_mhz=0.0, settle_us=echoes.SETTLE_ABSENT_US, **spec):
         full = dict(self.WIDE)
         full.update(spec)
         plan = echoes.plan_scope(full["f0"], full["f1"], points=full["points"],
@@ -653,7 +665,8 @@ class TheTwoNumbers(unittest.TestCase):
                                            settle_us=echoes.SETTLE_MAX_US + 1))
 
     def test_the_ack_is_what_says_which_width_a_capture_was_taken_with(self):
-        """`segw=` and `settle=` of the ack, and 32 MHz when the line names neither."""
+        """`segw=` and `settle=` of the ack: no `segw=` when the width is the default, and a
+        `settle=` on every `scope` (phase 3.17's task 01)."""
         plan = self._plan(seg_mhz=5.6, settle_us=500)
         ack = json.loads(ack_line(plan))
         self.assertEqual(5.6, echoes.ack_seg_mhz(ack))
@@ -661,8 +674,34 @@ class TheTwoNumbers(unittest.TestCase):
         self.assertEqual(33, echoes.ack_segments(ack))
         today = json.loads(ack_line(self._plan()))
         self.assertIsNone(echoes.ack_seg_mhz(today), "a line asked for as it always was")
-        self.assertIsNone(echoes.ack_settle_us(today))
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, echoes.ack_settle_us(today),
+                         "and it stood 500 us on each segment's first point all the same")
         self.assertEqual(6, echoes.ack_segments(today))
+        # A line that asked for none says so, which is the whole reason the ack names it always.
+        none = json.loads(ack_line(self._plan(settle_us=0)))
+        self.assertEqual(0, echoes.ack_settle_us(none))
+        # And an ack from a firmware older than this task names none, which is also none.
+        old = json.loads(old_ack_line(self._plan()))
+        self.assertIsNone(echoes.ack_settle_us(old))
+
+    def test_a_line_with_no_ninth_number_is_planned_with_the_default_and_a_zero_is_none(self):
+        """`plan_scope()`'s half of kScopeSettleDefaultUs, and `parse_scope()`'s."""
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, self._plan().settle_us)
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, self._plan(settle_us=echoes.SETTLE_ABSENT_US)
+                         .settle_us)
+        self.assertEqual(0, self._plan(settle_us=0).settle_us)
+        self.assertEqual(2000, self._plan(settle_us=2000).settle_us)
+        # The line, as a session types it: no ninth number, and then `max 32 0`.
+        default = echoes.parse_scope("scope 840 900 0 467 1000")
+        self.assertEqual(echoes.SETTLE_ABSENT_US, default.settle_us)
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, default.plan.settle_us)
+        asked_none = echoes.parse_scope("scope 840 900 0 467 1000 max 32 0")
+        self.assertEqual(0, asked_none.settle_us)
+        self.assertEqual(0, asked_none.plan.settle_us)
+        self.assertEqual(32.0, asked_none.plan.seg_mhz)
+        # And the two are the same plan but for that: the row of scope_plans.json this pairs with.
+        self.assertEqual(default.plan.points, asked_none.plan.points)
+        self.assertEqual(default.plan.segments, asked_none.plan.segments)
 
     def test_a_capture_of_a_narrow_width_is_read_with_its_own_segments(self):
         """The whole point: seventeen segments of 23 points, not six of 65.
@@ -936,7 +975,8 @@ class TheFourWordsAndTheNewMembers(unittest.TestCase):
         bare = json.loads(ack_line(plain))
         bare["msg"] = str(bare["msg"]) + " reg=ldo"
         self.assertIsNone(echoes.ack_seg_mhz(bare))
-        self.assertIsNone(echoes.ack_settle_us(bare))
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, echoes.ack_settle_us(bare),
+                         "the settle is named on every scope since phase 3.17's task 01")
         self.assertEqual(6, echoes.ack_segments(bare))
 
     def test_a_capture_laid_out_by_the_ack_is_laid_out_the_same_with_the_words_on_it(self):
@@ -1017,7 +1057,8 @@ class TheGardensTable(unittest.TestCase):
         self.assertEqual(386, first["points"])
         self.assertEqual(6, first["segments"])
         self.assertEqual(32.0, first["seg_mhz"])
-        self.assertEqual(0, first["settle_us"])
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, first["settle_us"],
+                         "a step that named no settle stood 500 us on each first point")
         self.assertIsNone(first["regulator"])
         self.assertIsNone(first["gain"], "no word on the line is not `boost`")
         self.assertEqual(60, first["frames"])
@@ -1135,14 +1176,18 @@ class TheGardensTable(unittest.TestCase):
                         % (os.path.basename(path), obj["n"]))
 
     def test_every_step_of_the_four_garden_lists_is_a_scope_this_firmware_runs(self):
-        """The lines of tasks/phase-3.16/README.md's four lists, read by hunt.py's own reader."""
+        """The lines of tasks/phase-3.16/README.md's four lists, read by hunt.py's own reader.
+
+        Six steps each but garden-d, which lost one to make the room for `max 32 0` on its
+        reference line when phase 3.17's task 01 made 500 us the default.
+        """
         directory = os.path.join(os.path.dirname(os.path.abspath(echoes.__file__)), "lists")
-        for letter in ("a", "b", "c", "d"):
+        for letter, steps in (("a", 6), ("b", 6), ("c", 6), ("d", 5)):
             path = os.path.join(directory, "garden-%s.txt" % letter)
             self.assertTrue(os.path.isfile(path), path)
             sessions = hunt.read_sessions(path)
             self.assertEqual(1, len(sessions), path)
-            self.assertEqual(6, len(sessions[0].steps), path)
+            self.assertEqual(steps, len(sessions[0].steps), path)
             for step in sessions[0].steps:
                 request = echoes.parse_scope(step.command)
                 self.assertIsNotNone(request, "%s: %r" % (path, step.command))
@@ -1290,7 +1335,9 @@ class ThePairsSay(unittest.TestCase):
         pairs = read_steps(garden_capture([
             dict(spec=wide, rule="points", value=6),
             dict(spec=dict(wide, seg_mhz=11.0), rule="points", value=6),
-            dict(spec=dict(wide, settle_us=500), rule="points", value=6),
+            # `0` and not 500: since phase 3.17's task 01 the first step's own settle *is* 500,
+            # so the pair that differs in the settle alone is the default against none at all.
+            dict(spec=dict(wide, settle_us=0), rule="points", value=6),
         ]))[2]
         kinds = sorted(pair["kind"] for pair in pairs)
         self.assertEqual(["settle", "width"], kinds)
@@ -1298,7 +1345,7 @@ class ThePairsSay(unittest.TestCase):
             if pair["kind"] == "width":
                 self.assertEqual("32.0 MHz -> 11.0 MHz", pair["differ"])
             else:
-                self.assertEqual("0 us -> 500 us", pair["differ"])
+                self.assertEqual("500 us -> 0 us", pair["differ"])
 
     def test_a_pair_that_differs_in_two_things_is_no_pair_at_all(self):
         pairs = self._pairs([dict(spec=GARDEN_WIDE, rule="mhz", value=5.596),

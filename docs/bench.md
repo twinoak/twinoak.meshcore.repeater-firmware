@@ -1182,7 +1182,7 @@ decides whether any of the rest can be walked at all.
   of the matching network across the whole tuning range, and every later
   reading is worth more with it to subtract (`--baseline`). Keep the file with
   the site's notes. Peaks seen on the dummy load → ______. (bench, 2026-10-22, 479f482)
-- [ ] **p3.1-01, p3.16-01, p3.16-02, p3.16-03, p3.16-04** **The image check**, which is what the segments exist for.
+- [ ] **p3.1-01, p3.16-01, p3.16-02, p3.16-03, p3.16-04, p3.17-01** **The image check**, which is what the segments exist for.
   The tinySA Ultra as a generator at a known frequency, through an attenuator
   into the RAK, and a `scope` of a wide span around it: there should be **one
   peak where the generator is**, and nothing at the image (or no more than the

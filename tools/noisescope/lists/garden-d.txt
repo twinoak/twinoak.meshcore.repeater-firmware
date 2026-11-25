@@ -3,36 +3,39 @@
 #   python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-d.txt
 #
 # A NoiseScope session's program for the unit at Bellevue (tasks/phase-3.16/README.md, *The garden
-# instead of the bench*). **It needs a release carrying phase 3.16's task 02** - `scope`'s seventh
-# number, how long the receiver stands on a segment's first point before the reading that counts -
-# and task 03 for `us` and `dev` to be in the frames.
+# instead of the bench*). **It needs a release carrying phase 3.17's task 01** - the settle a
+# `scope` gets when it names none, which is 500 us - and task 03 of the pile before it for `us`
+# and `dev` to be in the frames.
 #
-# The same 60 MHz as session C, in today's segments, with the settle moved: none, 100, 500 and
-# 2 000 microseconds. A hop of 10 MHz takes the synthesizer 30 us by the maker's own table and a
-# segment's first point is up to 16 MHz from where the receiver stands, while the plugin gives that
-# jump two RSSI updates - 6.9 us at 467 kHz. So if the block *at* a segment's first point is the
-# synthesizer still on its way, a settle of 100 us is already enough to see it go; 2 000 is there
-# to show that more buys nothing.
+# The same 60 MHz as session C, in today's segments, with the settle moved. Three of these lines
+# were run as session 9 on 25 November and they are what the default rests on: with no settle the
+# first six points of each segment read -64.5, -74.5, -74.5, -78.5, -88.5 and -91.5 dBm in the
+# frames holding the neighbour at -33 dBm, and -98.5 where the floor is -104.5 in the frames
+# without it; with 500 us they read the floor in both, and 2 000 us is no better
+# (tasks/phase-3.16/FOLLOWUPS.md, *What the garden said: sessions 6 to 9*).
 #
-# `max 32` is today's width written out, so that each of these lines differs from the first in the
-# **settle alone** - which is what `echoes.py --steps` pairs them on.
+# So the list has turned round. **The line a session types now stands 500 us by itself**, and the
+# reference - the sweep that stands on nothing, which is what every line typed before phase 3.17's
+# task 01 did - is the one that has to say so, with `max 32 0`. Step 1 is that reference and step 2
+# is the plain line, and the two of them together are the proof of the default: the first six
+# points of each segment standing up in step 1 and at the floor in step 2.
 #
-# **This is the list with nothing to spare**: 384 bytes of 384 as it goes out, so a step's line
-# cannot grow by one character and the seconds cannot grow to three digits. If the hunt goes on,
-# the forty characters and the 384 bytes are what to raise (tasks/phase-3.16/FOLLOWUPS.md).
+# **What moved to make the room** (`max 32 0` is nine characters and the program was 384 bytes of
+# 384): the 100 us step is gone - it was never run, and the question it asked, *is 100 already
+# enough to see the block go*, is answered by 500 being enough and 2 000 buying nothing - and the
+# 500 us step is now the plain line, which is the same sweep in nine characters fewer. Five steps,
+# 328 bytes of 384; a step's line is still at most forty characters and the longest here is 39.
 #
 # the settle on a segment's first point
 --- garden-d
 seconds = 85
-# as it is asked today: 60 MHz at 467 kHz, two segments, no settle at all, the reference
-today = scope 840 900 0 467 1000
-# today's width, and 100 us on each segment's first point before the reading that counts
-settle-100 = scope 840 900 0 467 1000 max 32 100
-# and 500 us
-settle-500 = scope 840 900 0 467 1000 max 32 500
+# the reference: 60 MHz at 467 kHz, two segments, and no stand on either first point at all
+today-0 = scope 840 900 0 467 1000 max 32 0
+# the same line as a session types it, which stands the default 500 us on each first point
+default = scope 840 900 0 467 1000
 # and 2 000 us, where more can buy nothing the synthesizer has not already had
 settle-2000 = scope 840 900 0 467 1000 max 32 2000
-# 13 MHz at 58.6 kHz around the signal, one segment as it is asked today
-narrow = scope 863 876 250 58.6 1000
-# and the same 13 MHz with 1 000 us on its one first point
+# 13 MHz at 58.6 kHz around the signal, one segment, and no stand on its one first point
+narrow-0 = scope 863 876 250 58.6 1000 max 32 0
+# and the same 13 MHz with 1 000 us on it
 narrow-1000 = scope 863 876 250 58.6 1000 max 32 1000
