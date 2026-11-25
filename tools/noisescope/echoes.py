@@ -47,10 +47,13 @@ on a bench (tasks/phase-3.16/README.md, *The garden instead of the bench*): up t
 one file of lines an hour later, and a signal that is a neighbour's traffic and so is in some
 frames and not in others. `--steps` reads such a download as what it is - one table across the
 session's scopes in the order they were asked, with the regulator, the gain, the width, the settle,
-the time a point cost and the chip's error word in it - and then **every two of its scopes that
-differ in exactly one thing**, which is the only comparison a garden capture can carry. A pair of
-one shape begun in two places is the one that answers this pile's question, and it says *stays with
-the frequency*, *moves with the segments* or *cannot say*. `tools/noisescope/hunt.py --sessions`
+the mode, the time a point cost and the chip's error word in it - and then **every two of its
+scopes that differ in exactly one thing**, which is the only comparison a garden capture can carry.
+A pair of one shape begun in two places is the one that answers this pile's question, and it says
+*stays with the frequency*, *moves with the segments* or *cannot say*; a pair that differs in **the
+mode** - one scope swept by the radio program and one stepped by the host, `mode=stepped` in its
+`ack` - says for each echo of either whether the other has one at the same place, which is what
+phase 3.17's task 02 asks a session for. `tools/noisescope/hunt.py --sessions`
 is where the lists that make those pairs are checked and printed.
 
 Two things `--steps` reads differently from a bench capture, and nothing else:
@@ -107,6 +110,18 @@ SETTLE_DEFAULT_US = 500
 # "No ninth number on the line", which `plan_scope()` turns into SETTLE_DEFAULT_US - `0` typed
 # there is none at all. kScopeSettleAbsentUs, and above SETTLE_MAX_US for the same reason.
 SETTLE_ABSENT_US = 0xFFFFFFFF
+# The two ways a `scope` sweeps (phase 3.17's task 02): the radio program's, which is every line
+# typed before that task, and the one the host steps - `stepped` on the line, `mode=stepped` in the
+# `ack`, and a point that costs its whole stand instead of one RSSI update. The `ack` names the
+# mode only for a stepped scope, so a capture with no `mode=` in it is the plugin's.
+MODE_PLUGIN = "plugin"
+MODE_STEPPED = "stepped"
+SCOPE_MODE_WORDS = (MODE_STEPPED,)
+# The plugin's own latency table - how many RSSI updates after a retune a reading is still of the
+# frequency before (SX126xSpectrumScanner::latencyFor) - and the two extra updates it gives the one
+# point it reaches by a jump. A stepped point stands the settle in force and never less than
+# (L + 2) updates (`scopeSteppedStandUs()`, src/roles/scanner/Sweep.cpp).
+LATENCY_JUMP_UPDATES = 2
 # An RSSI register update takes about 1.6 ms / RBW in kHz, and a point is one update
 # (kScopeUpdateMsKhz, and the plugin's own comment in vendor/sx126x_spectrum/spectrum.asm).
 UPDATE_MS_KHZ = 1.6
@@ -147,6 +162,27 @@ def point_us(rbw_khz, update_ms_khz=UPDATE_MS_KHZ):
     return 1000.0 * update_ms_khz / rbw_khz
 
 
+def latency_updates(rbw_khz):
+    """`scopeLatencyUpdates()`: the plugin's own L for that bandwidth."""
+    if rbw_khz < 17.0:
+        return 2
+    if rbw_khz < 150.0:
+        return 3
+    return 4
+
+
+def stepped_stand_us(rbw_khz, settle_us):
+    """`scopeSteppedStandUs()`: what one stepped point stands, in microseconds.
+
+    The settle in force and never less than the latency's own time, which is (L + 2) updates of
+    UPDATE_MS_KHZ / RBW: 1 334 us at 4.8 kHz, 137 at 58.6, 21 at 467.
+    """
+    if rbw_khz <= 0.0:
+        return settle_us
+    updates = latency_updates(rbw_khz) + LATENCY_JUMP_UPDATES
+    return max(int(settle_us), int(math.ceil(updates * UPDATE_MS_KHZ * 1000.0 / rbw_khz)))
+
+
 def base64_length(raw_bytes):
     """`scopeBase64Length()`: what `raw_bytes` bytes come to, base64-encoded."""
     return 4 * ((int(raw_bytes) + 2) // 3)
@@ -174,7 +210,7 @@ class Plan(object):
     """`ScopePlan`: what the firmware would run for a request. Fields are that struct's."""
 
     def __init__(self, f0, f1, first_mhz, step_khz, rbw_khz, points, segments,
-                 seg_mhz=SEGMENT_MHZ, settle_us=0):
+                 seg_mhz=SEGMENT_MHZ, settle_us=0, mode=MODE_PLUGIN):
         self.f0 = f0
         self.f1 = f1
         self.first_mhz = first_mhz
@@ -184,6 +220,9 @@ class Plan(object):
         self.segments = segments
         self.seg_mhz = seg_mhz
         self.settle_us = settle_us
+        # Which way it was swept: the `ack`'s `mode=stepped`, or the plugin's for a capture whose
+        # ack says nothing - which is every capture made before phase 3.17's task 02.
+        self.mode = mode
 
     @property
     def step_mhz(self):
@@ -201,11 +240,17 @@ class Plan(object):
         """The centre of point `index` of the frame, in MHz."""
         return self.first_mhz + index * self.step_mhz
 
+    @property
+    def stand_us(self):
+        """What one point of this plan stands for, which is a stepped sweep's cost a point."""
+        return stepped_stand_us(self.rbw_khz, self.settle_us)
+
     def as_dict(self):
         return {"f0": self.f0, "f1": self.f1, "first_mhz": self.first_mhz,
                 "step_khz": self.step_khz, "rbw_khz": self.rbw_khz, "points": self.points,
                 "segments": self.segments, "cov": self.cov, "point_us": self.point_us,
-                "seg_mhz": self.seg_mhz, "settle_us": self.settle_us}
+                "seg_mhz": self.seg_mhz, "settle_us": self.settle_us, "mode": self.mode,
+                "stand_us": self.stand_us}
 
 
 class Segment(object):
@@ -230,7 +275,7 @@ class Segment(object):
 
 
 def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0, seg_mhz=0.0,
-               settle_us=SETTLE_ABSENT_US):
+               settle_us=SETTLE_ABSENT_US, mode=MODE_PLUGIN):
     """`planScope()`, line for line. None for a request this firmware does not run.
 
     `settle_us` is resolved here as the firmware resolves it: SETTLE_ABSENT_US - a line with no
@@ -289,7 +334,7 @@ def plan_scope(f0, f1, points=0, rbw_khz=0.0, interval_ms=0, seg_mhz=0.0,
 
     return Plan(f0=f0, f1=f1, first_mhz=f0 + step_mhz / 2.0, step_khz=step_khz, rbw_khz=rbw,
                 points=int(points), segments=int(segments), seg_mhz=width,
-                settle_us=int(settle_us))
+                settle_us=int(settle_us), mode=mode)
 
 
 def scope_segment(plan, index):
@@ -312,7 +357,8 @@ def segments_of(plan):
     return [scope_segment(plan, i) for i in range(plan.segments)]
 
 
-def plan_of_frame(f0_point_mhz, step_khz, points, rbw_khz, seg_mhz=0.0, settle_us=0):
+def plan_of_frame(f0_point_mhz, step_khz, points, rbw_khz, seg_mhz=0.0, settle_us=0,
+                  mode=MODE_PLUGIN):
     # `settle_us` defaults to 0 and not to SETTLE_ABSENT_US on purpose: a frame carries no settle,
     # and a capture with no `ack` to read one out of is a capture from a firmware that had no
     # default - every line typed before phase 3.17's task 01 stood for no time at all.
@@ -332,7 +378,7 @@ def plan_of_frame(f0_point_mhz, step_khz, points, rbw_khz, seg_mhz=0.0, settle_u
     f0 = f0_point_mhz - step_mhz / 2.0
     f1 = f0 + points * step_mhz
     return plan_scope(f0, f1, points=points, rbw_khz=rbw_khz, seg_mhz=seg_mhz,
-                      settle_us=settle_us)
+                      settle_us=settle_us, mode=mode)
 
 
 # --------------------------------------------------------------------------- a `scope` line
@@ -380,7 +426,7 @@ class ScopeRequest(object):
     """
 
     def __init__(self, f0, f1, points=0, rbw_khz=0.0, interval_ms=0, agg="max", seg_mhz=0.0,
-                 settle_us=SETTLE_ABSENT_US, regulator=None, gain=None):
+                 settle_us=SETTLE_ABSENT_US, regulator=None, gain=None, mode=MODE_PLUGIN):
         self.f0 = f0
         self.f1 = f1
         self.points = points
@@ -391,8 +437,9 @@ class ScopeRequest(object):
         self.settle_us = settle_us
         self.regulator = regulator
         self.gain = gain
+        self.mode = mode
         self.plan = plan_scope(f0, f1, points=points, rbw_khz=rbw_khz, interval_ms=interval_ms,
-                               seg_mhz=seg_mhz, settle_us=settle_us)
+                               seg_mhz=seg_mhz, settle_us=settle_us, mode=mode)
 
 
 def parse_scope(line):
@@ -415,8 +462,14 @@ def parse_scope(line):
     # The four words first and wherever they stand **after the two ends**, exactly as
     # `parseScope()` takes them, so that what is left is read as it was read before they existed.
     regulator = gain = None
+    mode = MODE_PLUGIN
     rest = list(words[1:3])
     for word in words[3:]:
+        if word in SCOPE_MODE_WORDS:
+            if mode != MODE_PLUGIN:
+                return None     # the word twice says nothing new (`kScopeWordRefusal`)
+            mode = word
+            continue
         if word in SCOPE_REGULATOR_WORDS:
             if regulator is not None:
                 return None     # one word of each pair at most
@@ -442,7 +495,7 @@ def parse_scope(line):
         agg=agg,
         seg_mhz=(_as_double(rest[6]) if len(rest) >= 7 else 0.0),
         settle_us=(_as_u32(rest[7]) if len(rest) >= 8 else SETTLE_ABSENT_US),
-        regulator=regulator, gain=gain)
+        regulator=regulator, gain=gain, mode=mode)
 
 
 # ----------------------------------------------------------------------------- the levels
@@ -498,6 +551,7 @@ class Scope(object):
         self.ack_settle_us = None
         self.ack_regulator = None  # `reg=ldo|dcdc` of the ack, or None: the line named no word
         self.ack_gain = None       # `gain=boost|noboost`, or None for the same reason
+        self.ack_mode = None       # `mode=stepped`, or None: the plugin's way, which says nothing
 
     @property
     def us(self):
@@ -560,6 +614,16 @@ def ack_seg_mhz(ack):
 def ack_settle_us(ack):
     """`settle=<n>us` of a `scope` ack's `msg`, or None."""
     return _ack_number(ack, "settle=", int, "us")
+
+
+def ack_mode(ack):
+    """`mode=stepped` of a `scope` ack's `msg`, or None when the line asked for no mode.
+
+    None is the plugin's way and not *unknown*: the ack names the mode only for a stepped scope
+    (`scopeAckMessage()`, src/roles/scanner/Sweep.cpp), so a capture made before phase 3.17's task
+    02 reads as what it is - the radio program's own sweep.
+    """
+    return _ack_word(ack, "mode=", SCOPE_MODE_WORDS)
 
 
 def ack_regulator(ack):
@@ -708,12 +772,14 @@ def read_capture(path_or_lines):
             current.ack_settle_us = ack_settle_us(pending_ack)
             current.ack_regulator = ack_regulator(pending_ack)
             current.ack_gain = ack_gain(pending_ack)
+            current.ack_mode = ack_mode(pending_ack)
             pending_ack = None
             # The width is the ack's or it is the default: it is the one thing of the plan a
             # frame cannot say, and laying the segments out wrong puts every echo in the wrong
             # one (phase 3.16's task 02).
             current.plan = plan_of_frame(*config, seg_mhz=(current.ack_seg_mhz or 0.0),
-                                         settle_us=(current.ack_settle_us or 0))
+                                         settle_us=(current.ack_settle_us or 0),
+                                         mode=(current.ack_mode or MODE_PLUGIN))
             if current.plan is None:
                 bad_frames += 1
                 current = None
@@ -1323,17 +1389,19 @@ def print_report(path, readings, skipped, bad_frames, out=sys.stdout):
 # `--over`, as they are everywhere else in this file, and a place is the same place in two scopes
 # when it is within **one step** of it.
 
-# What the two scopes of a pair must agree on, and the one thing they may differ in. A width or a
-# settle or either word changes no point and no step of a plan (phase 3.16's tasks 02 and 03), and
-# a span begun elsewhere with the same step keeps its point count - so the signature below is
-# equal in two scopes of a pair but for one field of PAIR_FIELDS.
-PAIR_FIELDS = ("first_point", "width", "settle", "regulator", "gain")
+# What the two scopes of a pair must agree on, and the one thing they may differ in. A width, a
+# settle, either word or the mode changes no point and no step of a plan (phase 3.16's tasks 02
+# and 03, phase 3.17's task 02), and a span begun elsewhere with the same step keeps its point
+# count - so the signature below is equal in two scopes of a pair but for one field of
+# PAIR_FIELDS.
+PAIR_FIELDS = ("first_point", "width", "settle", "regulator", "gain", "mode")
 PAIR_NAMES = {
     "first_point": "the first point",
     "width": "a segment's width",
     "settle": "the settle",
     "regulator": "the regulator",
     "gain": "the gain",
+    "mode": "the mode",
 }
 
 # How many echoes a scope needs before a shifted span is allowed to say anything. Two places and
@@ -1387,6 +1455,10 @@ def steps_rows(readings):
             "segments": plan.segments,
             "seg_mhz": plan.seg_mhz,
             "settle_us": plan.settle_us,
+            # Which way it was swept, and what one point of it stood for - the plugin's way
+            # spends one RSSI update a point and a stepped one its whole stand.
+            "mode": plan.mode,
+            "stand_us": plan.stand_us,
             "regulator": scope.ack_regulator,
             "gain": scope.ack_gain,
             "agg": scope.agg,
@@ -1425,6 +1497,7 @@ def _signature(reading):
         "settle": plan.settle_us,
         "regulator": reading.scope.ack_regulator,
         "gain": reading.scope.ack_gain,
+        "mode": plan.mode,
     }
 
 
@@ -1579,6 +1652,8 @@ def _pair_value(kind, reading):
         return "%.1f MHz" % reading.plan.seg_mhz
     if kind == "settle":
         return "%d us" % reading.plan.settle_us
+    if kind == "mode":
+        return reading.plan.mode
     if kind == "regulator":
         return _word(reading.scope.ack_regulator)
     if kind == "gain":
@@ -1601,9 +1676,9 @@ def pairs_of(readings):
     return out
 
 
-STEPS_HEADER = ("%4s %-17s %-7s %-5s %-4s %-6s %-7s %-5s %-8s %-7s %-4s %-6s %-11s %-7s "
+STEPS_HEADER = ("%4s %-17s %-7s %-5s %-4s %-6s %-7s %-7s %-5s %-8s %-7s %-4s %-6s %-11s %-7s "
                 "%-13s %-13s %s")
-STEPS_ROW = ("%4d %-17s %-7.1f %-5d %-4d %-6.1f %-7d %-5s %-8s %-7d %-4d %-6d %-11s %-7d "
+STEPS_ROW = ("%4d %-17s %-7.1f %-5d %-4d %-6.1f %-7d %-7s %-5s %-8s %-7d %-4d %-6d %-11s %-7d "
              "%-13s %-13s %s")
 
 
@@ -1614,15 +1689,16 @@ def print_steps(path, readings, skipped, bad_frames, out=sys.stdout):
     out.write("  %d scope(s) in the order they were asked; %d line(s) that are not a `scope` "
               "frame, %d frame(s) that would not read\n" % (len(rows), skipped, bad_frames))
     out.write("\n")
-    out.write(STEPS_HEADER % ("step", "span MHz", "rbw", "pts", "seg", "segw", "settle", "reg",
-                              "gain", "frames", "lit", "quiet", "rule", "places", "us a point",
-                              "1.6 | 0.94", "dev"))
+    out.write(STEPS_HEADER % ("step", "span MHz", "rbw", "pts", "seg", "segw", "settle", "mode",
+                              "reg", "gain", "frames", "lit", "quiet", "rule", "places",
+                              "us a point", "1.6 | 0.94", "dev"))
     out.write("\n")
     for row in rows:
         out.write(STEPS_ROW % (
             row["step"], "%.3f-%.3f" % (row["f0"], row["f1"]), row["rbw_khz"], row["points"],
-            row["segments"], row["seg_mhz"], row["settle_us"], _word(row["regulator"]),
-            _word(row["gain"]), row["frames"], row["lit_frames"], row["quiet_frames"],
+            row["segments"], row["seg_mhz"], row["settle_us"], row["mode"],
+            _word(row["regulator"]), _word(row["gain"]), row["frames"], row["lit_frames"],
+            row["quiet_frames"],
             _rule_said(row), len(row["places"]),
             _span_said(row["us_per_point_min"], row["us_per_point_max"]),
             "%.2f | %.2f" % (row["point_us_at_1_6"], row["point_us_at_0_94"]),
@@ -1635,9 +1711,10 @@ def print_steps(path, readings, skipped, bad_frames, out=sys.stdout):
             # steps of **one** span with no acks between them read as one scope. A download
             # carries every line the scanner sent, acks included; a capture that lost them is
             # worth saying out loud rather than reading wrong in silence.
-            out.write("  step %d carries no `ack`: its segment width, its settle, its regulator "
-                      "and its gain are unknown here and the default width was taken, and two "
-                      "steps of one span would have been read as this one scope\n" % row["step"])
+            out.write("  step %d carries no `ack`: its segment width, its settle, its mode, "
+                      "its regulator and its gain are unknown here and the default width "
+                      "and the plugin's own sweep were taken, and two steps of one span "
+                      "would have been read as this one scope\n" % row["step"])
     for row in rows:
         for note in row["notes"]:
             out.write("  step %d: %s\n" % (row["step"], note))
@@ -1673,6 +1750,8 @@ def _asked_as(row):
     if row["seg_mhz"] != SEGMENT_MHZ:
         said += ", segw %.1f MHz" % row["seg_mhz"]
     said += ", settle %d us" % row["settle_us"]
+    if row["mode"] != MODE_PLUGIN:
+        said += ", %s (%d us a point)" % (row["mode"], row["stand_us"])
     for name, value in (("reg", row["regulator"]), ("gain", row["gain"])):
         if value is not None:
             said += ", %s %s" % (name, value)

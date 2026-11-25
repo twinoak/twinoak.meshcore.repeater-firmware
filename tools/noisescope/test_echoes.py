@@ -71,13 +71,16 @@ def frame_line(plan, dbm, seq=1, sps=476, agg="last", sweeps=1):
 
 def ack_line(plan):
     """`scopeAckMessage()` (src/roles/scanner/Sweep.cpp): `segw=` only when the width is not the
-    default, and `settle=` on **every** `scope` since phase 3.17's task 01 - every one of them has
-    a settle now, and a capture has to say which."""
+    default, `settle=` on **every** `scope` since phase 3.17's task 01 - every one of them has a
+    settle now, and a capture has to say which - and `mode=` only for a stepped one, which is the
+    only way a capture says which of the two ways it was swept (phase 3.17's task 02)."""
     msg = ("n=%d step=%.4fkHz rbw=%.1fkHz seg=%d cov=%.3f interval=0ms sweep=%dms"
            % (plan.points, plan.step_khz, plan.rbw_khz, plan.segments, plan.cov, 1))
     if plan.seg_mhz != echoes.SEGMENT_MHZ:
         msg += " segw=%.1fMHz" % plan.seg_mhz
     msg += " settle=%dus" % plan.settle_us
+    if plan.mode != echoes.MODE_PLUGIN:
+        msg += " mode=%s" % plan.mode
     return json.dumps({"t": "ack", "cmd": "scope", "ok": True, "msg": msg})
 
 
@@ -197,11 +200,13 @@ NARROW = dict(f0=863.1, f1=876.1, points=250, rbw_khz=0.0)            # 250, 52.
 
 
 def plan_of(spec):
-    """The plan a spec asks for. `seg_mhz` and `settle_us` are phase 3.16's task 02's and are
-    optional, so that a spec written before it is a spec still."""
+    """The plan a spec asks for. `seg_mhz` and `settle_us` are phase 3.16's task 02's and `mode`
+    is phase 3.17's task 02's; all three are optional, so that a spec written before them is a
+    spec still."""
     plan = echoes.plan_scope(spec["f0"], spec["f1"], points=spec["points"],
                              rbw_khz=spec["rbw_khz"], seg_mhz=spec.get("seg_mhz", 0.0),
-                             settle_us=spec.get("settle_us", echoes.SETTLE_ABSENT_US))
+                             settle_us=spec.get("settle_us", echoes.SETTLE_ABSENT_US),
+                             mode=spec.get("mode", echoes.MODE_PLUGIN))
     assert plan is not None, spec
     return plan
 
@@ -1175,14 +1180,15 @@ class TheGardensTable(unittest.TestCase):
                         "%s: a real frame of %d points is longer than the bound"
                         % (os.path.basename(path), obj["n"]))
 
-    def test_every_step_of_the_four_garden_lists_is_a_scope_this_firmware_runs(self):
-        """The lines of tasks/phase-3.16/README.md's four lists, read by hunt.py's own reader.
+    def test_every_step_of_the_five_garden_lists_is_a_scope_this_firmware_runs(self):
+        """The lines of tasks/phase-3.16/README.md's lists, read by hunt.py's own reader.
 
         Six steps each but garden-d, which lost one to make the room for `max 32 0` on its
-        reference line when phase 3.17's task 01 made 500 us the default.
+        reference line when phase 3.17's task 01 made 500 us the default. garden-e is phase
+        3.17's task 02's own, and three of its six steps carry the word `stepped`.
         """
         directory = os.path.join(os.path.dirname(os.path.abspath(echoes.__file__)), "lists")
-        for letter, steps in (("a", 6), ("b", 6), ("c", 6), ("d", 5)):
+        for letter, steps in (("a", 6), ("b", 6), ("c", 6), ("d", 5), ("e", 6)):
             path = os.path.join(directory, "garden-%s.txt" % letter)
             self.assertTrue(os.path.isfile(path), path)
             sessions = hunt.read_sessions(path)
@@ -1359,6 +1365,132 @@ class ThePairsSay(unittest.TestCase):
         echoes.print_steps("(one scope)", readings, 0, 0, out=out)
         self.assertIn("no two scopes of this capture differ in exactly one thing",
                       out.getvalue())
+
+
+class TheModeOfAScope(unittest.TestCase):
+    """Phase 3.17's task 02: the two ways a `scope` sweeps, and what a capture says about them.
+
+    The word on the line, the `mode=` of the `ack`, the stand a stepped point costs, and the one
+    pair a session of the garden's list `garden-e` is read as - the same span the plugin's way and
+    stepped, which is the comparison that pile exists to make.
+    """
+
+    GARDEN_E_WIDE = dict(f0=800.0, f1=960.0, points=320, rbw_khz=467.0)
+
+    def test_a_line_with_the_word_is_stepped_and_one_without_it_is_the_plugins(self):
+        for text in ("scope 800 960 320 467 1000 stepped",
+                     "scope 800 960 stepped 320 467 1000",
+                     "scope 800 960 320 stepped 467 1000",
+                     "scope 800 960 320 467 1000 ldo stepped noboost"):
+            request = echoes.parse_scope(text)
+            self.assertIsNotNone(request, text)
+            self.assertEqual(echoes.MODE_STEPPED, request.mode, text)
+            self.assertEqual(echoes.MODE_STEPPED, request.plan.mode, text)
+            self.assertEqual(320, request.plan.points, text)
+            self.assertEqual(5, request.plan.segments, text)
+        plain = echoes.parse_scope("scope 800 960 320 467 1000")
+        self.assertEqual(echoes.MODE_PLUGIN, plain.mode)
+        self.assertEqual(echoes.MODE_PLUGIN, plain.plan.mode)
+        # The word twice says nothing new and is refused, as the firmware refuses it
+        # (`kScopeWordRefusal`).
+        self.assertIsNone(echoes.parse_scope("scope 800 960 stepped stepped"))
+        self.assertIsNone(echoes.parse_scope("scope 800 960 stepped 320 467 stepped"))
+
+    def test_the_word_changes_no_point_no_segment_and_no_bandwidth_of_a_plan(self):
+        plugin = plan_of(self.GARDEN_E_WIDE)
+        stepped = plan_of(dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED))
+        for field in ("points", "segments", "step_khz", "rbw_khz", "first_mhz", "seg_mhz",
+                      "settle_us"):
+            self.assertEqual(getattr(plugin, field), getattr(stepped, field), field)
+        self.assertEqual([one.as_dict() for one in echoes.segments_of(plugin)],
+                         [one.as_dict() for one in echoes.segments_of(stepped)])
+        self.assertEqual(echoes.MODE_PLUGIN, plugin.mode)
+        self.assertEqual(echoes.MODE_STEPPED, stepped.mode)
+
+    def test_what_a_stepped_point_stands_is_the_settle_or_the_plugins_own_latency(self):
+        # (L + 2) updates of 1.6 ms / RBW, with the plugin's own L: the three bandwidths the
+        # garden's lists use.
+        self.assertEqual(1334, echoes.stepped_stand_us(4.8, 0))
+        self.assertEqual(137, echoes.stepped_stand_us(58.6, 0))
+        self.assertEqual(21, echoes.stepped_stand_us(467.0, 0))
+        self.assertEqual(1334, echoes.stepped_stand_us(4.8, echoes.SETTLE_DEFAULT_US),
+                         "the latency is longer than the default at the narrowest filter")
+        self.assertEqual(500, echoes.stepped_stand_us(58.6, echoes.SETTLE_DEFAULT_US))
+        self.assertEqual(echoes.SETTLE_MAX_US,
+                         echoes.stepped_stand_us(467.0, echoes.SETTLE_MAX_US))
+        self.assertEqual((2, 3, 4), (echoes.latency_updates(4.8), echoes.latency_updates(58.6),
+                                     echoes.latency_updates(467.0)))
+        # And a plan says what one of its own points stands for, which is what a stepped sweep
+        # costs a point where the plugin's costs one RSSI update.
+        stepped = plan_of(dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED))
+        self.assertEqual(500, stepped.stand_us)
+        self.assertAlmostEqual(3.4261, stepped.point_us, places=4)
+
+    def test_a_capture_says_which_way_it_was_made_in_its_ack_and_nowhere_else(self):
+        self.assertEqual("stepped", echoes.ack_mode({"msg": "n=320 settle=500us mode=stepped"}))
+        self.assertIsNone(echoes.ack_mode({"msg": "n=320 settle=500us"}),
+                          "no `mode=` is the plugin's own sweep and not an unknown")
+        self.assertIsNone(echoes.ack_mode({"msg": "n=320 settle=500us mode=whatever"}))
+        self.assertIsNone(echoes.ack_mode(None))
+        rows = read_steps(garden_capture([
+            dict(spec=self.GARDEN_E_WIDE, rule="points", value=12),
+            dict(spec=dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED), rule="points",
+                 value=12),
+        ]))[1]
+        self.assertEqual([echoes.MODE_PLUGIN, echoes.MODE_STEPPED],
+                         [row["mode"] for row in rows])
+        self.assertEqual([500, 500], [row["stand_us"] for row in rows])
+        # The table prints it, and the line under it says the mode and what a point stood for.
+        readings = read_steps(garden_capture([
+            dict(spec=dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED), rule="points",
+                 value=12)]))[0]
+        out = io.StringIO()
+        echoes.print_steps("(stepped)", readings, 0, 0, out=out)
+        text = out.getvalue()
+        self.assertIn("mode", text.splitlines()[3], "the table has a column for it")
+        self.assertIn("stepped (500 us a point)", text)
+
+    def test_a_step_that_lost_its_ack_is_read_as_the_plugins_way_and_says_so(self):
+        lines = [line for line in garden_capture([
+            dict(spec=dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED), rule="points",
+                 value=12)]) if '"ack"' not in line]
+        readings, rows = read_steps(lines)[:2]
+        self.assertEqual([echoes.MODE_PLUGIN], [row["mode"] for row in rows])
+        out = io.StringIO()
+        echoes.print_steps("(no ack)", readings, 0, 0, out=out)
+        self.assertIn("its mode", out.getvalue())
+
+    def test_the_two_ways_of_one_span_are_one_pair_and_the_echoes_of_each_are_counted(self):
+        # `garden-e`'s own comparison: the wide span the plugin's way, with the four echoes a
+        # session reads, and the same span stepped with none of them. The pair names the mode and
+        # counts the places each has that the other does not - and gives no verdict, because what
+        # a mode *means* is the unit's to say.
+        places = (816.0, 845.0, 887.7, 912.0)
+        pairs = read_steps(garden_capture([
+            dict(spec=self.GARDEN_E_WIDE, places_mhz=places),
+            dict(spec=dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED), places_mhz=()),
+        ]))[2]
+        self.assertEqual(1, len(pairs))
+        pair = pairs[0]
+        self.assertEqual("mode", pair["kind"])
+        self.assertEqual("the mode", echoes.PAIR_NAMES[pair["kind"]])
+        self.assertEqual("plugin -> stepped", pair["differ"])
+        self.assertNotIn("verdict", pair)
+        self.assertEqual(len(places), len(pair["only_first"]))
+        self.assertEqual([], pair["only_second"])
+        self.assertEqual([], pair["both"])
+        out = io.StringIO()
+        echoes.print_pairs(pairs, out=out)
+        self.assertIn("the mode, steps 1 and 2 (plugin -> stepped)", out.getvalue())
+
+    def test_two_scopes_that_differ_in_the_mode_and_the_settle_are_no_pair(self):
+        pairs = read_steps(garden_capture([
+            dict(spec=self.GARDEN_E_WIDE, places_mhz=(816.0, 845.0, 912.0)),
+            dict(spec=dict(self.GARDEN_E_WIDE, mode=echoes.MODE_STEPPED, settle_us=0),
+                 places_mhz=(816.0, 845.0, 912.0)),
+        ]))[2]
+        self.assertEqual([], pairs)
+
 
 if __name__ == "__main__":
     unittest.main()

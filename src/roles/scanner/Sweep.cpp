@@ -301,6 +301,19 @@ bool scopeAggOf(const char* word, ScopeAgg& out) {
   return false;
 }
 
+const char* scopeModeName(ScopeMode mode) {
+  return mode == kScopeModeStepped ? "stepped" : "";
+}
+
+bool scopeModeOf(const char* word, ScopeMode& out) {
+  if (word == nullptr) return false;
+  if (strcmp(word, "stepped") == 0) {
+    out = kScopeModeStepped;
+    return true;
+  }
+  return false;
+}
+
 const char* scopeRegulatorName(ScopeRegulator reg) {
   switch (reg) {
     case kScopeRegulatorLdo: return "ldo";
@@ -362,6 +375,8 @@ const char* scopeArmCallName(ScopeArmCall call) {
     case kScopeArmSweep: return "sweep";
     case kScopeArmReload: return "reload";
     case kScopeArmSettle: return "settle";
+    case kScopeArmPoint: return "point";
+    case kScopeArmRead: return "read";
     default: return "";
   }
 }
@@ -575,6 +590,37 @@ uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz, uint32
   return uint32_t(ceil(ms));
 }
 
+uint8_t scopeLatencyUpdates(double rbw_khz) {
+  // The plugin's own three numbers (SX126xSpectrumScanner::latencyFor, which is private there).
+  if (rbw_khz < 17.0) return 2;
+  if (rbw_khz < 150.0) return 3;
+  return 4;
+}
+
+uint32_t scopeSteppedStandUs(double rbw_khz, uint32_t settle_us) {
+  if (rbw_khz <= 0.0) return settle_us;
+  // The latency's own time: the updates a reading needs to be of the frequency just written, at
+  // kScopeUpdateMsKhz / RBW each, rounded up to the microsecond.
+  const double updates = double(scopeLatencyUpdates(rbw_khz)) + double(kScopeLatencyJumpUpdates);
+  const double us = ceil(updates * kScopeUpdateMsKhz * 1000.0 / rbw_khz);
+  const uint32_t floor_us = us <= 0.0 ? 0u : uint32_t(us);
+  return settle_us > floor_us ? settle_us : floor_us;
+}
+
+uint32_t scopeSteppedSweepMs(uint16_t points, double rbw_khz, uint32_t settle_us) {
+  if (rbw_khz <= 0.0) return 0;
+  const double us = double(points) * double(scopeSteppedStandUs(rbw_khz, settle_us));
+  return uint32_t(ceil(us / 1000.0));
+}
+
+uint16_t scopeSteppedSlicePoints(double rbw_khz, uint32_t settle_us) {
+  const uint32_t stand_us = scopeSteppedStandUs(rbw_khz, settle_us);
+  if (stand_us == 0) return kScopePluginMaxPoints;  // nothing to wait for: the whole segment
+  const uint32_t points = (kScopeSteppedSliceMs * 1000u) / stand_us;
+  if (points < 1u) return 1u;  // a point is never cut in half, however long its stand is
+  return points > kScopePluginMaxPoints ? kScopePluginMaxPoints : uint16_t(points);
+}
+
 uint16_t scopeSweepsPerSecondX10(uint32_t sweeps, uint32_t elapsed_ms) {
   if (elapsed_ms == 0) return 0;
   const uint64_t x10 = (uint64_t(sweeps) * 10000u) / elapsed_ms;
@@ -657,11 +703,25 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   // plan - they are what the chip is begun as for this scope, and the `ack` names them.
   out.reg = request.reg;
   out.gain = request.gain;
+  // And which way it is swept, which changes no point and no segment either - only the two
+  // durations below, because a stepped point costs its stand and a plugin point one RSSI update.
+  out.mode = request.mode;
   const uint32_t floor_ms = scopeIntervalFloorMs(out.points, request.sink_baud);
   out.interval_ms = request.interval_ms > floor_ms ? request.interval_ms : floor_ms;
   // The longest segment, which is the first ones when the points do not divide evenly.
-  out.segment_ms = scopeSegmentMs(uint16_t((points + segments - 1u) / segments), rbw_khz);
-  out.sweep_ms = scopeSweepMs(out.points, out.segments, rbw_khz, out.settle_us);
+  const uint16_t longest_segment = uint16_t((points + segments - 1u) / segments);
+  if (out.mode == kScopeModeStepped) {
+    // A stepped sweep holds the loop for one slice at a time and no longer (kScopeSteppedSliceMs),
+    // and a slice is never more than the segment the cursor is in; the sweep is the points times
+    // what a point stands for.
+    const uint16_t slice = scopeSteppedSlicePoints(rbw_khz, out.settle_us);
+    out.segment_ms = scopeSteppedSweepMs(slice < longest_segment ? slice : longest_segment,
+                                         rbw_khz, out.settle_us);
+    out.sweep_ms = scopeSteppedSweepMs(out.points, rbw_khz, out.settle_us);
+  } else {
+    out.segment_ms = scopeSegmentMs(longest_segment, rbw_khz);
+    out.sweep_ms = scopeSweepMs(out.points, out.segments, rbw_khz, out.settle_us);
+  }
   return true;
 }
 
@@ -671,7 +731,7 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
 // says nothing new, so either is a line nobody meant: the words are not positional and a session
 // has forty characters, which is where a typo of this kind comes from.
 const char kScopeWordRefusal[] =
-    "refused: ldo or dcdc, boost or noboost - one word of each pair at most,"
+    "refused: ldo or dcdc, boost or noboost, stepped - one word of each at most,"
     " anywhere after the two ends";
 
 const char kScopeRefusal[] =
@@ -707,6 +767,13 @@ void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes) {
     if (more <= 0 || size_t(more) >= bytes - at) return;
     at += size_t(more);
   }
+  // And the mode, named only when the line carried `stepped`: a `scope` swept the plugin's way
+  // says nothing about a mode, so its `ack` is the one phase 3.17's task 01 left to the byte.
+  if (plan.mode != kScopeModePlugin) {
+    const int more = snprintf(out + at, bytes - at, " mode=%s", scopeModeName(plan.mode));
+    if (more <= 0 || size_t(more) >= bytes - at) return;
+    at += size_t(more);
+  }
   // And the two words of phase 3.16's task 03, each named only when its own word was on the
   // line: a `scope` with none of the four gets the line above and nothing after it.
   if (plan.reg != kScopeRegulatorBuild) {
@@ -736,6 +803,74 @@ bool scopeSegment(const ScopePlan& plan, uint16_t index, ScopeSegment& out) {
   // last's, each seen through a filter half a bandwidth wide on either side.
   out.cal_lo_mhz = out.first_mhz - half_rbw_mhz;
   out.cal_hi_mhz = out.first_mhz + double(count - 1) * step_mhz + half_rbw_mhz;
+  return true;
+}
+
+// ----------------------------------------------------------- a sweep the host steps, in slices
+
+void SteppedScope::restart() {
+  segment_ = 0;
+  point_ = 0;
+  armed_ = 0xFFFF;
+  mid_ = false;
+}
+
+bool SteppedScope::slice(ScopeArmRadio& radio, const ScopePlan& plan, ScopeCalibration& cal,
+                         ScopeAccumulator& acc, ScopeSweepTime& time, ScopeArmResult& out,
+                         bool& whole) {
+  whole = false;
+  out = ScopeArmResult();
+  ScopeSegment seg;
+  if (!scopeSegment(plan, segment_, seg)) return false;  // kScopeArmNone: not a segment at all
+  // The segment the cursor has just reached, armed exactly as a plugin sweep arms it - which is
+  // also what puts the receiver in continuous receive at the plan's bandwidth and stands the
+  // plan's settle on the first point (armScopeSegment, and the header above).
+  if (armed_ != segment_) {
+    if (!armScopeSegment(radio, plan, seg, cal, out)) return false;
+    armed_ = segment_;
+    point_ = 0;
+  }
+  const uint32_t stand_us = scopeSteppedStandUs(plan.rbw_khz, plan.settle_us);
+  const uint16_t slice_points = scopeSteppedSlicePoints(plan.rbw_khz, plan.settle_us);
+  const double step_mhz = plan.step_khz / 1000.0;
+  // The points of this slice, timed together: `us` and `usx` of a stepped frame are the whole
+  // sweep's stepping, added slice by slice, and no arm is in them - as no arm is in a plugin
+  // frame's (ScopeSweepTime, above).
+  const uint32_t started_us = radio.nowUs();
+  for (uint16_t done = 0; done < slice_points && point_ < seg.points; done++) {
+    // The frequency the chip's own way, the stand, and one reading of it. The stand is made with
+    // the seam's delay and never by reading the clock: micros() steps by 977 us on this board.
+    const int st = radio.setFrequency(seg.first_mhz + double(point_) * step_mhz);
+    if (st != 0) {
+      out.failed = kScopeArmPoint;
+      out.code = st;
+      return false;
+    }
+    radio.settle(stand_us);
+    uint8_t level = kScopeNoReading;
+    const int read = radio.readLevel(level);
+    if (read != 0) {
+      out.failed = kScopeArmRead;
+      out.code = read;
+      return false;
+    }
+    acc.add(uint16_t(seg.first + point_), &level, 1);
+    mid_ = true;
+    point_++;
+  }
+  time.segment(radio.nowUs() - started_us);  // unsigned: a clock that wrapped is the difference
+  if (point_ < seg.points) return true;  // the rest of this segment in the next pass of loop()
+  segment_++;
+  point_ = 0;
+  if (segment_ < plan.segments) return true;  // and the rest of the span after that
+  // The last point of the last segment: the sweep is whole, and the next one begins at segment 0.
+  segment_ = 0;
+  mid_ = false;
+  // A plan of more than one segment comes back to segment 0 from the other end of the span, so it
+  // is armed again - as a plugin sweep arms it again. A plan of one segment stays armed: every
+  // point of it stands for itself, so there is nothing a re-arm would add.
+  if (plan.segments > 1) armed_ = 0xFFFF;
+  whole = true;
   return true;
 }
 

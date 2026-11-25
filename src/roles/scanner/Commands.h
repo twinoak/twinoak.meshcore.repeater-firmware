@@ -133,6 +133,9 @@ struct ScopeArgs {
   uint32_t settle_us = kScopeSettleAbsentUs;
   ScopeRegulator reg = kScopeRegulatorBuild;  // no word = the build's regulator
   ScopeGain gain = kScopeGainAsLeft;          // no word = the gain `boost on|off` left
+  // And which way this one scope is swept: no word is the plugin's, `stepped` is the host's
+  // (phase 3.17's task 02). Taken wherever it stands after the two ends, as the four above are.
+  ScopeMode mode = kScopeModePlugin;
 };
 
 // `why`, when it is not null, is the sentence a refusal is answered with - kScopeWordRefusal for

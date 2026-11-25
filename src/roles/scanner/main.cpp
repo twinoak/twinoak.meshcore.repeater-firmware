@@ -271,7 +271,7 @@ void handleCommand(char* line, Source from) {
         char msg[kMaxAckMessageBytes];
         snprintf(msg, sizeof(msg),
                  "scope needs the radio ROM '%s' and this chip says '%s'; nothing was uploaded -"
-                 " use sweep for a stepped spectrum instead",
+                 " use sweep instead - `stepped` needs this ROM too",
                  kScopeRom, radio::rom());
         g_lines.err(msg);
         g_lines.ack(name, false, "unsupported radio rom; sweep is the fallback");
@@ -288,6 +288,7 @@ void handleCommand(char* line, Source from) {
       request.settle_us = args.settle_us;
       request.reg = args.reg;
       request.gain = args.gain;
+      request.mode = args.mode;  // the plugin's way, or the one the host steps (`stepped`)
       // The sink's own floor: the Walter's UART is 115200 baud and a frame has to fit inside a
       // fraction of the interval, while USB CDC is asked for every sweep there is.
       request.sink_baud = (from == kFromWalter) ? uint32_t(WALTER_BAUD) : 0u;
