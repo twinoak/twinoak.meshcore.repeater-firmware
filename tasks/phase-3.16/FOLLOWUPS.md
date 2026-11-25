@@ -2,7 +2,7 @@
 
 Items for a later task of this phase are tagged with it. Only the reviewer ticks an item.
 
-- [ ] **[after the tables] The default.** Which width and settle `scope` takes when none is
+- [ ] **[next, offered: 500 µs, see *What the garden said*] The default.** Which width and settle `scope` takes when none is
   given, and meshmaster.dk's proposal for the wide span.
 - [ ] **[later] Two layouts and the lower reading.** A sweep made twice with its segments
   begun in different places, each point keeping the lower of the two: an echo that follows
@@ -51,7 +51,7 @@ bench's.
   settle is the frequency written to the first point with the receiver already in receive,
   then a wait; a one-point sweep could not be used, because `setSweep` itself puts the
   receiver back at the centre.
-- [ ] **[the bench] Not known: whether the chip takes a frequency while it is in continuous
+- [x] **[answered by session 9: it does] Not known: whether the chip takes a frequency while it is in continuous
   receive.** The plugin does the same write all sweep long. If it does not, the settle
   changes nothing and the table shows that.
 - [ ] **[later] Nothing bounds segments times settle:** a legal line can plan a sweep of 41 s,
@@ -74,7 +74,7 @@ not read. Page numbers are Rev 2.2's.
   55 µs at 58.6 kHz. So at the wide filters the first readings of a segment are taken while
   the synthesizer is still on its way, by the maker's own number. A settle of 50 to 100 µs is
   the first thing for the bench to try; 02's list starts at 100.
-- [ ] **[the bench] In receive the chip's DC-DC converter is clocked from the synthesizer, at
+- [x] **[answered by session 7: the LDO changes nothing] In receive the chip's DC-DC converter is clocked from the synthesizer, at
   about 5 MHz, and the divider is worked out again only when `SetRfFrequency` is called**
   (section 5.1, p.34). The plugin retunes by writing the frequency registers, so never. A
   switching regulator at about 5 MHz is a second thing that could make a comb, and it would
@@ -101,7 +101,7 @@ not read. Page numbers are Rev 2.2's.
 
 Sections 8, 9, 13 and 15 read from the PDF. Page numbers are Rev 1.2's.
 
-- [ ] **[03, then the garden's session B] The radio runs on its DC-DC converter here, and that converter
+- [x] **[answered by session 7: not the DC-DC] The radio runs on its DC-DC converter here, and that converter
   switches at about 5 MHz off the synthesizer** (5.1, p.32). `SX126X_USE_REGULATOR_LDO` is
   defined nowhere in this repository, so `beginPlugin` asks for the DC-DC. Looked at again
   with that in mind, the echoes of 23 November lie near multiples of 5 MHz from the
@@ -113,7 +113,7 @@ Sections 8, 9, 13 and 15 read from the PDF. Page numbers are Rev 1.2's.
   measurements can: the span begun 7 MHz lower (01's list has it), and the same sweep with
   the radio on its LDO. The second needs a word the scanner has not got: the regulator,
   switched as `boost` is.
-- [ ] **[03] The chip says when its synthesizer lost lock:** `GetDeviceErrors`
+- [x] **[done in 03; `0000` in sessions 7 to 9] The chip says when its synthesizer lost lock:** `GetDeviceErrors`
   has `PLL_LOCK_ERR` (bit 6) and `PLL_CALIB_ERR` (bit 2) beside the `IMG_CALIB_ERR` this
   firmware already reads (13.6.1, table 13-85). Read after a sweep, they would say whether
   the plugin's retunes ever leave the loop unlocked.
@@ -148,7 +148,7 @@ compared word for word with Rev 1.2's. Page numbers here are Rev 2.2's.
   below. The DC-DC converter's clock, the calibration's sentence on the synthesizer, the hop
   time, the error bits and the four known limitations are as they were. Rev 2.2 speaks for
   neither reading of the echoes more than Rev 1.2 did.
-- [ ] **[03, then the garden's session B] The RSSI's own times, by bandwidth** (13.5.4, table 13-82, p.101-102;
+- [x] **[answered by session 7: 1.6 ms / RBW holds] The RSSI's own times, by bandwidth** (13.5.4, table 13-82, p.101-102;
   new). Two columns for GFSK: from receive begun (BUSY falling) to the first value, and from
   one value to the next. At 467 kHz 30 µs and 2 µs; at 58.6 kHz 197 and 16; at 9.7 kHz 1 152
   and 96; at 4.8 kHz 2 295 and 192. So a value every 0.94 ms / RBW in kHz, and the first one
@@ -184,7 +184,7 @@ compared word for word with Rev 1.2's. Page numbers here are Rev 2.2's.
 Thomas asked for the rest of the hunt to be made on the unit at Bellevue and not on a bench.
 Tasks 03 and 04 and the README's *The garden instead of the bench* are that.
 
-- [ ] **[Thomas] Session A** (the README's six lines; the scanner of 0.1.7 that is on the
+- [x] **[run as session 6] Session A** (the README's six lines; the scanner of 0.1.7 that is on the
   unit): whether the echoes move when the span is begun 7 and 2.8 MHz lower. It needs no
   firmware and decides between the two readings.
 - [ ] **[later] A step's line is 40 characters and a program six steps**, in meshmaster.dk's
@@ -192,3 +192,66 @@ Tasks 03 and 04 and the README's *The garden instead of the bench* are that.
   384 bytes). If the hunt goes on, the two numbers are what to raise.
 - [ ] **[none] A session's lines can be had as a file already:** *Download the lines* on the
   session's page, every line as the scanner sent it. `echoes.py` reads it as it is.
+
+## What the garden said: sessions 6 to 9 (24 and 25 November)
+
+Four sessions on the unit at Bellevue, each `restored`, every step run to the clock:
+`/noisescope/6` (the README's session A, scanner 0.1.7), then with the scanner of 0.1.8:
+`/noisescope/7` (`garden-b`), `/noisescope/8` (zooms, in place of `garden-c`) and
+`/noisescope/9` (settle and bandwidths, in place of `garden-d`). Read from each session's own
+lines: the frames in which 869.618 MHz reads -70 dBm or more (the neighbour, -32 to -38 dBm)
+against the frames in which it is under -85 dBm; a place is an echo where the lit frames'
+median stands 6 dB or more over the quiet frames'. Lit frames a step: 9 to 24 of 90 in
+session 6, 1 to 14 of 85 in session 7, 3 to 8 of 27 to 40 in session 8, 3 to 20 in session 9.
+Where a level rests on one or three frames it is said.
+
+**03 and 04 on the unit** (reviewed by their reports and by what the unit did; neither read
+line by line): the four words are taken and named in the `ack`; `us`, `usx` and `dev` are in
+the frames; `hunt.py --sessions` took every program before it was typed. Nothing found.
+
+- [x] **[none] There are three artefacts, not one, and the 5.6 MHz comb was none of them.**
+  The README's reading of 24 November (*about every 5.6 MHz from a segment's first point*)
+  was the layout of one span. Begun 7 and 2.8 MHz lower (session 6), the block at a segment's
+  first point moved with it and everything else stayed where it was.
+- [ ] **[next, offered] One: a block at a segment's first point, cured by a settle of
+  500 µs.** It follows the segments at every bandwidth (467 down to 39 kHz), 13 to 36 dB
+  over the quiet floor, and the same points read 4 to 11 dB high even in quiet frames.
+  Session 9, `scope 840 900 0 467 1000`: first six points in lit frames -64.5, -74.5, -74.5,
+  -78.5, -88.5, -91.5 dBm with no settle; -104, the floor, with `max 32 500` and with
+  `max 32 2000`; in quiet frames -98.5 without and -104.5 with. 500 is enough. It costs
+  sweeps: 29.1 a second without, 28.0 with 500 µs, 25.8 with 2 000, for two segments. **The
+  default is Thomas's to move; the number the garden speaks for is 500.** (This also answers
+  whether the chip takes a frequency in continuous receive: it does.)
+- [ ] **[next, offered] Two: far echoes at fixed frequencies, and they belong to the wide
+  bandwidths.** For a signal on 869.618 MHz: 816.0, 845.0, 887.7 and 912.0 MHz, wherever the
+  segments lie. At 467 and 373.6 kHz they are 3 to 4 MHz wide and -55 to -66 dBm (815.7 to
+  818.3, 887.4 to 891.1, 911.6 to 915.0). At 234.3 kHz narrower and weaker: 815.9 to 816.4 at
+  -75.5, 911.7 to 912.8 at -70.5, 887.7 at -91.5, 845.0 at -94. At 58.6, 46.9 and 39 kHz:
+  nothing at 845.0 or 887.7, 816.0 one point at -101.5, **912.0 still there at -81.5 to
+  -83.5** (911.92 to 912.15 at all three, so it does not move with the IF of 250, 200 and
+  167 kHz), and the crystal's 32.0 MHz either side of the signal at -97 to -105 (837.6 and
+  901.6). 816.0 and 912.0 are 25.5 and 28.5 times 32 MHz. **Not the DC-DC converter** (on the
+  LDO every one is where it was and as strong), **not the gain** (`noboost`: the same, the
+  quiet floor 1 dB up), **not a lost lock** (`dev` `0000` in every frame that carries it, in
+  three sessions). What they are is not known.
+- [ ] **[none] Three: a raised floor around a strong signal.** About 35 dB under it: out to
+  some 10 MHz either side at 467 and 373.6 kHz, -6 to +7 MHz at 234.3, and about 4.4 MHz
+  either side at 117 kHz and below, with a lobe at -5.8 to -5.2 and one at +4.8 to +5.1 MHz
+  (the *echo at 874.4* of 24 November). The same on the LDO. It is the receiver's own
+  selectivity as the RSSI sees it; nothing typed changes it.
+- [ ] **[next, offered] The wide picture at 117 kHz is the open question.** One step of
+  80 s (`scope 780 960 0 117 4000`, 1 535 points, seven segments) had three lit frames:
+  912.0 at -78 dBm, nothing at 816.0, 845.0 or 887.7, and blocks at 796.1, 824.7, 889.8,
+  893.1, 921.9 and 939.2 MHz that three frames cannot tell from real signals. A longer
+  capture at 117 and at 58.6 kHz decides whether the wide picture moves there.
+- [x] **[none] An update is 1.6 ms / RBW on this chip**, as the plugin has it and not as
+  Rev 2.2's table reads: 250 points at 4.8 kHz in one segment, shortest sweep 88.9 ms
+  (83 by 1.6, 49 by 0.94); 990 points at 58.6 kHz, 34.2 ms.
+- [ ] **[later] And a sweep takes up to twice that when readings stand still:** the same
+  250 points, median 147 ms, longest 174 ms. That is the *[later]* item at the top of this
+  file, measured: the pacing follows the signal.
+- [ ] **[later] `us` steps by 977 µs.** The board's `micros()` moves in 1/1024 s, so six
+  plugin calls at 467 kHz read 5 858 µs every time and say nothing. Good enough at 58.6 kHz
+  and below. A finer clock (the nRF52's timer) if the number is ever wanted at 467 kHz.
+- [ ] **[later] `garden-c` was not run** (a segment's width): session 6 took its question
+  away. `garden-d` was run in part (the three 60 MHz lines; not the 13 MHz ones).

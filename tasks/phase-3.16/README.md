@@ -28,6 +28,9 @@ block fades over five to fifteen points in the sweep's direction. In the second 
 interval is the same in MHz at two bandwidths and two steps: about 5.6 MHz from wherever a
 segment began. That is two captures from one unit. Nothing of it is measured on a bench.
 
+**Corrected 25 November:** this reading was wrong. Four sessions on the unit say three
+artefacts and no comb: [FOLLOWUPS.md](FOLLOWUPS.md), *What the garden said*.
+
 **What is known of the cause.** The sweep runs inside the SX1262 (a plugin of 167 words, not
 ours; its source is in the repository to be read). It retunes after every RSSI update and at
 467 kHz an update is 3.4 µs. The receiver is armed at a segment's centre and the plugin jumps
