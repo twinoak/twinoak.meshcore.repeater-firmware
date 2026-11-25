@@ -209,7 +209,7 @@ host is attached.
 | `info` | one `info` line (fw/version/role/board/devid/reset reason/peripherals/radio ROM/home cfg) |
 | `stat` | one `stat` line immediately (the heartbeat also fires every 10 s) |
 | `sweep [f0 f1 [step_khz [dwell_ms [passes]]]]` | RSSI sweep. Defaults: the band's range, 25 kHz, 20 ms, 1 pass. `passes 0` = repeat until `stop` |
-| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 — **a line that names no ninth number stands 500 µs**, which is measured (§6), and `0` asks for no stand at all, which is what every line typed before that was measured did. Four words may stand **anywhere after the two ends**, taken out of the line before the numbers are read: `ldo` or `dcdc` is the voltage regulator the radio is begun with **for this scope**, and `boost` or `noboost` the receive gain **for this scope** — neither is the build's own and neither is what `boost on|off` left, so `scope 780 960 0 467 1000 ldo` and `scope 780 960 ldo noboost` are both lines. Both words of a pair on one line are refused in a sentence (§6). `scope off` ends it |
+| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 — **a line that names no ninth number stands 500 µs**, which is measured (§6), and `0` asks for no stand at all, which is what every line typed before that was measured did. Four words may stand **anywhere after the two ends**, taken out of the line before the numbers are read: `ldo` or `dcdc` is the voltage regulator the radio is begun with **for this scope**, and `boost` or `noboost` the receive gain **for this scope** — neither is the build's own and neither is what `boost on|off` left, so `scope 780 960 0 467 1000 ldo` and `scope 780 960 ldo noboost` are both lines. Both words of a pair on one line are refused in a sentence (§6). A fifth word, `stepped`, stands in the same places and asks for **the other way to sweep**: every point tuned with the chip's own command, stood on, and read once by the host, instead of the radio program sweeping the segment (§6, §8). It is nobody's default and holds for that one `scope`; the `ack` says `mode=stepped`. One word of each pair at most and `stepped` at most once. `scope off` ends it |
 | `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples; `samples` is clamped to 256…65535 and is what one frequency costs, 8.2 µs each (2 ms at 256, **17 ms at the default**, 0.54 s at 65535). A line's bins add up to its `n` or the line is not sent (below) |
 | `dwell <f_mhz> [secs [win_ms]]` | time-domain statistics on one frequency (defaults 60 s, 1000 ms windows). Uses the home LoRa RX filter |
 | `cad [f_mhz [count]]` | LoRa channel-activity detections out of `count` tries (default the home frequency, 100) |
@@ -308,15 +308,29 @@ after the width and the settle and only when its own word was on the line —
  "msg":"n=250 step=52.0000kHz rbw=58.6kHz seg=1 cov=1.127 interval=0ms sweep=8ms settle=500us reg=ldo"}
 ```
 
+A `scope` asked for the **other way to sweep** says so after the settle and
+before those two words, and only when the word was on the line — so a `scope`
+swept the radio program's way says nothing about a mode at all:
+
+```
+{"t":"ack","cmd":"scope","ok":true,
+ "msg":"n=320 step=500.0000kHz rbw=467.0kHz seg=5 cov=0.934 interval=1000ms sweep=160ms settle=500us mode=stepped"}
+```
+
+The same line without the word reads `sweep=4ms` and no `mode=`: 320 points of
+500 µs against 320 RSSI updates of 3.4 µs with five settles on top. `sweep` is
+the number to read a stepped scope by, and §6 says what the two ways are for.
+
 A line that names none of the four and no width gets the first shape, byte for
 byte — what the two numbers do, and why a scope can be asked for on the other
 regulator and at the lower gain, is §6; **which width** a `scope` should take
 when none is given is not settled yet, and the settle now is. A line that names
-both words of a pair is refused with a sentence of its own:
+both words of a pair, or any of the five words twice, is refused with a
+sentence of its own:
 
 ```
 {"t":"ack","cmd":"scope","ok":false,
- "msg":"refused: ldo or dcdc, boost or noboost - one word of each pair at most, anywhere after the two ends"}
+ "msg":"refused: ldo or dcdc, boost or noboost, stepped - one word of each at most, anywhere after the two ends"}
 ```
 
 Every command is answered with an `ack` line:
@@ -662,6 +676,61 @@ before it is flashed: its descriptor's role byte is 3.
   width when it is not 32 MHz, and the `sweep` it carries counts every settle,
   so a wide span with a long settle says outright what it will cost.
 
+  **Why there are two ways to sweep.** The blocks a wide `scope` shows away
+  from a segment's first point — at 816.0, 845.0, 887.7 and 912.0 MHz for a
+  signal on 869.618 (§7) — are the **sweep program's** and not the chip's
+  reception. Two sessions on the unit at Bellevue on 25 November 2026 say so
+  (`tasks/phase-3.17/FOLLOWUPS.md`, *Sessions 10 and 11*): the LoRa receiver
+  parked on 912.0 MHz read −118 dBm in all 320 windows of 250 ms while
+  869.618 held ten packets at −32 dBm in 37 of 319 windows; a **host-stepped**
+  `sweep` at the same 467 kHz never read a point 15 dB over its median in 38
+  passes over 905–919 MHz and 52 over 811–821; and the program's own `scope` of
+  that place showed 911.1–915.3 MHz at −61.5 dBm, as in every session. The
+  second session added the other half: an echo is **gone** when a segment
+  begins at its place and stands the settle — a start at 816.25 and 912.25 MHz
+  reads −104 and −106 dBm there, the floor, where mid-segment they read −64.5
+  and −61 — and the same holds for 845. The program writes the frequency
+  registers itself and reads within some 10 µs of writing them
+  (`spectrum.asm`, `retune`); at certain frequencies the synthesizer needs 30
+  to 40. **Two of those four frequencies are round and two fit no rule**
+  (816.0 and 912.0 MHz are 25.5 and 28.5 times the 32 MHz crystal; 845.1 and
+  887.6 or so are nothing), so a list of places to cut a segment at cannot be
+  written down — and that is why the second way is a way to sweep and not a
+  table of frequencies.
+
+  **`stepped` is that second way.** The receiver stays in continuous receive at
+  the plan's bandwidth, and for each point: the frequency is set with the
+  chip's own command through the arm's seam, the receiver **stands** there, and
+  **one** reading is taken. The stand is the settle in force — 500 µs by
+  default, or the line's own ninth number — and never less than the time the
+  program's own latency table gives a reading to be of the frequency just
+  written, which is (L + 2) RSSI updates: 1 334 µs at 4.8 kHz, 137 at 58.6, 21
+  at 467. The plan is the same points, the same step, the same bandwidth and
+  the same segments as the program's way, and a segment here is **a range of
+  one image calibration and nothing else**. The waits are made with the same
+  delay the settle uses and never by reading the clock, which steps by 977 µs
+  on this board.
+
+  What it costs is time. A point costs its whole stand where a program point
+  costs one RSSI update, so the 386 points of the wide span at 467 kHz are
+  **193 ms** planned against 5 ms, and the `ack`'s `sweep` says which. The loop
+  is not held for that: a stepped sweep runs in **slices of at most 50 ms**, a
+  pass of `loop()` each, so a `stop`, the heartbeat and both watchdogs are
+  served exactly as they are between two of the program's calls — and a `stop`
+  in the middle of a sweep ends the scope and sends no half frame, because a
+  frame is sent only when a sweep's last point has gone in. A frame is a frame
+  either way: the same line, the same members, `agg` over stepped sweeps as
+  over the program's, `us` and `usx` the whole stepped sweep, `dev` read where a
+  range is calibrated.
+
+  **Which way a wide picture should be made is the unit's to say, not this
+  page's.** `stepped` is asked for by a word and is nobody's default; the
+  session that sets the two side by side is
+  `tools/noisescope/lists/garden-e.txt`, and
+  `tools/noisescope/echoes.py --steps` reads `mode=` out of each `ack` and
+  prints the pair *the mode* — for each echo of one scope, whether the other
+  has one at the same place.
+
   **Why a scope can be asked for on the other regulator and at the lower gain.**
   The segment's width and the settle are cures for a sweep whose *structure* is
   making the blocks. There is a second candidate that has nothing to do with the
@@ -910,20 +979,23 @@ ways, each of them a line of `src/roles/scanner/Sweep.h` with a native test:
 | where frames go | a Bluetooth companion client | the port the command came in on, sized for it: USB CDC gets every sweep, the Walter's 115200 UART gets the interval that port can carry |
 | the frame | a binary push of a companion protocol | one NDJSON line like every other, with the levels base64-encoded so that the Walter's verbatim forwarding and every reader go on working |
 | the picture | a screen on the device | `tools/noisescope/waterfall_plot.py --scope`, and later the Walter's MQTT |
+| who steps | the radio program, always | the radio program by default, or **the host** for a `scope` that carries the word `stepped` — the same plan, every point tuned with the chip's own command, stood on and read once (§6) |
 
 Where it lives:
 
 | | |
 |---|---|
 | the plan — segments, bandwidth, coverage, the sink's interval, the duration bounds | `src/roles/scanner/Sweep.h`, host-portable, `test/test_scanner` |
+| the stepped sweep — what a point stands for, what a slice is, the cursor over the points | `SteppedScope` and `scopeSteppedStandUs()` of the same file, host-portable and host-driven through the arm's seam |
 | the frame and its base64 | `src/roles/scanner/Lines.{h,cpp}` |
 | the command | `src/roles/scanner/Commands.{h,cpp}` |
-| the radio half — calibrate, set the sweep, run it, read the buffer | `src/roles/scanner/Radio.cpp`, which is thin |
+| the radio half — calibrate, set the sweep, run it, read the buffer, read one level | `src/roles/scanner/Radio.cpp`, which is thin |
 | the plugin and its host class, vendored | `src/roles/scanner/vendor/sx126x_spectrum/` |
 | the picture | `tools/noisescope/waterfall_plot.py` |
 
 **Not done here, on purpose:** the Walter's forwarding of `scope` frames to
 MQTT and the LTE budget that goes with it (the Walter firmware is its own
 repository), a web or MeshMaster view of the waterfall (later, once frames
-reach MQTT), and the issue's BLE companion protocol — this firmware has no
-Bluetooth at all.
+reach MQTT), the issue's BLE companion protocol — this firmware has no
+Bluetooth at all — and **which of the two ways any span should be swept**,
+which is read off a unit (§6) and not decided here.

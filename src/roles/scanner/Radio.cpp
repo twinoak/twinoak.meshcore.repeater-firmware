@@ -102,6 +102,7 @@ struct ScopeState {
   ScopeCalibration cal;      // what the chip's image calibration was last made for
   uint32_t beat_ms = 0;      // when the next frame is due
   uint32_t emitted_ms = 0;   // when the last one actually left, which is what `sps` is counted on
+  SteppedScope stepped;      // and where a stepped sweep has got to, when the line asked for one
   ScopeSweepTime time;       // how long this frame's plugin calls took: `us` and `usx`
   unsigned dev = 0;          // and the OR of the chip's error word at this frame's arms: `dev`
   ScopeAccumulator acc;
@@ -488,6 +489,19 @@ class ChipArmRadio : public ScopeArmRadio {
   // inside it is measured on. The plugin's tag is checked inside sweep(): a chip that was reset
   // under us - a brownout - has no 0x9B command and must not be sent one.
   int sweep(uint8_t* levels) override { return g_scanner.sweep(levels); }
+  // One reading of where the receiver stands, as the byte a frame carries. RadioLib's
+  // getRSSI(false) is GetRssiInst - the raw register over -2 (7.8.0, SX126x.cpp:641-654) - and the
+  // plugin files that register's own byte per point (spectrum.asm: "-2 * dBm like GetRssiInst"),
+  // so a stepped point and a plugin point put the same number in the frame. The call has no code
+  // to answer with, which is why this one always succeeds; kScopeNoReading is left to mean a point
+  // nothing was read for, so a reading that would be it is the level below.
+  int readLevel(uint8_t& level) override {
+    const long raw = long(-2.0f * g_radio.getRSSI(false) + 0.5f);
+    level = raw <= 0 ? uint8_t(0)
+                     : (raw >= long(kScopeNoReading) ? uint8_t(kScopeNoReading - 1u)
+                                                     : uint8_t(raw));
+    return RADIOLIB_ERR_NONE;
+  }
   uint32_t nowUs() override { return micros(); }
   // The receiver left standing where setFrequency() put it, in continuous receive: a delay and
   // nothing else, at most kScopeSettleMaxUs and so at most 20 ms of one pass of loop() - a
@@ -549,7 +563,49 @@ void emitScopeFrame(uint32_t now) {
   g_scope.dev = 0;
 }
 
+// One slice of a **stepped** sweep, which is what a pass of loop() does for a
+// `scope ... stepped`: every point tuned with the chip's own command, stood on and read once
+// (SteppedScope, src/roles/scanner/Sweep.cpp - the order and the cursor are host-tested). A sweep
+// counts only when its last point has gone in, so a `stop` in the middle of one leaves no frame.
+void serviceSteppedScope() {
+  ScopeArmResult out;
+  bool whole = false;
+  if (!g_scope.stepped.slice(g_arm, g_scope.plan, g_scope.cal, g_scope.acc, g_scope.time, out,
+                             whole)) {
+    if (out.failed == kScopeArmNone) {
+      error("scope segment %u of %u is not a segment", unsigned(g_scope.stepped.segment()),
+            unsigned(g_scope.plan.segments));
+      stop();
+      return;
+    }
+    // Where it failed: the point the cursor stands on, which is the one that was being measured.
+    ScopeSegment seg;
+    double at_mhz = g_scope.plan.first_mhz;
+    if (scopeSegment(g_scope.plan, g_scope.stepped.segment(), seg)) {
+      at_mhz = seg.first_mhz + double(g_scope.stepped.point()) * g_scope.plan.step_khz / 1000.0;
+    }
+    const bool measuring = out.failed == kScopeArmPoint || out.failed == kScopeArmRead;
+    scopeError(measuring ? "sweep" : "setup", out.failed, out.code, at_mhz, out.reloaded);
+    stop();
+    return;
+  }
+  // What the chip's error word held at this slice's arm, if it armed one: the frame's `dev`, as
+  // for a plugin sweep (0 for a plan of one segment, which has no standby to read it in).
+  g_scope.dev |= out.before_errors;
+  if (!whole) return;  // the rest of the sweep in the next passes of loop()
+  g_scope.acc.sweepDone();
+  g_scope.time.sweepDone();  // a whole stepped sweep, which is what `us` and `usx` are of
+  const uint32_t now = millis();
+  if (g_scope.plan.interval_ms != 0 && int32_t(now - g_scope.beat_ms) < 0) return;
+  emitScopeFrame(now);
+}
+
 void serviceScope() {
+  // The other way to sweep, which a `scope` line asks for by name and nothing else does.
+  if (g_scope.plan.mode == kScopeModeStepped) {
+    serviceSteppedScope();
+    return;
+  }
   ScopeSegment seg;
   if (!scopeSegment(g_scope.plan, g_scope.segment, seg)) {
     error("scope segment %u of %u is not a segment", unsigned(g_scope.segment),
@@ -756,6 +812,7 @@ bool startScope(const ScopeRequest& request, Lines& out, ScopePlan& plan) {
   g_scope.out = &out;
   g_scope.segment = 0;
   g_scope.armed = 0xFFFF;
+  g_scope.stepped.restart();         // and a stepped sweep begins at segment 0, point 0
   g_scope.cal = ScopeCalibration();  // beginPlugin() reset the chip, and the calibration with it
   g_scope.acc.reset(planned.points);
   g_scope.time.reset();

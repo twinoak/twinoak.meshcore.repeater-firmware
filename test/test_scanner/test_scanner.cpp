@@ -1513,7 +1513,10 @@ TEST(Scope, InfoCarriesTheRadiosRom) {
 
 // A radio that records what it was asked, in order, and answers what the test tells it to.
 struct FakeArmRadio : ScopeArmRadio {
-  char log[512];
+  // Big enough for a whole **stepped** sweep of the garden's wide span: three calls a point and
+  // 320 of them is some 13 kB, where a plugin sweep's arm is a hundred bytes (phase 3.17's task
+  // 02). It is a host test's stack and nothing of the board's.
+  char log[16384];
   int standby_code = 0;
   int frequency_code = 0;
   int calibrate_code = 0;
@@ -1530,6 +1533,8 @@ struct FakeArmRadio : ScopeArmRadio {
   bool cleared = false;
   uint32_t clock_us = 0;
   uint32_t sweep_us = 0;
+  uint8_t next_level = 10;  // what the next readLevel() answers, counting up from here
+  int read_code = 0;
 
   FakeArmRadio() { log[0] = '\0'; }
 
@@ -1584,7 +1589,21 @@ struct FakeArmRadio : ScopeArmRadio {
   // Phase 3.16's task 02. Since phase 3.17's task 01 **every** plan has a settle unless its line
   // asked for none, so every arm's log ends with the first point and this call; appendSettle()
   // below is the one place that tail is written.
-  void settle(uint32_t us) override { note("settle(%u);", unsigned(us)); }
+  //
+  // The clock moves with it, because on the board this call *is* a delay
+  // (ChipArmRadio::settle - delayMicroseconds and nothing else): a stepped sweep's `us` is then
+  // the stands it actually made, which is what this fake is asked to prove.
+  void settle(uint32_t us) override {
+    note("settle(%u);", unsigned(us));
+    clock_us += us;
+  }
+  // Phase 3.17's task 02: the one reading a stepped point is. The level is a counter, so a test
+  // can tell which point a byte of the frame came from, and `read_code` is a chip that refused.
+  int readLevel(uint8_t& level) override {
+    note("read;");
+    level = next_level++;
+    return read_code;
+  }
   int setSweep(double first, double step, uint16_t points, double rbw) override {
     note("setSweep(%.3f,%.3f,%u,%.1f);", first, step, unsigned(points), rbw);
     return sweep_code;
@@ -2497,12 +2516,19 @@ static const char* const kWordLines[] = {
     "scope 780 960 ldo noboost",
     "scope 863 876 250 58.6 1000 ldo",
     "scope 863 876 250 58.6 1000 dcdc boost",
+    // And phase 3.17's task 02's one word, in the places the garden's list types it.
+    "scope 780 960 0 467 1000 stepped",
+    "scope 800 960 320 467 1000 stepped",
+    "scope 863 876 0 58.6 1000 stepped",
+    "scope 780 960 stepped 0 467 1000",
+    "scope 780 960 0 467 1000 ldo stepped",
 };
 
 TEST(Scope, EveryExampleLineOfTheWordsFitsASessionsFortyCharactersOrIsSaidNotTo) {
-  // Nine of the ten fit. The tenth is every word and both numbers at once - a line the parser
-  // reads and a session cannot type - and it is here to say that out loud rather than to be
-  // copied into a list: the garden's lists are task 04's and are held to 40 there.
+  // All but one fit, the five lines of phase 3.17's task 02's word included - the longest of
+  // those is 36 characters. The one that does not is every word of phase 3.16's and both numbers
+  // at once - a line the parser reads and a session cannot type - and it is here to say that out
+  // loud rather than to be copied into a list: the garden's lists are held to 40 where they are.
   size_t too_long = 0;
   for (const char* line : kWordLines) {
     if (std::strlen(line) > 40) {
@@ -2514,6 +2540,8 @@ TEST(Scope, EveryExampleLineOfTheWordsFitsASessionsFortyCharactersOrIsSaidNotTo)
   EXPECT_EQ(1u, too_long) << "one example is deliberately longer than a session's line";
   EXPECT_LE(std::strlen("scope 780 960 0 467 1000 max 5.6 500 ldo"), 40u)
       << "every word with the two numbers but one still fits";
+  EXPECT_EQ(32u, std::strlen("scope 780 960 0 467 1000 stepped"))
+      << "the stepped line of this task's own deliverable";
 }
 
 TEST(Scope, TheFourWordsAreTakenWhereverTheyStandAndWhatIsLeftIsReadAsItAlwaysWas) {
@@ -2837,9 +2865,14 @@ TEST(Scope, AfterSuchAScopeTheRadioIsTheBuildsRegulatorAndTheGainBoostLeft) {
   EXPECT_EQ(0u, countOf(radio, "applyRxPath(g_boost)"))
       << "the gain a begin applies is the one that begin asked for, never a global read again";
   // A scope's words live in its plan and nowhere else, and stop() drops the plan - so there is
-  // no state at all for the mode after a scope to inherit.
+  // no state at all for the mode after a scope to inherit. Phase 3.17's task 02's word is in that
+  // same plan: a plan nobody filled in is kScopeModePlugin, so the scope after a stepped one is
+  // the plugin's, and src/roles/scanner/Radio.cpp asks the plan which way to sweep in one place.
   EXPECT_EQ(1u, countOf(radio, "g_scope.plan = ScopePlan();"))
-      << "however a scope ends, the two words end with it";
+      << "however a scope ends, the two words end with it - and the mode with them";
+  EXPECT_EQ(kScopeModePlugin, ScopePlan().mode);
+  EXPECT_EQ(1u, countOf(radio, "if (g_scope.plan.mode == kScopeModeStepped) {"))
+      << "one place decides which way a scope is swept";
 }
 
 TEST(Scope, AFrameSaysHowLongItsSweepsTookCountingThePluginsCallsAlone) {
@@ -3105,6 +3138,586 @@ TEST(Scope, ThePortsFloorIsWorkedOutFromTheFramesNewLength) {
               frame_ms * double(kScopeSinkDutyDivisor))
         << points << " points";
   }
+}
+
+// ------------------------------------------- phase 3.17's other way to sweep: the host steps
+//
+// `scope ... stepped`: every point tuned with the chip's own command, stood on and read once.
+// The plugin's way is untouched - the tests above are a plugin scope's and this section edits
+// none of them.
+
+// A stepped plan, which is a plan with one field moved: nothing of the points, the step, the
+// bandwidth or the segments follows from the word.
+static ScopePlan steppedPlanOf(double f0, double f1, uint32_t points, double rbw_khz,
+                               uint32_t settle_us = kScopeSettleAbsentUs) {
+  ScopeRequest r = request(f0, f1);
+  r.points = points;
+  r.rbw_khz = rbw_khz;
+  r.settle_us = settle_us;
+  r.mode = kScopeModeStepped;
+  ScopePlan plan;
+  EXPECT_TRUE(planScope(r, plan));
+  return plan;
+}
+
+// What one stepped point costs the log: the frequency the chip's own way, the stand, one reading.
+static void appendPoint(char* out, size_t bytes, double mhz, uint32_t stand_us) {
+  const size_t at = strlen(out);
+  ASSERT_LT(at, bytes);
+  snprintf(out + at, bytes - at, "setFrequency(%.3f);settle(%lu);read;", mhz,
+           (unsigned long)stand_us);
+}
+
+TEST(Scope, TheWordSteppedIsTakenWhereverItStandsAndWhatIsLeftIsReadAsItAlwaysWas) {
+  // The word is taken out of the line first and wherever it stands after the two ends, exactly as
+  // phase 3.16's four words are, so a line never needs the numbers before it.
+  for (const char* text : {"scope 780 960 0 467 1000 stepped",
+                           "scope 780 960 stepped 0 467 1000",
+                           "scope 780 960 0 stepped 467 1000",
+                           "scope 780 960 0 467 stepped 1000",
+                           "scope 780 960 0 467 1000 max stepped"}) {
+    Line line(text);
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(line), args)) << text;
+    EXPECT_EQ(kScopeModeStepped, args.mode) << text;
+    EXPECT_DOUBLE_EQ(780.0, args.f0) << text;
+    EXPECT_DOUBLE_EQ(960.0, args.f1) << text;
+    EXPECT_EQ(0u, args.points) << text;
+    EXPECT_DOUBLE_EQ(467.0, args.rbw_khz) << text;
+    EXPECT_EQ(1000u, args.interval_ms) << text;
+    EXPECT_EQ(kScopeAggMax, args.agg) << text;
+    EXPECT_DOUBLE_EQ(0.0, args.seg_mhz) << text;
+    EXPECT_EQ(kScopeSettleAbsentUs, args.settle_us) << text;
+    // And none of phase 3.16's words follows from this one.
+    EXPECT_EQ(kScopeRegulatorBuild, args.reg) << text;
+    EXPECT_EQ(kScopeGainAsLeft, args.gain) << text;
+  }
+  // With phase 3.16's words, in any order, and with both numbers: each word is taken once and
+  // what is left is still the numbers.
+  for (const char* text : {"scope 780 960 0 467 1000 ldo stepped noboost",
+                           "scope 780 960 stepped ldo 0 467 1000 noboost"}) {
+    Line line(text);
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(line), args)) << text;
+    EXPECT_EQ(kScopeModeStepped, args.mode) << text;
+    EXPECT_EQ(kScopeRegulatorLdo, args.reg) << text;
+    EXPECT_EQ(kScopeGainNoBoost, args.gain) << text;
+    EXPECT_DOUBLE_EQ(467.0, args.rbw_khz) << text;
+    EXPECT_EQ(1000u, args.interval_ms) << text;
+  }
+  // Every number and all three words at once is past what a line can hold either way: twelve
+  // words where the reader takes kMaxTokens of them, and 56 characters where a session's step has
+  // 40. The longest line that still parses carries both numbers, this word and one of the pairs.
+  {
+    Line longest("scope 780 960 0 467 1000 max 5.6 500 stepped ldo");
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(longest), args));
+    EXPECT_EQ(kScopeModeStepped, args.mode);
+    EXPECT_EQ(kScopeRegulatorLdo, args.reg);
+    EXPECT_EQ(kScopeGainAsLeft, args.gain);
+    EXPECT_DOUBLE_EQ(5.6, args.seg_mhz);
+    EXPECT_EQ(500u, args.settle_us);
+    EXPECT_EQ(11, kMaxTokens) << "and the word after this line's eleventh is not read at all";
+  }
+  // A line with no word at all is the plugin's, which is every line typed before this task.
+  {
+    Line plain("scope 780 960 0 467 1000 max 32 500 ldo noboost");
+    ScopeArgs args;
+    ASSERT_TRUE(parseScope(tokensOf(plain), args));
+    EXPECT_EQ(kScopeModePlugin, args.mode);
+  }
+  // The word twice says nothing new, so it is refused in the sentence the pairs are refused in -
+  // which now names it.
+  for (const char* text : {"scope 780 960 stepped stepped",
+                           "scope 780 960 stepped 0 467 1000 stepped"}) {
+    Line line(text);
+    ScopeArgs args;
+    const char* why = nullptr;
+    EXPECT_FALSE(parseScope(tokensOf(line), args, &why)) << text;
+    EXPECT_STREQ(kScopeWordRefusal, why == nullptr ? "" : why) << text;
+  }
+  EXPECT_NE(nullptr, std::strstr(kScopeWordRefusal, "stepped"));
+  EXPECT_LT(std::strlen(kScopeWordRefusal), kMaxAckMessageBytes);
+  EXPECT_NE(nullptr, std::strstr(usageOf(kVerbScope), "[stepped]"));
+  EXPECT_LT(std::strlen(usageOf(kVerbScope)), kMaxAckMessageBytes);
+  // And the word is the plan's, carried and nothing more.
+  EXPECT_EQ(kScopeModeStepped, steppedPlanOf(780.0, 960.0, 0, 467.0).mode);
+  EXPECT_EQ(kScopeModePlugin, planOf(780.0, 960.0, 0).mode);
+  EXPECT_STREQ("stepped", scopeModeName(kScopeModeStepped));
+  EXPECT_STREQ("", scopeModeName(kScopeModePlugin));
+  ScopeMode mode = kScopeModePlugin;
+  EXPECT_TRUE(scopeModeOf("stepped", mode));
+  EXPECT_EQ(kScopeModeStepped, mode);
+  EXPECT_FALSE(scopeModeOf("step", mode));
+  EXPECT_FALSE(scopeModeOf("plugin", mode));
+  EXPECT_FALSE(scopeModeOf(nullptr, mode));
+}
+
+TEST(Scope, ASteppedPointIsTheFrequencyThenTheStandThenOneReading) {
+  // The three calls a point is, in that order and no other: the frequency written the chip's own
+  // way (ScopeArmRadio::setFrequency, SetRfFrequency with the calibration skipped), the stand made
+  // with the seam's own delay, and one reading. 13 MHz in 16 points through the widest filter,
+  // with a settle of 16 000 us - which makes a slice three points long (50 ms / 16 ms).
+  const ScopePlan plan = steppedPlanOf(863.0, 876.0, 16, 467.0, 16000);
+  ASSERT_EQ(1u, plan.segments);
+  ASSERT_EQ(16u, plan.points);
+  ASSERT_EQ(16000u, plan.settle_us);
+  EXPECT_EQ(16000u, scopeSteppedStandUs(plan.rbw_khz, plan.settle_us));
+  EXPECT_EQ(3u, scopeSteppedSlicePoints(plan.rbw_khz, plan.settle_us));
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 0, seg));
+
+  FakeArmRadio radio;
+  SteppedScope stepped;
+  ScopeAccumulator acc;
+  ScopeSweepTime time;
+  ScopeCalibration cal;
+  ScopeArmResult out;
+  bool whole = true;
+  stepped.restart();
+  acc.reset(plan.points);
+  time.reset();
+  EXPECT_EQ(0u, stepped.segment());
+  EXPECT_EQ(0u, stepped.point());
+  EXPECT_FALSE(stepped.midSweep());
+
+  // The first slice: the segment armed exactly as a plugin sweep arms it - no `deviceErrors` for
+  // a plan of one segment, the centre, one calibration for its own range, the plugin's parameters
+  // and the plan's settle on the first point - and then three points.
+  ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+  EXPECT_FALSE(whole);
+  EXPECT_EQ(3u, stepped.point());
+  EXPECT_TRUE(stepped.midSweep());
+  char expected[640];
+  snprintf(expected, sizeof(expected),
+           "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "setSweep(%.3f,%.3f,%u,%.1f);",
+           double(scopeSegmentCentreMhz(plan, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz, seg.first_mhz,
+           plan.step_khz / 1000.0, unsigned(seg.points), plan.rbw_khz);
+  appendSettle(expected, sizeof(expected), plan, seg);
+  for (uint16_t i = 0; i < 3; i++) {
+    appendPoint(expected, sizeof(expected), seg.first_mhz + double(i) * plan.step_khz / 1000.0,
+                16000);
+  }
+  EXPECT_STREQ(expected, radio.log);
+  // The three readings are the three points of the frame, in order, and nothing else is.
+  uint8_t frame[kScopeMaxPoints];
+  acc.take(plan.agg, frame);
+  EXPECT_EQ(10u, frame[0]);
+  EXPECT_EQ(11u, frame[1]);
+  EXPECT_EQ(12u, frame[2]);
+  EXPECT_EQ(kScopeNoReading, frame[3]) << "a point not reached yet has no reading";
+
+  // The rest of the sweep, three points a slice: six slices for sixteen points, and the sweep is
+  // whole only at the last one.
+  uint16_t slices = 1;
+  while (!whole) {
+    ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+    slices++;
+    ASSERT_LT(slices, 10u);
+  }
+  EXPECT_EQ(6u, slices) << "3 + 3 + 3 + 3 + 3 + 1 points";
+  EXPECT_FALSE(stepped.midSweep()) << "a whole sweep is not a sweep part-way through";
+  EXPECT_EQ(0u, stepped.segment());
+  EXPECT_EQ(0u, stepped.point());
+  acc.take(plan.agg, frame);
+  for (uint16_t i = 0; i < plan.points; i++) {
+    EXPECT_EQ(uint8_t(10u + i), frame[i]) << "point " << i;
+  }
+  // Sixteen points, sixteen readings, sixteen retunes of their own - and the plugin's own sweep
+  // command never sent.
+  EXPECT_EQ(16u, countOf(radio.log, "read;"));
+  EXPECT_EQ(0u, countOf(radio.log, "sweep;"));
+  EXPECT_EQ(1u, countOf(radio.log, "standby;")) << "one segment arms once and steps for ever";
+  EXPECT_EQ(1u, countOf(radio.log, "calibrateImage("));
+
+  // And the next sweep of that one segment re-arms nothing: every point of it stands for itself.
+  radio.log[0] = '\0';
+  ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+  EXPECT_EQ(0u, countOf(radio.log, "standby;"));
+  EXPECT_EQ(0u, countOf(radio.log, "setSweep("));
+  EXPECT_EQ(3u, countOf(radio.log, "read;"));
+}
+
+TEST(Scope, EverySegmentOfASteppedSweepIsOneCalibrationAndEveryPointIsReadOnce) {
+  // The wide span of the garden's list, stepped: 160 MHz in 320 points at 467 kHz, which is five
+  // segments of 64 points - one calibration each, for its own 32 MHz, exactly as a plugin sweep
+  // calibrates them. A segment is that range and nothing else here: the points are stepped
+  // through by hand.
+  const ScopePlan plan = steppedPlanOf(800.0, 960.0, 320, 467.0);
+  ASSERT_EQ(5u, plan.segments);
+  ASSERT_EQ(320u, plan.points);
+  ASSERT_EQ(kScopeSettleDefaultUs, plan.settle_us) << "no settle named: phase 3.17's task 01's";
+  EXPECT_EQ(500u, scopeSteppedStandUs(plan.rbw_khz, plan.settle_us));
+
+  FakeArmRadio radio;
+  SteppedScope stepped;
+  ScopeAccumulator acc;
+  ScopeSweepTime time;
+  ScopeCalibration cal;
+  ScopeArmResult out;
+  bool whole = false;
+  stepped.restart();
+  acc.reset(plan.points);
+  time.reset();
+  uint16_t slices = 0;
+  while (!whole) {
+    ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+    slices++;
+    ASSERT_LT(slices, 20u);
+  }
+  // A slice is 100 points at this stand and a segment is 64, so a segment is one slice.
+  EXPECT_EQ(100u, scopeSteppedSlicePoints(plan.rbw_khz, plan.settle_us));
+  EXPECT_EQ(5u, slices);
+  EXPECT_EQ(5u, countOf(radio.log, "standby;"));
+  EXPECT_EQ(5u, countOf(radio.log, "calibrateImage("));
+  EXPECT_EQ(320u, countOf(radio.log, "read;"));
+  EXPECT_EQ(320u, countOf(radio.log, "settle(500);read;"));
+  EXPECT_EQ(0u, countOf(radio.log, "sweep;"));
+  // Each calibration is its own segment's range, and they are 32 MHz apart.
+  for (uint16_t index = 0; index < plan.segments; index++) {
+    ScopeSegment seg;
+    ASSERT_TRUE(scopeSegment(plan, index, seg));
+    EXPECT_NEAR(800.25 + 32.0 * double(index), seg.first_mhz, 1e-9);
+    char want[96];
+    snprintf(want, sizeof(want), "calibrateImage(%.3f,%.3f);", seg.cal_lo_mhz, seg.cal_hi_mhz);
+    EXPECT_EQ(1u, countOf(radio.log, want)) << want;
+  }
+  // Every point of the frame was read exactly once, in the order of the span.
+  uint8_t frame[kScopeMaxPoints];
+  acc.take(plan.agg, frame);
+  for (uint16_t i = 0; i < plan.points; i++) {
+    EXPECT_EQ(uint8_t(10u + i), frame[i]) << "point " << i;
+  }
+  // And `us` is the whole stepped sweep: 320 stands of 500 us, the arms not counted.
+  time.sweepDone();
+  EXPECT_TRUE(time.any());
+  EXPECT_EQ(320u * 500u, time.shortestUs());
+  EXPECT_EQ(320u * 500u, time.longestUs());
+  // The chip's error word is read and cleared at every arm of a plan of more than one segment,
+  // exactly as for a plugin sweep: the frame's `dev`.
+  EXPECT_EQ(5u, countOf(radio.log, "deviceErrors;clearDeviceErrors;"));
+}
+
+TEST(Scope, ASteppedPointStandsTheSettleAndNeverLessThanThePluginsOwnLatency) {
+  // The stand is the settle in force and never less than the time the plugin's latency table
+  // gives a reading to be of the frequency just written: (L + 2) updates of 1.6 ms / RBW, with L
+  // the plugin's own 2 below 17 kHz, 3 below 150 and 4 above
+  // (vendor/sx126x_spectrum/SX126xSpectrumScanner.h, latencyFor; spectrum.asm's header).
+  EXPECT_EQ(2u, scopeLatencyUpdates(4.8));
+  EXPECT_EQ(2u, scopeLatencyUpdates(16.9));
+  EXPECT_EQ(3u, scopeLatencyUpdates(17.0));
+  EXPECT_EQ(3u, scopeLatencyUpdates(117.3));
+  EXPECT_EQ(4u, scopeLatencyUpdates(150.0));
+  EXPECT_EQ(4u, scopeLatencyUpdates(467.0));
+
+  // The three bandwidths the garden's lists use, with no settle asked for, with the default and
+  // with a number of the line's own.
+  const uint32_t floor_4_8 = 1334;   // (2 + 2) updates x 1.6 ms / 4.8 kHz
+  const uint32_t floor_58_6 = 137;   // (3 + 2) x 1.6 / 58.6
+  const uint32_t floor_467 = 21;     // (4 + 2) x 1.6 / 467
+  EXPECT_EQ(floor_4_8, scopeSteppedStandUs(4.8, 0));
+  EXPECT_EQ(floor_58_6, scopeSteppedStandUs(58.6, 0));
+  EXPECT_EQ(floor_467, scopeSteppedStandUs(467.0, 0));
+  EXPECT_EQ(floor_4_8, scopeSteppedStandUs(4.8, kScopeSettleDefaultUs))
+      << "the latency is longer than the default at the narrowest filter";
+  EXPECT_EQ(kScopeSettleDefaultUs, scopeSteppedStandUs(58.6, kScopeSettleDefaultUs));
+  EXPECT_EQ(kScopeSettleDefaultUs, scopeSteppedStandUs(467.0, kScopeSettleDefaultUs));
+  EXPECT_EQ(kScopeSettleMaxUs, scopeSteppedStandUs(4.8, kScopeSettleMaxUs));
+  EXPECT_EQ(kScopeSettleMaxUs, scopeSteppedStandUs(467.0, kScopeSettleMaxUs));
+  // The floor holds for every bandwidth the receiver has, whatever the line asked for.
+  for (size_t i = 0; i < kFskRbwCount; i++) {
+    const double rbw = kFskRbwKhz[i];
+    const double updates = double(scopeLatencyUpdates(rbw)) + double(kScopeLatencyJumpUpdates);
+    const uint32_t want = uint32_t(ceil(updates * kScopeUpdateMsKhz * 1000.0 / rbw));
+    EXPECT_EQ(want, scopeSteppedStandUs(rbw, 0)) << rbw;
+    EXPECT_LE(want, scopeSteppedStandUs(rbw, kScopeSettleDefaultUs)) << rbw;
+    EXPECT_LE(want, scopeSteppedStandUs(rbw, 1u)) << rbw;
+  }
+
+  // And a stepped point of a plan at 4.8 kHz stands the latency's own time, not the 500 us the
+  // line never typed: the log says so.
+  const ScopePlan plan = steppedPlanOf(869.0, 869.1, 16, 4.8);
+  ASSERT_EQ(kScopeSettleDefaultUs, plan.settle_us);
+  FakeArmRadio radio;
+  SteppedScope stepped;
+  ScopeAccumulator acc;
+  ScopeSweepTime time;
+  ScopeCalibration cal;
+  ScopeArmResult out;
+  bool whole = false;
+  stepped.restart();
+  acc.reset(plan.points);
+  ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+  EXPECT_NE(nullptr, std::strstr(radio.log, "settle(1334);read;"));
+  EXPECT_NE(nullptr, std::strstr(radio.log, "settle(500);"))
+      << "the arm's own settle is still the plan's";
+}
+
+TEST(Scope, ThePlannedTimeOfASteppedSweepIsItsPointsTimesWhatAPointStands) {
+  // The two spans of the garden's list, both ways. A stepped point costs its whole stand and a
+  // plugin point one RSSI update, so the `ack`'s `sweep` is the one number that moves - and it is
+  // what a reader of the `ack` plans the interval beside.
+  {
+    // 180 MHz at 467 kHz: 386 points in six segments, the wide picture of 23 November.
+    ScopeRequest r = request(779.618, 959.618);
+    r.rbw_khz = 467.0;
+    ScopePlan plugin;
+    ASSERT_TRUE(planScope(r, plugin));
+    const ScopePlan stepped = steppedPlanOf(779.618, 959.618, 0, 467.0);
+    ASSERT_EQ(386u, plugin.points);
+    ASSERT_EQ(6u, plugin.segments);
+    // Not one point, step, segment or bandwidth of the plan follows from the word.
+    EXPECT_EQ(plugin.points, stepped.points);
+    EXPECT_EQ(plugin.segments, stepped.segments);
+    EXPECT_DOUBLE_EQ(plugin.step_khz, stepped.step_khz);
+    EXPECT_DOUBLE_EQ(plugin.rbw_khz, stepped.rbw_khz);
+    EXPECT_DOUBLE_EQ(plugin.first_mhz, stepped.first_mhz);
+    EXPECT_EQ(plugin.settle_us, stepped.settle_us);
+    EXPECT_EQ(plugin.interval_ms, stepped.interval_ms);
+    // 5 ms the plugin's way - 386 updates plus eight an arm, and six settles of 500 us - and
+    // 193 ms stepped, which is 386 stands of 500 us.
+    EXPECT_EQ(5u, plugin.sweep_ms);
+    EXPECT_EQ(193u, stepped.sweep_ms);
+    EXPECT_EQ(scopeSteppedSweepMs(386, 467.0, kScopeSettleDefaultUs), stepped.sweep_ms);
+    // And one pass of loop() holds the chip for one slice: 100 points of 500 us is 50 ms, and a
+    // slice is never more than the segment it is in (65 points here, the longest of the six).
+    EXPECT_EQ(100u, scopeSteppedSlicePoints(467.0, kScopeSettleDefaultUs));
+    EXPECT_EQ(33u, stepped.segment_ms) << "65 points of 500 us, the longest segment";
+    EXPECT_EQ(1u, plugin.segment_ms) << "where one plugin call of those points is a millisecond";
+  }
+  {
+    // 13 MHz at 58.6 kHz: one segment of 250 points, the narrow line of the garden's lists.
+    ScopeRequest r = request(863.0, 876.0);
+    r.points = 250;
+    r.rbw_khz = 58.6;
+    ScopePlan plugin;
+    ASSERT_TRUE(planScope(r, plugin));
+    const ScopePlan stepped = steppedPlanOf(863.0, 876.0, 250, 58.6);
+    ASSERT_EQ(1u, plugin.segments);
+    EXPECT_EQ(8u, plugin.sweep_ms);
+    EXPECT_EQ(125u, stepped.sweep_ms) << "250 stands of 500 us";
+    EXPECT_EQ(50u, stepped.segment_ms) << "100 points a slice, which is the slice's own 50 ms";
+    // With no settle at all the stand is the latency's 137 us and the sweep 35 ms.
+    const ScopePlan none = steppedPlanOf(863.0, 876.0, 250, 58.6, 0);
+    EXPECT_EQ(35u, none.sweep_ms);
+    EXPECT_EQ(35u, none.segment_ms) << "250 points of 137 us is inside one slice";
+  }
+  // The arithmetic itself, at the ends: nothing to stand for is nothing planned, and a point is
+  // never cut in half - the longest settle there is makes a slice of two points and 40 ms of one
+  // pass, which is the worst the loop is ever held for by a stepped sweep.
+  EXPECT_EQ(0u, scopeSteppedSweepMs(100, 0.0, 500));
+  EXPECT_EQ(2u, scopeSteppedSlicePoints(467.0, kScopeSettleMaxUs)) << "two stands of 20 ms";
+  EXPECT_EQ(20u, scopeSteppedSweepMs(1, 467.0, kScopeSettleMaxUs));
+  // And the longest one pass of loop() can be, over every plan this firmware runs stepped: one
+  // slice, which is kScopeSteppedSliceMs and never more - where a plugin call may be 86 ms.
+  uint32_t worst_segment = 0;
+  for (uint32_t points = kScopeMinPoints; points <= kScopeMaxPoints; points++) {
+    for (const uint32_t settle : {0u, kScopeSettleDefaultUs, 2000u, kScopeSettleMaxUs}) {
+      const double spans[][2] = {{kRadioLowMhz, kRadioHighMhz},
+                                 {869.0, 870.0},
+                                 {869.6, 869.6 + double(points) * kScopeMinStepKhz / 1000.0}};
+      for (const auto& span : spans) {
+        ScopeRequest r = request(span[0], span[1]);
+        r.points = points;
+        r.settle_us = settle;
+        r.mode = kScopeModeStepped;
+        ScopePlan plan;
+        if (!planScope(r, plan)) continue;
+        if (plan.segment_ms > worst_segment) worst_segment = plan.segment_ms;
+      }
+    }
+  }
+  EXPECT_LE(worst_segment, kScopeSteppedSliceMs)
+      << "a stepped sweep gives the loop the chip back every slice";
+}
+
+TEST(Scope, AStopInTheMiddleOfASteppedSweepEndsItAndSendsNoHalfFrame) {
+  // A sweep counts only when its last point has gone in: `whole` is what a frame is sent on, so a
+  // scope stopped in the middle of one has told the accumulator nothing of a sweep and there is no
+  // half frame for a reader to mistake for one.
+  const ScopePlan plan = steppedPlanOf(800.0, 960.0, 320, 467.0);
+  ASSERT_EQ(5u, plan.segments);
+  FakeArmRadio radio;
+  SteppedScope stepped;
+  ScopeAccumulator acc;
+  ScopeSweepTime time;
+  ScopeCalibration cal;
+  ScopeArmResult out;
+  bool whole = false;
+  stepped.restart();
+  acc.reset(plan.points);
+  time.reset();
+  for (uint16_t i = 0; i < 2; i++) {
+    ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+    EXPECT_FALSE(whole) << "two of the five segments is not a sweep";
+  }
+  EXPECT_TRUE(stepped.midSweep());
+  EXPECT_EQ(2u, stepped.segment());
+  EXPECT_EQ(0u, acc.sweeps()) << "no sweep has gone in, so a frame would carry none";
+  EXPECT_FALSE(time.any()) << "and `us` is of a whole sweep or of nothing";
+  // The `stop` - which is what the mode does with the plan and the cursor - and the scope after it
+  // begins at segment 0, point 0, with nothing armed and nothing of this sweep carried into it.
+  stepped.restart();
+  EXPECT_EQ(0u, stepped.segment());
+  EXPECT_EQ(0u, stepped.point());
+  EXPECT_FALSE(stepped.midSweep());
+  radio.log[0] = '\0';
+  ASSERT_TRUE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+  EXPECT_EQ(1u, countOf(radio.log, "standby;")) << "the first segment is armed again";
+
+  // And the loop is what stops it: src/roles/scanner/Radio.cpp runs one slice a pass and sends a
+  // frame only when that slice finished the sweep. Read off the file, as the mode's own tests read
+  // it: the service of a stepped scope is not host-portable and a comment is not a test.
+  const std::string radio_cpp = fileText(std::string(PROJECT_DIR) + "/src/roles/scanner/Radio.cpp");
+  ASSERT_FALSE(radio_cpp.empty()) << "cannot read src/roles/scanner/Radio.cpp";
+  EXPECT_EQ(1u, countOf(radio_cpp, "g_scope.stepped.slice(g_arm, g_scope.plan, g_scope.cal,"))
+      << "one slice a pass of loop(), so a `stop` is taken between two of them";
+  EXPECT_EQ(1u, countOf(radio_cpp, "if (!whole) return;"))
+      << "and no frame before the sweep that makes it is whole";
+  EXPECT_EQ(1u, countOf(radio_cpp, "g_scope.stepped.restart();"))
+      << "a scope that starts begins at segment 0, point 0";
+}
+
+TEST(Scope, ASteppedPointTheChipRefusesNamesTheCallAndStopsThere) {
+  // The retune and the reading each have their own word in the `err` line, because the frequency
+  // alone cannot tell them apart and a report from the field needs to.
+  const ScopePlan plan = steppedPlanOf(863.0, 876.0, 16, 467.0, 0);
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plan, 0, seg));
+  {
+    FakeArmRadio radio;
+    radio.read_code = -707;
+    SteppedScope stepped;
+    ScopeAccumulator acc;
+    ScopeSweepTime time;
+    ScopeCalibration cal;
+    ScopeArmResult out;
+    bool whole = true;
+    stepped.restart();
+    acc.reset(plan.points);
+    EXPECT_FALSE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+    EXPECT_EQ(kScopeArmRead, out.failed);
+    EXPECT_EQ(-707, out.code);
+    EXPECT_FALSE(whole);
+    EXPECT_EQ(0u, stepped.point()) << "the point that failed is the one the cursor stands on";
+    EXPECT_FALSE(time.any()) << "a call that refused is not a measurement of one that worked";
+  }
+  {
+    // A retune the chip refuses: the arm's own setFrequency is the first one made, so the arm
+    // names its own call and the point never happens.
+    FakeArmRadio radio;
+    radio.frequency_code = -2;
+    SteppedScope stepped;
+    ScopeAccumulator acc;
+    ScopeSweepTime time;
+    ScopeCalibration cal;
+    ScopeArmResult out;
+    bool whole = true;
+    stepped.restart();
+    acc.reset(plan.points);
+    EXPECT_FALSE(stepped.slice(radio, plan, cal, acc, time, out, whole));
+    EXPECT_EQ(kScopeArmSetFrequency, out.failed) << "the arm is the first thing a slice does";
+    EXPECT_EQ(-2, out.code);
+  }
+  EXPECT_STREQ("point", scopeArmCallName(kScopeArmPoint));
+  EXPECT_STREQ("read", scopeArmCallName(kScopeArmRead));
+}
+
+TEST(Scope, TheAckNamesTheModeOnlyWhenTheLineAskedForTheSteppedOne) {
+  char msg[kMaxAckMessageBytes];
+  // The garden's wide line, both ways, to the byte. A line with no word has the `ack` phase
+  // 3.17's task 01 left - `mode=` is not in it at all - and a stepped one says so after the
+  // settle.
+  ScopeRequest plugin = request(800.0, 960.0);
+  plugin.points = 320;
+  plugin.rbw_khz = 467.0;
+  plugin.interval_ms = 1000;
+  ScopePlan plan;
+  ASSERT_TRUE(planScope(plugin, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=320 step=500.0000kHz rbw=467.0kHz seg=5 cov=0.934 interval=1000ms sweep=4ms"
+               " settle=500us", msg);
+  EXPECT_EQ(nullptr, std::strstr(msg, "mode=")) << msg;
+
+  ScopeRequest stepped = plugin;
+  stepped.mode = kScopeModeStepped;
+  ASSERT_TRUE(planScope(stepped, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_STREQ("n=320 step=500.0000kHz rbw=467.0kHz seg=5 cov=0.934 interval=1000ms sweep=160ms"
+               " settle=500us mode=stepped", msg);
+
+  // The order is `segw=` (when it is not the default), the settle, the mode, then the two words
+  // of phase 3.16's task 03 - each where its own task put it.
+  stepped.seg_mhz = 5.6;
+  stepped.settle_us = 0;
+  stepped.reg = kScopeRegulatorLdo;
+  stepped.gain = kScopeGainNoBoost;
+  ASSERT_TRUE(planScope(stepped, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_NE(nullptr, std::strstr(msg, " segw=5.6MHz settle=0us mode=stepped reg=ldo gain=noboost"))
+      << msg;
+
+  // And the widest `ack` there is still fits in the message an `ack` line may carry.
+  ScopeRequest widest = request(kRadioLowMhz, kRadioHighMhz);
+  widest.points = kScopeMaxPoints;
+  widest.rbw_khz = 4.8;
+  widest.seg_mhz = 0.5;
+  widest.settle_us = kScopeSettleMaxUs;
+  widest.interval_ms = kScopeIntervalMaxMs;
+  widest.sink_baud = 115200;
+  widest.reg = kScopeRegulatorDcDc;
+  widest.gain = kScopeGainNoBoost;
+  widest.mode = kScopeModeStepped;
+  ASSERT_TRUE(planScope(widest, plan));
+  scopeAckMessage(plan, msg, sizeof(msg));
+  EXPECT_LT(std::strlen(msg), kMaxAckMessageBytes) << msg;
+  EXPECT_NE(nullptr, std::strstr(msg, "mode=stepped")) << msg;
+}
+
+TEST(Scope, APluginScopeAfterASteppedOneIsThePluginsOwn) {
+  // The word lives in the plan of the scope that asked for it and nowhere else, so the scope after
+  // a stepped one is the plugin's: the same radio makes the plugin's calls and no reading of its
+  // own, and the arm of a plugin segment is the one the tests above hold to the byte.
+  const ScopePlan stepped = steppedPlanOf(863.0, 876.0, 16, 467.0, 0);
+  const ScopePlan plugin = planOf(863.0, 876.0, 16);
+  ASSERT_EQ(kScopeModeStepped, stepped.mode);
+  ASSERT_EQ(kScopeModePlugin, plugin.mode);
+  EXPECT_EQ(kScopeModePlugin, ScopePlan().mode) << "a plan nobody filled in is the plugin's";
+  EXPECT_EQ(kScopeModePlugin, ScopeRequest().mode);
+
+  FakeArmRadio radio;
+  SteppedScope cursor;
+  ScopeAccumulator acc;
+  ScopeSweepTime time;
+  ScopeCalibration cal;
+  ScopeArmResult out;
+  bool whole = false;
+  cursor.restart();
+  acc.reset(stepped.points);
+  while (!whole) ASSERT_TRUE(cursor.slice(radio, stepped, cal, acc, time, out, whole));
+  ASSERT_EQ(16u, countOf(radio.log, "read;"));
+
+  // And now the plugin's way on the same radio: one segment, one plugin call, no reading of the
+  // host's. The calibration is reset because a scope that starts resets the chip (beginPlugin).
+  radio.log[0] = '\0';
+  ScopeSegment seg;
+  ASSERT_TRUE(scopeSegment(plugin, 0, seg));
+  cal = ScopeCalibration();
+  ASSERT_TRUE(armScopeSegment(radio, plugin, seg, cal, out));
+  uint8_t levels[kScopePluginMaxPoints];
+  ASSERT_TRUE(sweepScopeSegment(radio, levels, time, out));
+  char expected[320];
+  snprintf(expected, sizeof(expected),
+           "standby;setFrequency(%.3f);calibrateImage(%.3f,%.3f);deviceErrors;"
+           "setSweep(%.3f,%.3f,%u,%.1f);",
+           double(scopeSegmentCentreMhz(plugin, seg)), seg.cal_lo_mhz, seg.cal_hi_mhz,
+           seg.first_mhz, plugin.step_khz / 1000.0, unsigned(seg.points), plugin.rbw_khz);
+  appendSettle(expected, sizeof(expected), plugin, seg);
+  const size_t at = strlen(expected);
+  snprintf(expected + at, sizeof(expected) - at, "sweep;");
+  EXPECT_STREQ(expected, radio.log);
+  EXPECT_EQ(0u, countOf(radio.log, "read;")) << "a plugin sweep never reads a level itself";
 }
 
 // ----------------------------------------------------------------- the err line of a segment

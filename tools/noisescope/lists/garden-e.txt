@@ -1,0 +1,46 @@
+# Session E - the two ways to sweep, side by side
+#
+#   python tools/noisescope/hunt.py --sessions tools/noisescope/lists/garden-e.txt
+#
+# A NoiseScope session's program for the unit at Bellevue (tasks/phase-3.16/README.md, *The garden
+# instead of the bench*). **It needs a release carrying phase 3.17's task 02** - the word
+# `stepped`, which sweeps a span by tuning every point with the chip's own command, standing on it
+# and reading it once, instead of letting the radio program sweep it.
+#
+# What it is for. The far echoes of a wide `scope` are the sweep plugin's and not the chip's
+# (sessions 10 and 11, 25 November): the receiver parked on 912.0 MHz never showed the neighbour,
+# and an echo is gone when a segment begins at its place and stands the settle. The plugin reads
+# within some 10 us of writing a frequency and at certain frequencies the synthesizer needs 30 to
+# 40 (tasks/phase-3.17/FOLLOWUPS.md, *Sessions 10 and 11*). A stepped sweep never reads through
+# that moment, so the question this session answers is the plain one: **in the frames that hold
+# the neighbour's signal, do 816, 845, 888 and 912 MHz show the plugin's way and not stepped?**
+#
+# And what it costs. A stepped point stands 500 us where a plugin point costs one RSSI update of
+# 3.4 us at 467 kHz, so the wide span is planned at 160 ms stepped against 4 ms the plugin's way
+# (the `ack`'s `sweep` says which). `sps` of these steps is what that comes to on the unit, where
+# the plugin makes 11 sweeps a second with five segments.
+#
+# The pairs. Steps 1 and 2 are the same line but for the word, and so are 3 and 4: two readings of
+# each, because a neighbour's traffic is not a generator and one session's lit frames are not a
+# measurement. `python tools/noisescope/echoes.py --steps <file> --carrier 869.618` reads `mode=`
+# out of every `ack` and prints the pair *the mode* for each of them: for each echo of one, whether
+# the other has one at the same place.
+#
+# Six steps, 85 seconds each; the longest line is 34 characters of 40 and the program 366 bytes
+# of 384. The narrow line leaves its points to the bandwidth, which is 222 of them.
+#
+# the two ways to sweep, side by side
+--- garden-e
+seconds = 85
+# the wide span the plugin's way: 160 MHz at 467 kHz, five segments, the default settle
+plugin-1 = scope 800 960 320 467 1000
+# and the same span with every point tuned, stood on and read by the host
+stepped-1 = scope 800 960 320 467 1000 stepped
+# the plugin's way again, because one reading of a neighbour's traffic is not a measurement
+plugin-2 = scope 800 960 320 467 1000
+# and stepped again
+stepped-2 = scope 800 960 320 467 1000 stepped
+# 13 MHz around the signal at 58.6 kHz, one segment, the plugin's way
+narrow-plugin = scope 863 876 0 58.6 1000
+# and the same 13 MHz stepped
+narrow-stepped = scope 863 876 0 58.6 1000 stepped

@@ -406,13 +406,14 @@ class TheSessions(HuntCase):
             self.assertNotIn("serial", sys.modules,
                              "--sessions must not reach anything that opens a port")
 
-    def test_the_four_garden_lists_would_be_taken(self):
+    def test_the_five_garden_lists_would_be_taken(self):
         """The lists of tasks/phase-3.16/README.md's *The garden instead of the bench*.
 
-        Six steps is a program's most and three of the four are at it; garden-d is five since
+        Six steps is a program's most and four of the five are at it; garden-d is five since
         phase 3.17's task 01, which cost it a step to say `max 32 0` on its reference line.
+        garden-e is phase 3.17's task 02's: the two ways to sweep, twice each and then narrow.
         """
-        for letter, steps in (("a", 6), ("b", 6), ("c", 6), ("d", 5)):
+        for letter, steps in (("a", 6), ("b", 6), ("c", 6), ("d", 5), ("e", 6)):
             out = io.StringIO()
             code = hunt.main(["--sessions", self._garden(letter)], bench=NoBenchIsAsked(),
                              out=out)

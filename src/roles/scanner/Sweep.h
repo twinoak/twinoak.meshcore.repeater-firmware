@@ -376,6 +376,29 @@ enum ScopeAgg : uint8_t {
 const char* scopeAggName(ScopeAgg agg);
 bool scopeAggOf(const char* word, ScopeAgg& out);
 
+// **Which of the two ways a wide picture is made**, and the one word that asks for the other.
+//
+// The plugin's way is what `scope` has always done: the radio program retunes itself after every
+// RSSI update and reads within some ten microseconds of writing a frequency - and at certain
+// frequencies the synthesizer needs thirty to forty, which is what the far echoes of a wide scope
+// are (sessions 10 and 11 on the unit at Bellevue, 25 November 2026;
+// tasks/phase-3.17/FOLLOWUPS.md). Stepped is the other way: **the host tunes every point with the
+// chip's own command, stands on it and reads it once**, so nothing is read through a moment the
+// synthesizer is still moving in. It costs sweeps - a point costs its whole stand rather than one
+// RSSI update - and which of the two a span should be swept with is the unit's to say and not
+// this file's (tasks/phase-3.17/README.md).
+enum ScopeMode : uint8_t {
+  kScopeModePlugin = 0,   // no word on the line: the radio program sweeps, as it always has
+  kScopeModeStepped = 1,  // `stepped`
+};
+
+// The word the `ack` carries, and "" for the plugin's - which is named nowhere, so that a line
+// with no word of phase 3.17's task 02 has the `ack` its task 01 left, to the byte.
+const char* scopeModeName(ScopeMode mode);
+
+// The word the command takes. False for a word that is not `stepped`, and `out` is untouched then.
+bool scopeModeOf(const char* word, ScopeMode& out);
+
 // Which regulator the chip is begun with **for one scope**, and which receive gain. Neither is
 // the build's own or what `boost on|off` left: a `scope` line may carry one word of each pair and
 // that word holds for that scope alone, because the two readings of the echoes of 23 November
@@ -459,10 +482,12 @@ enum ScopeArmCall : uint8_t {
   kScopeArmSweep = 5,           // SX126xSpectrumScanner::sweep(), the sweep itself
   kScopeArmReload = 6,          // the chip reset and the plugin uploaded again (below)
   kScopeArmSettle = 7,          // the retune onto the segment's first point before the settle
+  kScopeArmPoint = 8,           // a stepped point's own retune, with the chip's own command
+  kScopeArmRead = 9,            // and the one reading taken of it
 };
 
 // The word the `err` line carries for each: "standby", "setFrequency", "calibrateImage",
-// "setSweep", "sweep", "reload", "settle"; "" for none.
+// "setSweep", "sweep", "reload", "settle", "point", "read"; "" for none.
 const char* scopeArmCallName(ScopeArmCall call);
 
 // What `scope <f0> <f1> [points [rbw_khz [interval_ms [agg]]]]` asked for; 0 is "the default"
@@ -480,6 +505,9 @@ struct ScopeRequest {
   // The widest a segment may be, in MHz: 0 is kScopeSegmentMhz, today's. Taken to a tenth of a
   // MHz, and refused below one step or above kScopeSegmentMhz.
   double seg_mhz = 0.0;
+  // Which way this one scope is swept (phase 3.17's task 02): the plugin's, unless the line
+  // carried the word `stepped` - wherever it stood after the two ends.
+  ScopeMode mode = kScopeModePlugin;
   // How long the receiver stands on a segment's first point before the sweep that counts.
   // kScopeSettleAbsentUs - this field left alone - is kScopeSettleDefaultUs, what a `scope` that
   // names no settle gets; 0 is none at all, the arm as it was before phase 3.17's task 01, and
@@ -504,9 +532,17 @@ struct ScopePlan {
   uint16_t segments = 0;
   uint32_t interval_ms = 0;  // what was taken, the sink's floor included
   ScopeAgg agg = kScopeAggMax;
-  uint32_t segment_ms = 0;   // the longest one plugin call holds the chip
-  uint32_t sweep_ms = 0;     // and the whole span, every segment of it, settles included
+  // The longest one pass of loop() is held: one plugin call, or - for a stepped sweep - one slice
+  // of it (kScopeSteppedSliceMs below).
+  uint32_t segment_ms = 0;
+  // And the whole span: every segment of it with its settle for a plugin sweep, and the points
+  // times what a stepped point stands for a stepped one (scopeSteppedSweepMs).
+  uint32_t sweep_ms = 0;
   double seg_mhz = kScopeSegmentMhz;  // the widest a segment of this plan may be, as taken
+  // And which way it is swept, carried from the request: the plugin's, or stepped. It changes no
+  // point, no segment and no bandwidth of the plan - what it changes is what a point costs, which
+  // is `sweep_ms` and `segment_ms` below.
+  ScopeMode mode = kScopeModePlugin;
   // And the settle before each segment's first reading, as taken: a real number of microseconds
   // always - never kScopeSettleAbsentUs - because planScope() resolved it.
   uint32_t settle_us = kScopeSettleDefaultUs;
@@ -558,6 +594,10 @@ struct ScopeArmRadio {
   // 1.6 ms / RBW from one of 0.94 and a host test must be able to step the clock for them
   // (as it steps HistRadio::nowUs for a histogram).
   virtual int sweep(uint8_t* levels) = 0;
+  // One reading of where the receiver stands, as the byte a frame carries: the instantaneous RSSI
+  // the plugin itself files per point, -2 x dBm (GetRssiInst; spectrum.asm's header, `result`).
+  // **A stepped sweep's one measurement**, and nothing a plugin sweep ever calls.
+  virtual int readLevel(uint8_t& level) = 0;
   virtual uint32_t nowUs() = 0;
   // The receiver left standing where it is, in continuous receive, for `us` microseconds. The
   // chip half is a delay and nothing else; the default is to stand there for no time at all, so
@@ -750,6 +790,54 @@ uint32_t scopeSegmentMs(uint16_t points, double rbw_khz);
 uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz,
                       uint32_t settle_us = 0);
 
+// ------------------------------------------------- and how long a stepped sweep takes instead
+//
+// A stepped point costs its **stand** and not an RSSI update: the frequency is written, the
+// receiver is left standing on it, and then one reading is taken. So the time of a stepped sweep
+// is the points times that stand - the arms are not in it, as they are not in scopeSweepMs()'s
+// figure either (it prices an arm at kScopeSegmentUpdates updates and leaves out the four SPI
+// calls an arm makes; p3.16-02's report, deviation 6).
+
+// The plugin's own latency table: how many RSSI updates after a retune a reading is still of the
+// frequency before (vendor/sx126x_spectrum/SX126xSpectrumScanner.h, latencyFor() ~L78 - 2 below
+// 17 kHz, 3 below 150, 4 above - and spectrum.asm's header says what it was measured against).
+// It is private in that class, so the three numbers are written out here; the page cites the file.
+uint8_t scopeLatencyUpdates(double rbw_khz);
+
+// On top of the latency, before a reading is believed to be of the frequency just written: the
+// two extra updates the plugin gives **point 0**, the one point it reaches by a jump and not by a
+// step (spectrum.asm: a point gets the (L+1)-th update after its retune, and point 0 two more,
+// because "a jump of several MHz settles 1-2 updates slower than a step").
+constexpr uint16_t kScopeLatencyJumpUpdates = 2;
+
+// How long a stepped point stands, in microseconds: **the settle in force - phase 3.17's task
+// 01's default, or the line's own number - and never less than the latency's own time**, which is
+// (L + kScopeLatencyJumpUpdates) updates of kScopeUpdateMsKhz / RBW. A stand under that reads a
+// level the receiver had not caught up to, however small the number on the line was: 1 334 us at
+// 4.8 kHz, 137 at 58.6, 21 at 467.
+uint32_t scopeSteppedStandUs(double rbw_khz, uint32_t settle_us);
+
+// How long one stepped sweep of `points` points takes, in whole milliseconds: the points times
+// the stand above. What the `ack`'s `sweep` says for a `scope ... stepped`, and the number a
+// reader of the `ack` plans the interval beside.
+uint32_t scopeSteppedSweepMs(uint16_t points, double rbw_khz, uint32_t settle_us);
+
+// **The slice: how long a stepped sweep may hold the loop in one pass of it.** A plugin call
+// holds the chip for one segment - up to about 86 ms, 250 points at the narrowest bandwidth
+// (vendor/sx126x_spectrum/SX126xSpectrumScanner.h's own figure) - and the loop comes round
+// between two of them. A stepped segment is longer than that whenever the stand is more than a
+// third of a millisecond, so it is cut into slices of this many milliseconds instead, and the
+// loop is served between two slices exactly as it is between two plugin calls: a `stop` taken,
+// both ports drained, the heartbeat left and both watchdogs fed. 50 ms is inside the plugin's own
+// worst call, and 160 of them fit in the 8 s loop check (src/roles/scanner/config.h,
+// LOOP_WDT_TIMEOUT_MS).
+constexpr uint32_t kScopeSteppedSliceMs = 50;
+
+// How many points that is, for the stand in force: at least one - a point is never cut in half,
+// so a settle of 20 000 us is a slice of one point and 20 ms - and at most the segment's own
+// points, which the caller bounds it by.
+uint16_t scopeSteppedSlicePoints(double rbw_khz, uint32_t settle_us);
+
 // What the `ack` of a `scope` that started carries: what was *taken*, which is not always what
 // was asked (docs/noisescope.md section 5). Here and not where the ack is sent, so that a test
 // can hold it to the byte.
@@ -758,6 +846,11 @@ uint32_t scopeSweepMs(uint16_t points, uint16_t segments, double rbw_khz,
 // **`settle=` is named on every `scope`**, because since phase 3.17's task 01 every `scope` has
 // one and a capture has to say whether its segments' first points stood: `settle=500us` for the
 // default and `settle=0us` for a line that asked for none.
+//
+// `mode=stepped` follows them, and **only for a line that carried the word**: a `scope` swept the
+// plugin's way says nothing about a mode, so its `ack` is the one phase 3.17's task 01 left to the
+// byte. A capture has to say which way it was made all the same - the two ways read the same
+// places differently, which is the whole of phase 3.17's task 02.
 //
 // Phase 3.16's task 03 adds `reg=` and `gain=` after them, each named only when its own word was
 // on the line.
@@ -804,6 +897,61 @@ class ScopeAccumulator {
   uint8_t last_[kScopeMaxPoints];
   uint16_t count_[kScopeMaxPoints];
   float power_[kScopeMaxPoints];
+};
+
+// ----------------------------------------------------------- a sweep the host steps, in slices
+//
+// The stepped sweep itself: a cursor over the plan's points, one slice a call, and nothing of the
+// board in it - the calls go through ScopeArmRadio and the clock and the waits are the seam's, so
+// that a host test is what drives a whole sweep (src/roles/scanner/Radio.cpp is the chip half and
+// the loop that calls this).
+//
+// What one point is, and in this order: **the frequency written with the chip's own command**
+// through the arm's seam (ScopeArmRadio::setFrequency, which is SetRfFrequency with the
+// calibration skipped), **the stand** of scopeSteppedStandUs() made with the seam's own delay -
+// never by reading the clock, which on this board steps by 977 us
+// (tasks/phase-3.16/FOLLOWUPS.md) - and **one reading** taken of it. Then the next point.
+//
+// What a segment is here is a range of one calibration and nothing else: the cursor arms a
+// segment with armScopeSegment(), exactly as a plugin sweep arms it - the chip's error word read
+// and cleared for a plan of more than one segment, the centre frequency, one image calibration
+// for the segment's range unless the chip is already calibrated for it, the plugin's parameters
+// (which are what put the receiver in continuous receive at the plan's bandwidth) and the plan's
+// settle on the first point. The points are then stepped through by hand and the plugin's own
+// sweep command is never sent.
+//
+// A sweep is whole only when its last point has gone in, and `whole` says so: a scope that is
+// stopped in the middle of one has told the accumulator nothing of a sweep, so there is no half
+// frame for a reader to mistake for a sweep.
+class SteppedScope {
+ public:
+  // At segment 0, point 0, with nothing armed: what a `scope ... stepped` starts with.
+  void restart();
+
+  // One slice of the sweep: at most scopeSteppedSlicePoints() points, and never past the current
+  // segment's last one. The segment is armed first when the cursor has just reached it, and
+  // `out.before_errors` is then what the chip's error word held there - the frame's `dev`.
+  //
+  // True when the slice ran, with `whole` set when it finished the sweep's last point. False with
+  // `out` naming the call that returned the code - kScopeArmPoint for the retune, kScopeArmRead
+  // for the reading, and an arm's own call for an arm - and then nothing of this slice's time is
+  // counted: a call that refused is not a measurement of one that worked. False with
+  // kScopeArmNone for a cursor the plan does not have, which restart() cannot produce.
+  bool slice(ScopeArmRadio& radio, const ScopePlan& plan, ScopeCalibration& cal,
+             ScopeAccumulator& acc, ScopeSweepTime& time, ScopeArmResult& out, bool& whole);
+
+  uint16_t segment() const { return segment_; }  // the segment the cursor is in
+  uint16_t point() const { return point_; }      // and the next point of it to measure
+  // Whether a sweep is part-way through: points of it have gone into the accumulator and the
+  // sweep is not whole. What a `stop` in the middle of a sweep leaves behind, and false again
+  // after the sweep that ends.
+  bool midSweep() const { return mid_; }
+
+ private:
+  uint16_t segment_ = 0;
+  uint16_t point_ = 0;
+  uint16_t armed_ = 0xFFFF;  // the segment the chip is armed for (0xFFFF = none)
+  bool mid_ = false;
 };
 
 // ------------------------------------------------------------------ the window

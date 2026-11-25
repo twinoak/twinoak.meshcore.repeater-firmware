@@ -95,7 +95,7 @@ const char* nameOf(Verb verb) {
 const char* usageOf(Verb verb) {
   switch (verb) {
     case kVerbScope: return "usage: scope <f0> <f1> [points [rbw_khz [interval_ms [max|mean|last"
-                            " [seg_mhz [settle_us]]]]]] [ldo|dcdc] [boost|noboost]"
+                            " [seg_mhz [settle_us]]]]]] [ldo|dcdc] [boost|noboost] [stepped]"
                             " | scope off";
     case kVerbDwell: return "usage: dwell <f_mhz> [secs [win_ms]]";
     case kVerbHome: return "usage: home <f_mhz> [bw_khz sf cr]";
@@ -149,9 +149,22 @@ bool parseScope(const Tokens& tokens, ScopeArgs& out, const char** why) {
   rest.at[rest.count++] = tokens.at[2];
   bool reg_taken = false;
   bool gain_taken = false;
+  bool mode_taken = false;
   for (int i = 3; i < tokens.count; i++) {
     ScopeRegulator reg = kScopeRegulatorBuild;
     ScopeGain gain = kScopeGainAsLeft;
+    ScopeMode mode = kScopeModePlugin;
+    // Phase 3.17's task 02's one word, taken the same way and under the same rule: `stepped`
+    // twice says nothing new, so it is a line nobody meant and is refused in the same sentence.
+    if (scopeModeOf(tokens.at[i], mode)) {
+      if (mode_taken) {
+        if (why != nullptr) *why = kScopeWordRefusal;
+        return false;
+      }
+      mode_taken = true;
+      parsed.mode = mode;
+      continue;
+    }
     if (scopeRegulatorOf(tokens.at[i], reg)) {
       if (reg_taken) {
         if (why != nullptr) *why = kScopeWordRefusal;
