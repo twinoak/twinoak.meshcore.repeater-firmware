@@ -587,7 +587,12 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   }
   if (request.rbw_khz < 0.0) return false;
   if (request.interval_ms > kScopeIntervalMaxMs) return false;
-  if (request.settle_us > kScopeSettleMaxUs) return false;
+  // The settle, resolved here and in no other place: no ninth number on the line is
+  // kScopeSettleDefaultUs, and only a `0` typed there is none at all. Resolved before the bound,
+  // because kScopeSettleAbsentUs is deliberately outside it.
+  const uint32_t settle_us =
+      request.settle_us == kScopeSettleAbsentUs ? kScopeSettleDefaultUs : request.settle_us;
+  if (settle_us > kScopeSettleMaxUs) return false;
   if (request.seg_mhz < 0.0) return false;
   if (request.points != 0 &&
       (request.points < kScopeMinPoints || request.points > kScopeMaxPoints)) {
@@ -647,7 +652,7 @@ bool planScope(const ScopeRequest& request, ScopePlan& out) {
   out.segments = uint16_t(segments);
   out.agg = request.agg;
   out.seg_mhz = seg_mhz;
-  out.settle_us = request.settle_us;
+  out.settle_us = settle_us;
   // Carried and nothing more: neither word changes a point, a segment or a millisecond of the
   // plan - they are what the chip is begun as for this scope, and the `ack` names them.
   out.reg = request.reg;
@@ -684,13 +689,20 @@ void scopeAckMessage(const ScopePlan& plan, char* out, size_t bytes) {
                                unsigned(plan.points), plan.step_khz, plan.rbw_khz,
                                unsigned(plan.segments), plan.cov,
                                (unsigned long)plan.interval_ms, (unsigned long)plan.sweep_ms);
-  // And the two numbers of phase 3.16's task 02, named only when one of them is not the default -
-  // so that the line of a `scope` asked for as it was asked for before that task is that line,
-  // byte for byte.
+  // Then the width of phase 3.16's task 02, named only when it is not kScopeSegmentMhz - so that
+  // a `scope` that asked for no width says nothing about one.
   if (written <= 0 || size_t(written) >= bytes) return;
   size_t at = size_t(written);
-  if (plan.seg_mhz != kScopeSegmentMhz || plan.settle_us != 0) {
-    const int more = snprintf(out + at, bytes - at, " segw=%.1fMHz settle=%luus", plan.seg_mhz,
+  if (plan.seg_mhz != kScopeSegmentMhz) {
+    const int more = snprintf(out + at, bytes - at, " segw=%.1fMHz", plan.seg_mhz);
+    if (more <= 0 || size_t(more) >= bytes - at) return;
+    at += size_t(more);
+  }
+  // And the settle, on **every** `scope`: since phase 3.17's task 01 every one of them stands on
+  // its segments' first points unless the line said `0`, and a capture that does not say which
+  // cannot be read back (tasks/phase-3.17/01-a-settle-by-default.md, deliverable 4).
+  {
+    const int more = snprintf(out + at, bytes - at, " settle=%luus",
                               (unsigned long)plan.settle_us);
     if (more <= 0 || size_t(more) >= bytes - at) return;
     at += size_t(more);

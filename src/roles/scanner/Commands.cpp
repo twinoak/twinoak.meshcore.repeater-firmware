@@ -183,7 +183,12 @@ bool parseScope(const Tokens& tokens, ScopeArgs& out, const char** why) {
   // it reads the same: the widest a segment may be, and how long the receiver stands on a
   // segment's first point before the reading that counts. planScope() bounds both.
   if (rest.count >= 8) parsed.seg_mhz = asDouble(arg(rest, 7), 0.0);
-  if (rest.count >= 9) parsed.settle_us = asU32(arg(rest, 8), 0);
+  // **The ninth word is the one place absent is told from 0**: the field keeps
+  // kScopeSettleAbsentUs - the default, planScope()'s to resolve - unless a ninth word is there,
+  // and a `0` typed there is a settle asked for and is none at all. A ninth word that is not a
+  // number reads as strtoul's 0 and so as none, which is the reading every other number on the
+  // line gets (the fallback below is for a null word and cannot be reached with nine of them).
+  if (rest.count >= 9) parsed.settle_us = asU32(arg(rest, 8), kScopeSettleAbsentUs);
   out = parsed;
   return true;
 }

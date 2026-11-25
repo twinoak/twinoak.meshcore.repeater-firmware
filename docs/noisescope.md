@@ -209,7 +209,7 @@ host is attached.
 | `info` | one `info` line (fw/version/role/board/devid/reset reason/peripherals/radio ROM/home cfg) |
 | `stat` | one `stat` line immediately (the heartbeat also fires every 10 s) |
 | `sweep [f0 f1 [step_khz [dwell_ms [passes]]]]` | RSSI sweep. Defaults: the band's range, 25 kHz, 20 ms, 1 pass. `passes 0` = repeat until `stop` |
-| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 (`0` = no stand at all, today's). Four words may stand **anywhere after the two ends**, taken out of the line before the numbers are read: `ldo` or `dcdc` is the voltage regulator the radio is begun with **for this scope**, and `boost` or `noboost` the receive gain **for this scope** — neither is the build's own and neither is what `boost on|off` left, so `scope 780 960 0 467 1000 ldo` and `scope 780 960 ldo noboost` are both lines. Both words of a pair on one line are refused in a sentence (§6). `scope off` ends it |
+| `scope <f0> <f1> [points [rbw_khz [interval_ms [agg [seg_mhz [settle_us]]]]]]` | the fast sweep, streamed to the port the command came in on until `stop`. `150 ≤ f0 < f1 ≤ 960` MHz, **both ends required**; `points` 16…2048 (`0` = 250, or as many as the given `rbw` covers without gaps); `rbw_khz` `0` = the narrowest bandwidth at least 1.1 × the step, capped at 467; `interval_ms` 0…60000, `0` = a frame per sweep; `agg` `max` (default), `mean` or `last`; `seg_mhz` the widest a segment may be, from one step to 32 and taken to a tenth of a MHz (`0` = 32, today's); `settle_us` how long the receiver stands on a segment's first point before its first reading counts, 0…20000 — **a line that names no ninth number stands 500 µs**, which is measured (§6), and `0` asks for no stand at all, which is what every line typed before that was measured did. Four words may stand **anywhere after the two ends**, taken out of the line before the numbers are read: `ldo` or `dcdc` is the voltage regulator the radio is begun with **for this scope**, and `boost` or `noboost` the receive gain **for this scope** — neither is the build's own and neither is what `boost on|off` left, so `scope 780 960 0 467 1000 ldo` and `scope 780 960 ldo noboost` are both lines. Both words of a pair on one line are refused in a sentence (§6). `scope off` ends it |
 | `hist [f0 f1 [step_khz [samples [passes]]]]` | spectral-scan histogram sweep (Semtech RAM patch). Defaults as above with 2048 samples; `samples` is clamped to 256…65535 and is what one frequency costs, 8.2 µs each (2 ms at 256, **17 ms at the default**, 0.54 s at 65535). A line's bins add up to its `n` or the line is not sent (below) |
 | `dwell <f_mhz> [secs [win_ms]]` | time-domain statistics on one frequency (defaults 60 s, 1000 ms windows). Uses the home LoRa RX filter |
 | `cad [f_mhz [count]]` | LoRa channel-activity detections out of `count` tries (default the home frequency, 100) |
@@ -274,7 +274,7 @@ A `scope` ack carries what was *taken*, which is not always what was asked:
 
 ```
 {"t":"ack","cmd":"scope","ok":true,
- "msg":"n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=11ms"}
+ "msg":"n=250 step=28.0000kHz rbw=39.0kHz seg=1 cov=1.393 interval=0ms sweep=12ms settle=500us"}
 ```
 
 `seg` is how many plugin calls one sweep of the span is (§6), `cov` is the
@@ -283,8 +283,16 @@ between two points — `interval` is what the port allowed (below) and `sweep` i
 how long one sweep of every segment is planned to take, every arm and every
 settle included.
 
-A `scope` asked for with a **segment width** or a **settle** says so, after the
-line above and in the same shape whichever of the two was given:
+**`settle` is on every `scope` ack**, because every `scope` has one: `500us` for
+a line that named no settle and `0us` for a line that asked for none. A capture
+that does not say which cannot be read back — the first points of its segments
+either stood or they did not — so the number is on the line whether or not
+anybody typed it. (The same `scope 863 870` read `sweep=11ms` and no `settle`
+before the default existed; the half a millisecond of the one segment's stand is
+the difference.)
+
+A `scope` asked for with a **segment width** says so just before the settle, and
+only when the width is not the 32 MHz a line with no width gets:
 
 ```
 {"t":"ack","cmd":"scope","ok":true,
@@ -292,19 +300,19 @@ line above and in the same shape whichever of the two was given:
 ```
 
 A `scope` asked for with one of the four **words** names it in the same way,
-after the two numbers and only when its own word was on the line — `reg=ldo` or
-`reg=dcdc`, and `gain=boost` or `gain=noboost`:
+after the width and the settle and only when its own word was on the line —
+`reg=ldo` or `reg=dcdc`, and `gain=boost` or `gain=noboost`:
 
 ```
 {"t":"ack","cmd":"scope","ok":true,
- "msg":"n=250 step=52.0000kHz rbw=58.6kHz seg=1 cov=1.127 interval=0ms sweep=8ms reg=ldo"}
+ "msg":"n=250 step=52.0000kHz rbw=58.6kHz seg=1 cov=1.127 interval=0ms sweep=8ms settle=500us reg=ldo"}
 ```
 
-A line that names none of the four and neither number gets the first shape, byte
-for byte — what those two numbers do, and why a scope can be asked for on the
-other regulator and at the lower gain, is §6; which of them a `scope` should take
-when none is given is not settled yet. A line that names both words of a pair is
-refused with a sentence of its own:
+A line that names none of the four and no width gets the first shape, byte for
+byte — what the two numbers do, and why a scope can be asked for on the other
+regulator and at the lower gain, is §6; **which width** a `scope` should take
+when none is given is not settled yet, and the settle now is. A line that names
+both words of a pair is refused with a sentence of its own:
 
 ```
 {"t":"ack","cmd":"scope","ok":false,
@@ -633,12 +641,26 @@ before it is flashed: its descriptor's role byte is 3.
     before **every** sweep, because it never re-arms and otherwise comes to each
     sweep from the last point of the one before it.
 
+  **The settle has a measured default of 500 µs; the width has not.** A `scope`
+  that names no ninth number stands 500 µs on each segment's first point, and
+  `0` is how a line asks for no stand at all. The number comes off the unit at
+  Bellevue, from four NoiseScope sessions on one unit with a neighbour's carrier
+  at −33 dBm on the home channel (`tasks/phase-3.16/FOLLOWUPS.md`, *What the
+  garden said: sessions 6 to 9*). `scope 840 900 0 467 1000` with no settle read
+  its segments' first six points at −64.5, −74.5, −74.5, −78.5, −88.5 and
+  −91.5 dBm in the frames holding the carrier, and −98.5 where the floor is
+  −104.5 in the frames without it; with `max 32 500` those points read the
+  floor in both, and `max 32 2000` is no better. What it costs is sweeps a
+  second: 29.1 with none, 28.0 with 500 µs and 25.8 with 2 000, for two segments
+  at 467 kHz — which is why the number is the smaller of the two that cure it.
+  The block follows the segments at every bandwidth from 467 down to 39 kHz, so
+  it is neither a frequency nor the site. **Which width a `scope` with no width
+  takes is still open** and is decided from sessions and not here.
+
   Both are on the `scope` line so that a session on a unit can type them as
-  well as the bench. **Neither moves what a `scope` with no such number does**:
-  which pair becomes the default is decided from the bench's tables and not
-  here (`tasks/phase-3.16/FOLLOWUPS.md`). The `ack` names them when they are
-  asked for, and the `sweep` it carries counts every settle, so a wide span
-  with a long settle says outright what it will cost.
+  well as the bench. The `ack` names the settle on **every** `scope` and the
+  width when it is not 32 MHz, and the `sweep` it carries counts every settle,
+  so a wide span with a long settle says outright what it will cost.
 
   **Why a scope can be asked for on the other regulator and at the lower gain.**
   The segment's width and the settle are cures for a sweep whose *structure* is
@@ -742,24 +764,54 @@ before it is flashed: its descriptor's role byte is 3.
   `python tools/noisescope/hunt.py` is that pair of captures and more, run on a
   bench board with a generator on its antenna port (`docs/bench.md` §9).
 
-  **What to type for a wide span, until the bench has said.** A `scope` takes a
-  **segment width** and a **settle** (§5, §6), and neither has a measured value
-  yet — no board was on the bench when they were built. So the honest answer
-  today is the two candidates the captures of 23 November point at, typed beside
-  the line without them and read with `echoes.py`:
+  **What to type for a wide span.** A `scope` takes a **segment width** and a
+  **settle** (§5, §6). The settle is settled: **500 µs, and a line that names
+  nothing gets it**, measured on the unit over four sessions (§6). The width is
+  not, so the honest answer for it is still the candidate the captures of
+  23 November point at, typed beside the line without it and read with
+  `echoes.py`:
 
   ```
-  scope 779.618 959.618 0 467 0 last              # as it is asked today: six segments
-  scope 779.618 959.618 0 467 0 last 5.6 500      # 33 segments, and 500 us on each one's first point
+  scope 779.618 959.618 0 467 0 last              # as it is asked: six segments, 500 us each
+  scope 779.618 959.618 0 467 0 last 5.6          # 33 segments, the same 500 us
+  scope 779.618 959.618 0 467 0 last 32 0         # and the sweep that stands on nothing
   ```
 
   5.6 MHz because that is the interval the blocks were read to repeat at, and
-  twelve points of this span; 500 µs because it is 146 RSSI updates at 467 kHz,
-  where the plugin allows two. If the blocks go, they were the instrument; if
-  they do not, nothing has been lost but sweeps a second, and the `ack`'s
-  `sweep` says how many before the first frame arrives.
-  `tools/noisescope/lists/p3.16-02.txt` is the whole comparison — four widths,
-  six settles, both spans — as one `hunt.py` run.
+  twelve points of this span. If the blocks after a segment's first point go,
+  the width was the mend; if they do not, nothing has been lost but sweeps a
+  second, and the `ack`'s `sweep` says how many before the first frame arrives.
+  The third line is the reference the default has to be read against, and
+  `tools/noisescope/lists/garden-d.txt` is that pair as a session's program.
+  `tools/noisescope/lists/p3.16-02.txt` is the width comparison on a bench —
+  four widths, six settles, both spans — as one `hunt.py` run.
+
+  **What a wide picture cannot tell, even with the settle.** Two things are left
+  when the blocks at the segments' first points are gone, both measured on the
+  unit at Bellevue against a neighbour's carrier at −32 to −38 dBm on 869.618 MHz
+  and neither explained (`tasks/phase-3.16/FOLLOWUPS.md`, *What the garden said:
+  sessions 6 to 9*). **The floor around a strong signal reads about 35 dB under
+  it**, out to some 10 MHz either side at 467 and 373.6 kHz and about 4.4 MHz
+  either side at 117 kHz and below; it is the receiver's own selectivity as the
+  RSSI sees it and nothing typed changes it, so a raised floor that close to a
+  carrier is not the site. And **at 234 kHz and wider the same carrier shows
+  again at 816.0, 845.0, 887.7 and 912.0 MHz**, wherever the segments lie — 3 to
+  4 MHz wide and −55 to −66 dBm at 467 and 373.6 kHz, weaker at 234.3, and at
+  58.6 kHz and below only 912.0 is still there. They are not the DC-DC converter
+  (the same on the LDO), not the gain (the same with `noboost`) and not a lost
+  lock (`dev` `0000` throughout), and 816.0 and 912.0 are 25.5 and 28.5 times
+  the 32 MHz crystal. **So treat a peak at one of those four frequencies, and a
+  floor within 10 MHz of a strong signal, as the instrument until a narrow
+  `scope` or a `hist` on the frequency itself says otherwise.**
+
+  Two later sessions narrowed the second of those without closing it
+  (`tasks/phase-3.17/FOLLOWUPS.md`, *Sessions 10 and 11*): a receiver parked on
+  912.0 MHz saw nothing, and a segment that **begins** at one of the four and
+  stands the settle reads the floor there — so the far echoes are the sweep
+  program reading before the synthesizer has arrived, as the block at a
+  segment's first point is, and not the chip receiving something. Why those
+  four frequencies and not others is still not known, which is why they are
+  listed by name here and not cut out of a sweep.
 
 ### The garden's way: measuring the echoes on a unit, not on a bench
 

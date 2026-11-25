@@ -407,8 +407,12 @@ class TheSessions(HuntCase):
                              "--sessions must not reach anything that opens a port")
 
     def test_the_four_garden_lists_would_be_taken(self):
-        """The lists of tasks/phase-3.16/README.md's *The garden instead of the bench*."""
-        for letter in ("a", "b", "c", "d"):
+        """The lists of tasks/phase-3.16/README.md's *The garden instead of the bench*.
+
+        Six steps is a program's most and three of the four are at it; garden-d is five since
+        phase 3.17's task 01, which cost it a step to say `max 32 0` on its reference line.
+        """
+        for letter, steps in (("a", 6), ("b", 6), ("c", 6), ("d", 5)):
             out = io.StringIO()
             code = hunt.main(["--sessions", self._garden(letter)], bench=NoBenchIsAsked(),
                              out=out)
@@ -418,18 +422,40 @@ class TheSessions(HuntCase):
             self.assertNotIn("REFUSED", text)
             sessions = hunt.read_sessions(self._garden(letter))
             self.assertEqual(1, len(sessions))
-            self.assertEqual(6, len(sessions[0].steps), "six steps, which is a program's most")
+            self.assertEqual(steps, len(sessions[0].steps), "garden-%s" % letter)
             program = sessions[0].program().encode("utf-8")
             self.assertLessEqual(len(program), hunt.SESSION_PROGRAM_BYTES_MAX)
             for step in sessions[0].steps:
                 self.assertLessEqual(len(step.command), hunt.SESSION_COMMAND_MAX)
                 self.assertEqual(85, step.seconds, "85 seconds a step, sized from a 762-byte frame")
 
-    def test_the_list_with_nothing_to_spare_is_384_of_384(self):
-        """garden-d is the one that cannot grow by a character (the pile's FOLLOWUPS)."""
+    def test_garden_d_has_room_again_and_its_reference_line_says_max_32_0(self):
+        """garden-d was 384 bytes of 384 and is 328 since phase 3.17's task 01.
+
+        `max 32 0` is nine characters and the reference line needs them: with 500 us the default,
+        the sweep that stands on nothing is the one that has to say so. The room came from the
+        100 us step, which was never run, and from the 500 us step becoming the plain line.
+        """
         session = hunt.read_sessions(self._garden("d"))[0]
-        self.assertEqual(hunt.SESSION_PROGRAM_BYTES_MAX,
-                         len(session.program().encode("utf-8")))
+        self.assertEqual(5, len(session.steps))
+        self.assertEqual(328, len(session.program().encode("utf-8")))
+        self.assertLess(len(session.program().encode("utf-8")),
+                        hunt.SESSION_PROGRAM_BYTES_MAX)
+        commands = [step.command for step in session.steps]
+        self.assertEqual("scope 840 900 0 467 1000 max 32 0", commands[0],
+                         "the reference: no stand on either segment's first point")
+        self.assertEqual("scope 840 900 0 467 1000", commands[1],
+                         "and the same line as a session types it, which stands the default")
+        self.assertIn("scope 863 876 250 58.6 1000 max 32 0", commands)
+        for command in commands:
+            self.assertLessEqual(len(command), hunt.SESSION_COMMAND_MAX, command)
+        # The two 60 MHz lines are one plan but for the settle, which is what pairs them.
+        first = echoes.parse_scope(commands[0])
+        second = echoes.parse_scope(commands[1])
+        self.assertEqual(0, first.plan.settle_us)
+        self.assertEqual(echoes.SETTLE_DEFAULT_US, second.plan.settle_us)
+        self.assertEqual(first.plan.points, second.plan.points)
+        self.assertEqual(first.plan.segments, second.plan.segments)
 
     def test_the_lines_are_not_rewritten_to_a_frame_a_sweep(self):
         """A bench list is forced to interval 0 and `last`; a garden step keeps its own."""

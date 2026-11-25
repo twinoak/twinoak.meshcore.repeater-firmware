@@ -127,7 +127,10 @@ struct ScopeArgs {
   uint32_t interval_ms = 0;  // 0 = a frame per sweep
   ScopeAgg agg = kScopeAggMax;
   double seg_mhz = 0.0;      // 0 = kScopeSegmentMhz, the widest a segment may be
-  uint32_t settle_us = 0;    // 0 = today's arm, no stand on the segment's first point
+  // No ninth number on the line, which planScope() plans with kScopeSettleDefaultUs. A `0` typed
+  // there is a settle asked for and is none at all - the one thing this field exists to tell
+  // apart, and kScopeSettleAbsentUs is where that is decided (src/roles/scanner/Sweep.h).
+  uint32_t settle_us = kScopeSettleAbsentUs;
   ScopeRegulator reg = kScopeRegulatorBuild;  // no word = the build's regulator
   ScopeGain gain = kScopeGainAsLeft;          // no word = the gain `boost on|off` left
 };

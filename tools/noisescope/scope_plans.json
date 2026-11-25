@@ -13,7 +13,8 @@
     "makes of it. Frequencies are MHz, steps and bandwidths kHz. Add a row rather than changing",
     "one: a row is a span somebody asked a unit for.",
     "Phase 3.16's task 02 added `seg_mhz` (and `settle_us`) to a request and `seg_mhz` to a plan: the widest a segment of it may be, which is 32 for every line typed before that task. A settle changes no segment, only the time a sweep is planned to take.",
-    "Phase 3.16's task 04 added the four the garden types: a session's step is at most forty characters, so its spans are whole megahertz and not the decimals of 23 November's own line (tools/noisescope/lists/garden-a.txt)."
+    "Phase 3.16's task 04 added the four the garden types: a session's step is at most forty characters, so its spans are whole megahertz and not the decimals of 23 November's own line (tools/noisescope/lists/garden-a.txt).",
+    "Phase 3.17's task 01 made 500 us the settle a `scope` that names none gets, so every `plan` now carries `settle_us` and a request that names no settle is planned with 500. A request may still ask for `0`, which is no stand at all and is what every line typed before that task did; the two garden rows of 840 to 900 MHz are the same line the two ways."
   ],
   "plans": [
     {
@@ -31,7 +32,8 @@
         "step_khz": 28.0,
         "rbw_khz": 39.0,
         "first_mhz": 863.014,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -58,7 +60,8 @@
         "step_khz": 437.5,
         "rbw_khz": 467.0,
         "first_mhz": 863.21875,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -85,7 +88,8 @@
         "step_khz": 9.765625,
         "rbw_khz": 11.7,
         "first_mhz": 860.0048828125,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -168,7 +172,8 @@
         "step_khz": 395.5078125,
         "rbw_khz": 467.0,
         "first_mhz": 150.19775390625,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -370,7 +375,8 @@
         "step_khz": 15882.35294117647,
         "rbw_khz": 467.0,
         "first_mhz": 157.94117647058823,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -572,7 +578,8 @@
         "step_khz": 466.32124352331607,
         "rbw_khz": 467.0,
         "first_mhz": 779.8511606217617,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -634,7 +641,8 @@
         "step_khz": 233.16062176165804,
         "rbw_khz": 467.0,
         "first_mhz": 779.7345803108809,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -696,7 +704,8 @@
         "step_khz": 234.0702210663199,
         "rbw_khz": 234.3,
         "first_mhz": 779.7350351105332,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -758,7 +767,8 @@
         "step_khz": 117.03511053315995,
         "rbw_khz": 234.3,
         "first_mhz": 779.6765175552666,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -827,7 +837,8 @@
         "step_khz": 87.890625,
         "rbw_khz": 58.6,
         "first_mhz": 779.6619453125,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -910,7 +921,8 @@
         "step_khz": 52.0,
         "rbw_khz": 58.6,
         "first_mhz": 863.126,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -937,7 +949,8 @@
         "step_khz": 465.1162790697674,
         "rbw_khz": 467.0,
         "first_mhz": 839.8505581395349,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -971,7 +984,8 @@
         "step_khz": 462.6865671641791,
         "rbw_khz": 467.0,
         "first_mhz": 854.3493432835821,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -998,7 +1012,8 @@
         "step_khz": 465.1162790697674,
         "rbw_khz": 467.0,
         "first_mhz": 859.8505581395349,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -1026,7 +1041,8 @@
         "step_khz": 466.32124352331607,
         "rbw_khz": 467.0,
         "first_mhz": 779.8511606217617,
-        "seg_mhz": 11.0
+        "seg_mhz": 11.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -1167,7 +1183,8 @@
         "step_khz": 466.32124352331607,
         "rbw_khz": 467.0,
         "first_mhz": 779.8511606217617,
-        "seg_mhz": 5.6
+        "seg_mhz": 5.6,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -1419,7 +1436,8 @@
         "step_khz": 52.0,
         "rbw_khz": 58.6,
         "first_mhz": 863.144,
-        "seg_mhz": 5.5
+        "seg_mhz": 5.5,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -1460,7 +1478,8 @@
         "step_khz": 466.32124352331607,
         "rbw_khz": 467.0,
         "first_mhz": 780.2331606217616,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -1522,7 +1541,8 @@
         "step_khz": 466.32124352331607,
         "rbw_khz": 467.0,
         "first_mhz": 773.2331606217616,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
@@ -1584,7 +1604,44 @@
         "step_khz": 465.1162790697674,
         "rbw_khz": 467.0,
         "first_mhz": 840.2325581395348,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
+      },
+      "segments": [
+        {
+          "first": 0,
+          "points": 65,
+          "first_mhz": 840.2325581395348,
+          "cal_lo_mhz": 839.9990581395348,
+          "cal_hi_mhz": 870.2335
+        },
+        {
+          "first": 65,
+          "points": 64,
+          "first_mhz": 870.4651162790698,
+          "cal_lo_mhz": 870.2316162790697,
+          "cal_hi_mhz": 900.0009418604652
+        }
+      ]
+    },
+    {
+      "name": "the garden's sixty megahertz with no settle at all",
+      "about": "`scope 840 900 0 467 1000 max 32 0`: the row above with the settle asked away. The only thing that differs is the plan's `settle_us`, which is the point of the row - it is how a line says `no stand on a segment's first point` since phase 3.17's task 01 made 500 us the default",
+      "request": {
+        "f0": 840.0,
+        "f1": 900.0,
+        "points": 0,
+        "rbw_khz": 467.0,
+        "settle_us": 0
+      },
+      "plan": {
+        "points": 129,
+        "segments": 2,
+        "step_khz": 465.1162790697674,
+        "rbw_khz": 467.0,
+        "first_mhz": 840.2325581395348,
+        "seg_mhz": 32.0,
+        "settle_us": 0
       },
       "segments": [
         {
@@ -1618,7 +1675,8 @@
         "step_khz": 52.0,
         "rbw_khz": 58.6,
         "first_mhz": 863.026,
-        "seg_mhz": 32.0
+        "seg_mhz": 32.0,
+        "settle_us": 500
       },
       "segments": [
         {
